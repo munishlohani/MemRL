@@ -3,7 +3,7 @@ name = "memrl"
 version = "0.1.0"
 description = "MemRL: Self-evolving agents via runtime reinforcement learning on episodic memory"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license = {text = "MIT"}
 authors = [
     {name = "Memp Team", email = "team@memp.dev"}

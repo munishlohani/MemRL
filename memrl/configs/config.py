@@ -58,7 +58,7 @@ class EmbeddingConfig(BaseModel):
 
 
 class MemoryConfig(BaseModel):
-    """Configuration for memory system."""
+    """Configuration for the memory system and Phase 1 architecture hyperparameters."""
     
     # Strategy configuration
     build_strategy: str = Field(default="proceduralization", 
@@ -79,6 +79,109 @@ class MemoryConfig(BaseModel):
                                     description="similarity_threshold for add memory")
     memory_budget_tokens: int = Field(default=0,
                                       description="Token budget (character-level) for injected memory context. 0 means unlimited (no truncation).")
+
+    # Phase 1 architecture hyperparameters from Project.md
+    theta_delta: Optional[float] = Field(
+        default=None,
+        description="Gate 1 TD-error admission threshold for tactical skill formation.",
+    )
+    n_skill: Optional[int] = Field(
+        default=None,
+        description="Gate 2 minimum activation count for tactical node creation.",
+    )
+    theta_u: Optional[float] = Field(
+        default=None,
+        description="Gate 2 minimum mean utility threshold for tactical node creation.",
+    )
+    n_min: Optional[int] = Field(
+        default=None,
+        description="Gate 3 minimum cross-task evidence count for float-up.",
+    )
+    theta_cv: Optional[float] = Field(
+        default=None,
+        description="Gate 4 maximum coefficient of variation for float-up.",
+    )
+    theta_1: float = Field(
+        default=0.75,
+        description="Transferability cutoff for tactical float-up from d=3 to d=2.",
+    )
+    lambda_shrink: float = Field(
+        default=10.0,
+        description="Bayesian shrinkage pseudocount used in weighted-mean utility.",
+    )
+    lambda_slow: Optional[float] = Field(
+        default=None,
+        description="Base decay rate for tactical nodes at d=2.",
+    )
+    lambda_fast: Optional[float] = Field(
+        default=None,
+        description="Base decay rate for tactical nodes at d=3; defaults to 5 * lambda_slow.",
+    )
+    epsilon_decay: float = Field(
+        default=0.01,
+        description="Utility floor in the tactical decay denominator.",
+    )
+    theta_prune: Optional[float] = Field(
+        default=None,
+        description="Retention threshold for tactical node pruning.",
+    )
+    tactical_action_cap: Optional[int] = Field(
+        default=None,
+        description="Hard cap on the tactical action space per depth.",
+    )
+    alpha: float = Field(
+        default=0.1,
+        description="Tactical single-step Q-learning rate.",
+    )
+    alpha_omega: float = Field(
+        default=0.1,
+        description="Strategic option-value learning rate.",
+    )
+    gamma: float = Field(
+        default=0.95,
+        description="Discount factor shared by tactical and strategic updates.",
+    )
+    epsilon_hyst: float = Field(
+        default=0.1,
+        description="Demotion hysteresis buffer for tactical float-up/demotion.",
+    )
+    m_wait: Optional[int] = Field(
+        default=None,
+        description="Grace period in episodes after a tactical promotion.",
+    )
+    r_evidence: int = Field(
+        default=50,
+        description="Reservoir size for evidence IDs stored on a node.",
+    )
+    n_sleep: Optional[int] = Field(
+        default=None,
+        description="Sleep-consolidation trigger threshold for unabsorbed d=2 nodes.",
+    )
+    theta_absorb: Optional[float] = Field(
+        default=None,
+        description="Minimum centroid-to-scaffold similarity for sleep absorption.",
+    )
+    k_bootstrap: Optional[int] = Field(
+        default=None,
+        description="Bootstrap limit before sleep consolidation becomes the normal source of d=1 nodes.",
+    )
+
+    @property
+    def effective_lambda_fast(self) -> Optional[float]:
+        """Return lambda_fast, defaulting to 5 * lambda_slow when omitted."""
+        if self.lambda_fast is not None:
+            return self.lambda_fast
+        if self.lambda_slow is None:
+            return None
+        return 5.0 * self.lambda_slow
+
+    @property
+    def effective_k_bootstrap(self) -> Optional[int]:
+        """Return the bootstrap threshold implied by the sleep trigger."""
+        if self.k_bootstrap is not None:
+            return self.k_bootstrap
+        return self.n_sleep
+
     # MemOS configuration
     mos_config_path: str = Field(default="configs/mos_config.json",
                                 description="Path to MemOS configuration file")

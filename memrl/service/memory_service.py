@@ -5,7 +5,33 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+from pathlib import Path
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
+
+import numpy as np
+try:
+    from sqlalchemy import (
+        Boolean,
+        Column,
+        Float,
+        Integer,
+        JSON,
+        LargeBinary,
+        MetaData,
+        String,
+        Table,
+        Text,
+        create_engine,
+        delete,
+        select,
+    )
+    from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
+    _HAS_SQLALCHEMY = True
+except Exception:  # pragma: no cover - optional runtime dependency
+    Boolean = Column = Float = Integer = JSON = LargeBinary = MetaData = String = Table = Text = Any  # type: ignore[assignment]
+    create_engine = delete = select = sqlite_insert = None  # type: ignore[assignment]
+    _HAS_SQLALCHEMY = False
 
 from ..memory.graph import SkillGraph
 from ..memory.skill_node import SkillNode
@@ -13,23 +39,17 @@ from ..memory.skill_representation import SkillRepresentation
 from .retrievers import SkillSimilarityRetriever
 
 if TYPE_CHECKING:
+    from sqlalchemy.engine import Engine
     from ..configs.config import MemoryConfig
     from ..providers.base import BaseEmbedder
 else:
+    Engine = Any  # type: ignore[assignment]
     MemoryConfig = Any  # type: ignore[assignment]
     BaseEmbedder = Any  # type: ignore[assignment]
 
 
 class MemoryService:
-    """Small service wrapper around the skill graph and content index.
-
-    The legacy MemOS-oriented parameters and storage plumbing were removed on
-    purpose. This service keeps the research-facing objects only:
-    - `MemoryConfig` for hyperparameters
-    - `SkillGraph` for structure
-    - SQLite `skill_representation` for the write-once content/embedding payloads
-    - `SkillSimilarityRetriever` for similarity search
-    """
+    """Small service wrapper around the skill graph and content index."""
 
     def __init__(
         self,
@@ -44,6 +64,7 @@ class MemoryService:
         self.graph = graph or SkillGraph(
             lambda_slow=memory_config.lambda_slow,
             lambda_fast=memory_config.effective_lambda_fast,
+            lambda_shrink=getattr(memory_config, "lambda_shrink", 10.0),
             epsilon=memory_config.epsilon_decay,
         )
         resolved_db_path = db_path or getattr(
@@ -51,162 +72,104 @@ class MemoryService:
             "skill_db_path",
             "results/memrl/skill_memory.sqlite",
         )
-        self.db_path = resolved_db_path
+        self.db_path = str(resolved_db_path)
         db_dir = os.path.dirname(os.path.abspath(self.db_path))
         if db_dir:
             os.makedirs(db_dir, exist_ok=True)
-        self._db = sqlite3.connect(self.db_path)
-        self._db.row_factory = sqlite3.Row
-        self._init_schema()
+
+        self._use_sqlalchemy = _HAS_SQLALCHEMY
+        self._db = None
+        self._engine = None
+        self._metadata = None
+        self.skill_representation_table = None
+        self.skill_graph_state_table = None
+
+        if self._use_sqlalchemy:
+            self._engine = create_engine(
+                f"sqlite+pysqlite:///{Path(self.db_path).as_posix()}",
+                future=True,
+                connect_args={"check_same_thread": False},
+            )
+            self._metadata = MetaData()
+            self.skill_representation_table = Table(
+                "skill_representation",
+                self._metadata,
+                Column("node_id", String, primary_key=True),
+                Column("content", Text, nullable=False),
+                Column("embedding", LargeBinary, nullable=False),
+            )
+            self.skill_graph_state_table = Table(
+                "skill_graph_state",
+                self._metadata,
+                Column("node_id", String, primary_key=True),
+                Column("depth", Integer, nullable=False),
+                Column("parent_id", String, nullable=True),
+                Column("task_type_primary", String, nullable=False),
+                Column("t_create", Integer, nullable=False),
+                Column("last_accessed_step", Integer, nullable=False),
+                Column("decay_rate", Float, nullable=False),
+                Column("absorbed_by_sleep", Boolean, nullable=False, default=False),
+                Column("Q", JSON, nullable=False),
+                Column("n", JSON, nullable=False),
+                Column("Q_omega", JSON, nullable=False),
+                Column("n_omega", JSON, nullable=False),
+                Column("secondary_parents", JSON, nullable=False),
+                Column("evidence_ids", JSON, nullable=False),
+            )
+            self._metadata.create_all(self._engine)
+        else:
+            self._db = sqlite3.connect(self.db_path)
+            self._db.row_factory = sqlite3.Row
+            self._init_sqlite_schema()
+
         if self.graph.nodes:
             self._sync_graph_state_to_db()
         else:
             self._load_graph_state()
         self.retriever = SkillSimilarityRetriever()
 
-    def _init_schema(self) -> None:
-        with self._db:
-            self._db.execute(
-                """
-                CREATE TABLE IF NOT EXISTS skill_representation (
-                    node_id TEXT PRIMARY KEY,
-                    content TEXT NOT NULL,
-                    embedding BLOB NOT NULL
-                )
-                """
-            )
-            self._db.execute(
-                """
-                CREATE TABLE IF NOT EXISTS skill_graph_state (
-                    node_id TEXT PRIMARY KEY,
-                    depth INTEGER NOT NULL,
-                    parent_id TEXT,
-                    task_type_primary TEXT NOT NULL,
-                    t_create INTEGER NOT NULL,
-                    last_accessed_step INTEGER NOT NULL,
-                    decay_rate REAL NOT NULL,
-                    absorbed_by_sleep INTEGER NOT NULL,
-                    Q TEXT NOT NULL,
-                    n TEXT NOT NULL,
-                    Q_omega TEXT NOT NULL,
-                    n_omega TEXT NOT NULL,
-                    secondary_parents TEXT NOT NULL,
-                    evidence_ids TEXT NOT NULL
-                )
-                """
-            )
-            self._db.execute(
-                "CREATE INDEX IF NOT EXISTS idx_skill_graph_parent ON skill_graph_state(parent_id)"
-            )
-            self._db.execute(
-                "CREATE INDEX IF NOT EXISTS idx_skill_graph_depth ON skill_graph_state(depth)"
-            )
-            self._db.execute(
-                "CREATE INDEX IF NOT EXISTS idx_skill_graph_task_depth ON skill_graph_state(task_type_primary, depth)"
-            )
-
     @staticmethod
     def _serialize_embedding(embedding: List[float]) -> bytes:
-        payload = [float(value) for value in embedding]
-        return json.dumps(payload).encode("utf-8")
-
-    @staticmethod
-    def _serialize_json(value: Any) -> str:
-        return json.dumps(value, separators=(",", ":"))
+        array = np.asarray([float(value) for value in embedding], dtype=np.float32)
+        return array.tobytes()
 
     @staticmethod
     def _deserialize_embedding(blob: Any) -> List[float]:
         if blob is None:
             return []
-        if isinstance(blob, bytes):
-            text = blob.decode("utf-8")
-        elif isinstance(blob, str):
-            text = blob
-        else:
-            text = str(blob)
+        if isinstance(blob, memoryview):
+            blob = blob.tobytes()
+        if isinstance(blob, (bytes, bytearray)):
+            if len(blob) % np.dtype(np.float32).itemsize == 0:
+                return np.frombuffer(blob, dtype=np.float32).astype(float).tolist()
+            try:
+                text = bytes(blob).decode("utf-8")
+                data = json.loads(text)
+                return [float(value) for value in data]
+            except Exception:
+                return []
+        if isinstance(blob, str):
+            try:
+                data = json.loads(blob)
+                return [float(value) for value in data]
+            except Exception:
+                return []
         try:
-            data = json.loads(text)
+            data = json.loads(str(blob))
             return [float(value) for value in data]
         except Exception:
             return []
 
-    def _upsert_representation(self, representation: SkillRepresentation) -> None:
-        with self._db:
-            self._db.execute(
-                """
-                INSERT INTO skill_representation (node_id, content, embedding)
-                VALUES (?, ?, ?)
-                ON CONFLICT(node_id) DO UPDATE SET
-                    content = excluded.content,
-                    embedding = excluded.embedding
-                """,
-                (
-                    representation.id,
-                    representation.content,
-                    self._serialize_embedding(representation.embedding),
-                ),
-            )
-
-    def _upsert_graph_state(self, node: SkillNode) -> None:
-        with self._db:
-            self._db.execute(
-                """
-                INSERT INTO skill_graph_state (
-                    node_id, depth, parent_id, task_type_primary, t_create,
-                    last_accessed_step, decay_rate, absorbed_by_sleep, Q, n,
-                    Q_omega, n_omega, secondary_parents, evidence_ids
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(node_id) DO UPDATE SET
-                    depth = excluded.depth,
-                    parent_id = excluded.parent_id,
-                    task_type_primary = excluded.task_type_primary,
-                    t_create = excluded.t_create,
-                    last_accessed_step = excluded.last_accessed_step,
-                    decay_rate = excluded.decay_rate,
-                    absorbed_by_sleep = excluded.absorbed_by_sleep,
-                    Q = excluded.Q,
-                    n = excluded.n,
-                    Q_omega = excluded.Q_omega,
-                    n_omega = excluded.n_omega,
-                    secondary_parents = excluded.secondary_parents,
-                    evidence_ids = excluded.evidence_ids
-                """,
-                (
-                    node.id,
-                    node.depth,
-                    node.parent_id,
-                    node.task_type_primary,
-                    node.t_create,
-                    node.last_accessed_step,
-                    node.decay_rate,
-                    1 if node.absorbed_by_sleep else 0,
-                    self._serialize_json(node.Q),
-                    self._serialize_json(node.n),
-                    self._serialize_json(node.Q_omega),
-                    self._serialize_json(node.n_omega),
-                    self._serialize_json(node.secondary_parents),
-                    self._serialize_json(node.evidence_ids),
-                ),
-            )
-
-    def _fetch_representation(self, node_id: str) -> SkillRepresentation:
-        row = self._db.execute(
-            "SELECT node_id, content, embedding FROM skill_representation WHERE node_id = ?",
-            (node_id,),
-        ).fetchone()
-        if row is None:
-            raise KeyError(node_id)
-        return SkillRepresentation(
-            id=row["node_id"],
-            content=row["content"],
-            embedding=self._deserialize_embedding(row["embedding"]),
-        )
+    @staticmethod
+    def _serialize_json(value: Any) -> Any:
+        return value
 
     @staticmethod
     def _deserialize_json(blob: Any, default: Any) -> Any:
         if blob is None:
             return default
+        if isinstance(blob, (list, dict)):
+            return blob
         if isinstance(blob, bytes):
             text = blob.decode("utf-8")
         else:
@@ -216,17 +179,82 @@ class MemoryService:
         except Exception:
             return default
 
+    def _upsert_representation(self, representation: SkillRepresentation) -> None:
+        stmt = sqlite_insert(self.skill_representation_table).values(
+            node_id=representation.id,
+            content=representation.content,
+            embedding=self._serialize_embedding(representation.embedding),
+        )
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["node_id"],
+            set_={
+                "content": stmt.excluded.content,
+                "embedding": stmt.excluded.embedding,
+            },
+        )
+        with self._engine.begin() as conn:
+            conn.execute(stmt)
+
+    def _upsert_graph_state(self, node: SkillNode) -> None:
+        stmt = sqlite_insert(self.skill_graph_state_table).values(
+            node_id=node.id,
+            depth=node.depth,
+            parent_id=node.parent_id,
+            task_type_primary=node.task_type_primary,
+            t_create=node.t_create,
+            last_accessed_step=node.last_accessed_step,
+            decay_rate=node.decay_rate,
+            absorbed_by_sleep=bool(node.absorbed_by_sleep),
+            Q=self._serialize_json(node.Q),
+            n=self._serialize_json(node.n),
+            Q_omega=self._serialize_json(node.Q_omega),
+            n_omega=self._serialize_json(node.n_omega),
+            secondary_parents=self._serialize_json(node.secondary_parents),
+            evidence_ids=self._serialize_json(node.evidence_ids),
+        )
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["node_id"],
+            set_={
+                "depth": stmt.excluded.depth,
+                "parent_id": stmt.excluded.parent_id,
+                "task_type_primary": stmt.excluded.task_type_primary,
+                "t_create": stmt.excluded.t_create,
+                "last_accessed_step": stmt.excluded.last_accessed_step,
+                "decay_rate": stmt.excluded.decay_rate,
+                "absorbed_by_sleep": stmt.excluded.absorbed_by_sleep,
+                "Q": stmt.excluded.Q,
+                "n": stmt.excluded.n,
+                "Q_omega": stmt.excluded.Q_omega,
+                "n_omega": stmt.excluded.n_omega,
+                "secondary_parents": stmt.excluded.secondary_parents,
+                "evidence_ids": stmt.excluded.evidence_ids,
+            },
+        )
+        with self._engine.begin() as conn:
+            conn.execute(stmt)
+
+    def _fetch_representation(self, node_id: str) -> SkillRepresentation:
+        stmt = select(
+            self.skill_representation_table.c.node_id,
+            self.skill_representation_table.c.content,
+            self.skill_representation_table.c.embedding,
+        ).where(self.skill_representation_table.c.node_id == node_id)
+        with self._engine.begin() as conn:
+            row = conn.execute(stmt).mappings().first()
+        if row is None:
+            raise KeyError(node_id)
+        return SkillRepresentation(
+            id=row["node_id"],
+            content=row["content"],
+            embedding=self._deserialize_embedding(row["embedding"]),
+        )
+
     def _fetch_graph_state(self, node_id: str) -> SkillNode:
-        row = self._db.execute(
-            """
-            SELECT node_id, depth, parent_id, task_type_primary, t_create,
-                   last_accessed_step, decay_rate, absorbed_by_sleep, Q, n,
-                   Q_omega, n_omega, secondary_parents, evidence_ids
-            FROM skill_graph_state
-            WHERE node_id = ?
-            """,
-            (node_id,),
-        ).fetchone()
+        stmt = select(self.skill_graph_state_table).where(
+            self.skill_graph_state_table.c.node_id == node_id
+        )
+        with self._engine.begin() as conn:
+            row = conn.execute(stmt).mappings().first()
         if row is None:
             raise KeyError(node_id)
         return SkillNode(
@@ -235,7 +263,9 @@ class MemoryService:
             t_create=int(row["t_create"]),
             depth=int(row["depth"]),
             parent_id=row["parent_id"],
-            secondary_parents=list(self._deserialize_json(row["secondary_parents"], [])),
+            secondary_parents=list(
+                self._deserialize_json(row["secondary_parents"], [])
+            ),
             last_accessed_step=int(row["last_accessed_step"]),
             Q=dict(self._deserialize_json(row["Q"], {})),
             n=dict(self._deserialize_json(row["n"], {})),
@@ -247,13 +277,13 @@ class MemoryService:
         )
 
     def _load_graph_state(self) -> None:
-        rows = self._db.execute(
-            """
-            SELECT node_id
-            FROM skill_graph_state
-            ORDER BY depth ASC, t_create ASC, node_id ASC
-            """
-        ).fetchall()
+        stmt = select(self.skill_graph_state_table.c.node_id).order_by(
+            self.skill_graph_state_table.c.depth.asc(),
+            self.skill_graph_state_table.c.t_create.asc(),
+            self.skill_graph_state_table.c.node_id.asc(),
+        )
+        with self._engine.begin() as conn:
+            rows = conn.execute(stmt).mappings().all()
         if not rows:
             return
 
@@ -290,33 +320,33 @@ class MemoryService:
         limit: Optional[int] = None,
     ) -> List[SkillRepresentation]:
         if node_ids is None:
-            clauses: List[str] = []
-            params: List[Any] = []
+            stmt = select(self.skill_graph_state_table.c.node_id)
             if depth is not None:
-                clauses.append("depth = ?")
-                params.append(depth)
+                stmt = stmt.where(self.skill_graph_state_table.c.depth == depth)
             if task_type_primary is not None:
-                clauses.append("task_type_primary = ?")
-                params.append(task_type_primary)
-
-            where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-            limit_sql = f" LIMIT {int(limit)}" if limit is not None else ""
-            query = (
-                "SELECT node_id FROM skill_graph_state "
-                f"{where} "
-                "ORDER BY depth ASC, t_create ASC, node_id ASC"
-                f"{limit_sql}"
+                stmt = stmt.where(
+                    self.skill_graph_state_table.c.task_type_primary == task_type_primary
+                )
+            stmt = stmt.order_by(
+                self.skill_graph_state_table.c.depth.asc(),
+                self.skill_graph_state_table.c.t_create.asc(),
+                self.skill_graph_state_table.c.node_id.asc(),
             )
-            rows = self._db.execute(query, tuple(params)).fetchall()
+            if limit is not None:
+                stmt = stmt.limit(int(limit))
+            with self._engine.begin() as conn:
+                rows = conn.execute(stmt).mappings().all()
             node_ids = [row["node_id"] for row in rows]
         if not node_ids:
             return []
-        placeholders = ",".join("?" for _ in node_ids)
-        query = (
-            "SELECT node_id, content, embedding FROM skill_representation "
-            f"WHERE node_id IN ({placeholders})"
-        )
-        rows = self._db.execute(query, tuple(node_ids)).fetchall()
+
+        stmt = select(
+            self.skill_representation_table.c.node_id,
+            self.skill_representation_table.c.content,
+            self.skill_representation_table.c.embedding,
+        ).where(self.skill_representation_table.c.node_id.in_(node_ids))
+        with self._engine.begin() as conn:
+            rows = conn.execute(stmt).mappings().all()
         by_id = {
             row["node_id"]: SkillRepresentation(
                 id=row["node_id"],
@@ -373,19 +403,29 @@ class MemoryService:
                 )
             embedding = self.embedding_provider.embed_single(content)
 
+        if depth == 1:
+            node = SkillNode.create_strategic(
+                id=id,
+                task_type_primary=task_type_primary,
+                t_create=t_create,
+                parent_id=parent_id,
+                evidence_ids=list(evidence_ids or []),
+            )
+        elif depth == 3:
+            node = SkillNode.create_tactical(
+                id=id,
+                task_type_primary=task_type_primary,
+                t_create=t_create,
+                parent_id=parent_id,
+                evidence_ids=list(evidence_ids or []),
+            )
+        else:
+            raise ValueError("depth must be 1 or 3")
+
         representation = SkillRepresentation(
             id=id,
             content=content,
             embedding=embedding,
-        )
-
-        node = SkillNode(
-            id=id,
-            task_type_primary=task_type_primary,
-            t_create=t_create,
-            depth=depth,
-            parent_id=parent_id,
-            evidence_ids=list(evidence_ids or []),
         )
         return self.add_node(node, representation, parent_id=parent_id)
 
@@ -422,7 +462,10 @@ class MemoryService:
     ) -> List[Dict[str, Any]]:
         """Similarity search over stored skill nodes."""
         return self.retriever.search(
-            self._fetch_representations(depth=depth, task_type_primary=task_type_primary),
+            self._fetch_representations(
+                depth=depth,
+                task_type_primary=task_type_primary,
+            ),
             query_embedding,
             top_k=top_k,
             depth=None,
@@ -485,46 +528,42 @@ class MemoryService:
 
     def close(self) -> None:
         """Close the SQLite connection."""
-        self._db.close()
+        self._engine.dispose()
 
     def remove_node(self, node_id: str) -> None:
         """Remove a node and its subtree from the graph and SQLite table."""
         removed_ids = self.graph.remove(node_id)
-        with self._db:
+        with self._engine.begin() as conn:
             for rid in removed_ids:
-                self._db.execute(
-                    "DELETE FROM skill_representation WHERE node_id = ?",
-                    (rid,),
+                conn.execute(
+                    delete(self.skill_representation_table).where(
+                        self.skill_representation_table.c.node_id == rid
+                    )
                 )
-                self._db.execute(
-                    "DELETE FROM skill_graph_state WHERE node_id = ?",
-                    (rid,),
+                conn.execute(
+                    delete(self.skill_graph_state_table).where(
+                        self.skill_graph_state_table.c.node_id == rid
+                    )
                 )
 
     def refresh_content_db(self) -> None:
         """Synchronize both SQLite tables with the graph."""
         valid_ids = list(self.graph.nodes)
-        if not valid_ids:
-            with self._db:
-                self._db.execute("DELETE FROM skill_representation")
-                self._db.execute("DELETE FROM skill_graph_state")
-            return
+        with self._engine.begin() as conn:
+            if not valid_ids:
+                conn.execute(delete(self.skill_representation_table))
+                conn.execute(delete(self.skill_graph_state_table))
+                return
 
-        placeholders = ",".join("?" for _ in valid_ids)
-        with self._db:
-            self._db.execute(
-                f"""
-                DELETE FROM skill_representation
-                WHERE node_id NOT IN ({placeholders})
-                """,
-                tuple(valid_ids),
+            conn.execute(
+                delete(self.skill_representation_table).where(
+                    ~self.skill_representation_table.c.node_id.in_(valid_ids)
+                )
             )
-            self._db.execute(
-                f"""
-                DELETE FROM skill_graph_state
-                WHERE node_id NOT IN ({placeholders})
-                """,
-                tuple(valid_ids),
+            conn.execute(
+                delete(self.skill_graph_state_table).where(
+                    ~self.skill_graph_state_table.c.node_id.in_(valid_ids)
+                )
             )
 
     def retrieve_query(

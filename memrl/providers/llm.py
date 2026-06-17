@@ -304,9 +304,9 @@ class OpenAILLM(BaseLLM):
     def extract_keywords(self, text: str, max_keywords: int = 8) -> List[str]:
         """
         Extract keywords from text using LLM.
-        
-        This method uses the LLM to identify key concepts that can be used
-        for the AveFact retrieval strategy.
+
+        This helper is kept as a generic keyword extraction utility for
+        any component that needs concise concept tokens.
         
         Args:
             text: Input text to analyze

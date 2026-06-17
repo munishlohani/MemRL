@@ -41,10 +41,10 @@ class BaseLLM(ABC):
     @abstractmethod 
     def extract_keywords(self, text: str, max_keywords: int = 8) -> List[str]:
         """
-        Extract key concepts/keywords from text for AveFact strategy.
-        
-        This method is crucial for the AveFact retrieval strategy, which uses
-        keyword-based vector averaging for memory retrieval.
+        Extract key concepts or keywords from text.
+
+        Implementations may use an LLM, heuristics, or any other local
+        keyword extraction approach.
         
         Args:
             text: Input text to extract keywords from

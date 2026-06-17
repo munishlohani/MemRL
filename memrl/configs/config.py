@@ -70,7 +70,11 @@ class MemoryConfig(BaseModel):
     
     # Memory parameters
     k_retrieve: int = Field(default=1, gt=-1, description="Number of memories to retrieve")
-    max_keywords: int = Field(default=8, gt=0, description="Maximum keywords for AveFact")
+    max_keywords: int = Field(
+        default=8,
+        gt=0,
+        description="Maximum keywords for optional keyword extraction helpers",
+    )
     confidence_threshold: float = Field(default=0.0, ge=0, le=1, 
                                        description="Minimum similarity threshold")
     memory_confidence: float = Field(default=100.0, ge=0, le=100,
@@ -182,9 +186,6 @@ class MemoryConfig(BaseModel):
             return self.k_bootstrap
         return self.n_sleep
 
-    # MemOS configuration
-    mos_config_path: str = Field(default="configs/mos_config.json",
-                                description="Path to MemOS configuration file")
     user_id: str = Field(default="memp_user", description="User ID for memory management")
     skill_db_path: str = Field(
         default="results/memrl/skill_memory.sqlite",
@@ -452,7 +453,6 @@ class MempConfig(BaseModel):
             FileNotFoundError: If required paths don't exist
         """
         paths_to_check = [
-            (self.memory.mos_config_path, "MemOS config file"),
             (self.environment.alfworld_config_path, "ALFWorld config file"),
         ]
         

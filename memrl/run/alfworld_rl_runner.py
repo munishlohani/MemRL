@@ -24,7 +24,7 @@ from memrl.envs.alfworld_env import AlfWorldEnv
 from memrl.agent.memp_agent import MempAgent
 from memrl.agent.history import EpisodeHistory
 from memrl.service.memory_service import MemoryService
-from memrl.service.value_driven import RLConfig
+from memrl.configs.config import RLConfig
 from alfworld.agents.environment.alfred_tw_env import (  # type: ignore
     AlfredTWEnv,
     AlfredDemangler,

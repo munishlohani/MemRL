@@ -361,10 +361,10 @@ class MockEmbedder(BaseEmbedder):
 
 class AverageEmbedder:
     """
-    Utility class for averaging embeddings (used in AveFact strategy).
-    
-    This is not a full embedder but a helper for the AveFact retrieval strategy
-    which averages keyword embeddings to create query vectors.
+    Utility class for averaging embeddings.
+
+    This is not a full embedder but a small helper for any workflow that
+    needs to merge multiple vectors into a single representation.
     """
     
     @staticmethod
@@ -415,4 +415,3 @@ class AverageEmbedder:
         total_weight = np.sum(weights_array)
         
         return (weighted_sum / total_weight).tolist()
-

@@ -25,7 +25,7 @@ import contextlib
 
 from .base_runner import BaseRunner
 from memrl.service.memory_service import MemoryService
-from memrl.service.value_driven import RLConfig
+from memrl.configs.config import RLConfig
 from memrl.providers.llm import OpenAILLM
 from memrl.providers.embedding import OpenAIEmbedder
 from memrl.utils.task_id import extract_task_id

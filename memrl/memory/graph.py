@@ -14,6 +14,7 @@ class SkillGraph:
 
     lambda_slow: Optional[float] = None
     lambda_fast: Optional[float] = None
+    lambda_shrink: float = 10.0
     epsilon: float = 0.01
     root_id: str = "root"
     current_step: int = 0
@@ -68,6 +69,7 @@ class SkillGraph:
         node.recompute_decay_rate(
             lambda_d=self.lambda_for_depth(node.depth),
             epsilon=self.epsilon,
+            lambda_shrink=self.lambda_shrink,
         )
 
     def reparent(self, node_or_id: Union[SkillNode, str], new_parent_id: str) -> None:

@@ -97,13 +97,18 @@ class SkillNode:
         """Total tactical retrievals across all task types."""
         return sum(self.n.values())
 
-    def recompute_decay_rate(self, lambda_d: float, epsilon: float) -> None:
+    def recompute_decay_rate(
+        self,
+        lambda_d: float,
+        epsilon: float,
+        lambda_shrink: float,
+    ) -> None:
         """Recompute the cached tactical decay rate."""
         if self.depth == 1:
             self.decay_rate = 0.0
             return
 
-        q_bar_w = self._weighted_mean_utility(lambda_shrink=10.0)
+        q_bar_w = self._weighted_mean_utility(lambda_shrink=lambda_shrink)
         self.decay_rate = lambda_d / (q_bar_w + epsilon)
 
     def _weighted_mean_utility(self, lambda_shrink: float = 10.0) -> float:

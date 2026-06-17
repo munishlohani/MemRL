@@ -1,8 +1,8 @@
 """
 Strategy definitions for the Memp procedural memory system.
 
-This module defines the three types of strategies that can be combined
-to create the 9 different strategy combinations of the Memp algorithm.
+This module defines the strategy families that can be combined
+to create the supported strategy combinations of the Memp algorithm.
 """
 
 from enum import Enum
@@ -39,9 +39,6 @@ class RetrieveStrategy(Enum):
     
     QUERY = "query"
     """Use original task description vector as retrieval key."""
-    
-    AVEFACT = "avefact"
-    """Use average of keyword vectors as retrieval key (recommended main method)."""
 
 
 class UpdateStrategy(Enum):
@@ -173,7 +170,7 @@ class StrategyConfiguration:
 MAIN_STRATEGY = StrategyConfiguration.main_combination()
 BASELINE_STRATEGY = StrategyConfiguration.baseline_combination()
 
-# All possible strategy combinations (27 total)
+# All possible strategy combinations.
 ALL_STRATEGIES = [
     StrategyConfiguration(build, retrieve, update)
     for build in BuildStrategy

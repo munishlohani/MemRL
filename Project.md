@@ -23,7 +23,7 @@ This section provides a compact map of every component so the coding agent can i
 **Key data structures:**
 - `SkillNode` — the primary data object. One per skill, at any depth. Defined in §6.3. Strategic ($d=1$) and tactical ($d=2/3$) nodes share the same class but populate different fields (see §6.3 notes).
 - `CandidateRecord` — a lightweight pre-graph accumulator for **tactical** skill formation only. Lives in `candidate_pool`. Defined in §4.2.
-- `SkillGraph` — a tree over `SkillNode` objects. Owns the `children_index`. Defined in §6.1.
+- `SkillGraph` — a tree over `SkillNode` objects, backed by SQLite (§6.1.1). Children are derived via query on `parent_id`, not a maintained index. Defined in §6.1.
 - `EpisodicMemoryBank` — separate store of raw experiences. Linked from nodes via `evidence_ids`. Not part of the graph.
 
 **Execution order per episode:**
@@ -38,7 +38,7 @@ This section provides a compact map of every component so the coding agent can i
 
 **Critical invariants the coding agent must preserve:**
 - `decay_rate` on a tactical node always equals `λ_d / (Q̄_w + ε)`. Recompute after every Q-update to an active node. Strategic ($d=1$) nodes always have `decay_rate = 0.0`.
-- `children_index` lives on the graph object, not the node. Node stores only `parent_id`.
+- There is no separate `children_index` to maintain. `parent_id` is the single source of truth for tree structure; children are derived via a query (`WHERE parent_id = ?`), never stored redundantly.
 - `total_accessed` = `sum(self.n.values())`. Expose as a `@property`, never store separately.
 - All new **tactical** nodes enter at `depth = 3`. No exceptions. Strategic nodes are only ever created by sleep consolidation, directly at `depth = 1`.
 - The pruning loop uses `node.decay_rate` directly — no `t_k` dependency in pruning. Never prunes $d=1$ nodes.
@@ -264,7 +264,7 @@ Admitted experiences accumulate in a pre-graph `candidate_pool`. Each `Candidate
 - `task_type` — task type at first admission (for provenance)
 - `last_seen_episode` — for pool-level decay (candidates that go cold are evicted)
 
-> **Implementation note:** `CandidateRecord` is a lightweight dataclass, not a `SkillNode`. It has no embedding and no graph position. It gets garbage-collected if `last_seen_episode` exceeds a staleness threshold without passing Gate 2.
+> **Implementation note:** `CandidateRecord` is a lightweight dataclass, not a `SkillNode`. It has no `skill_representation` row and no graph position. It gets garbage-collected if `last_seen_episode` exceeds a staleness threshold without passing Gate 2.
 
 ### 4.3 Gate 2 — Utility Pre-Filter (Node Creation)
 
@@ -276,7 +276,7 @@ $$n_i > N_{\text{skill}} \quad \text{AND} \quad \bar{Q}_i > \theta_U$$
 
 Upon passing, a `SkillNode` is instantiated at `depth = 3` and inserted into the graph. The `CandidateRecord` is removed from the pool.
 
-> **Implementation note:** Node creation requires LLM skill extraction to populate `content` and an embedding model call to populate `embedding`. Both are I/O operations — batch them at end-of-episode, not inline during the step loop.
+> **Implementation note:** Node creation requires LLM skill extraction to populate `content` and an embedding model call to populate `embedding`, both written as a row into `skill_representation` (§6.1.1) keyed by the new node's `id` — not as fields on `SkillNode` itself. Both are I/O operations — batch them at end-of-episode, not inline during the step loop.
 
 ---
 
@@ -332,9 +332,58 @@ $$\mathcal{G} = (V,\ E)$$
 | Parent constraint | Each node has exactly **one parent** (tree, not DAG, in Phase 1) |
 | Cross-edges | None in Phase 1 |
 
-`children_index: dict[str, set[str]]` is owned by the **graph object**, not by individual nodes. Nodes store only `parent_id`. This prevents bidirectional pointer inconsistency during reparenting — the graph object performs atomic updates to `children_index` and `node.parent_id` together.
+There is no separately-maintained `children_index` structure in Phase 1. Children are derived on demand via a query filtering on `parent_id` (§6.1.1) — a single source of truth for tree structure, eliminating the bidirectional-pointer consistency problem entirely rather than just isolating it to one owner.
 
 **Phase 2 extension:** `secondary_parents: list[str]` is reserved on each node (empty in Phase 1) for DAG promotion at $d = 2$.
+
+### 6.1.1 Storage Backend
+
+**Decision: SQLite via SQLAlchemy, consistent with the MemRL base template.** MemRL's reference implementation persists its memory through `MemoryService`, backed by SQLite (via SQLAlchemy), not a specialized vector database. This architecture follows the same precedent rather than introducing a separate storage technology (e.g. Qdrant) that the base template doesn't use. At Phase 1's scale — hundreds of strategic nodes, thousands of tactical nodes, single-process training — a full vector database is infrastructure the system does not need; SQLite with a BLOB or JSON column for embeddings is sufficient and keeps the storage stack uniform with MemRL.
+
+**Two tables, not three separate Python structures:**
+
+```sql
+-- Representation: write-once at creation, read-many for similarity.
+-- content and embedding are created together and never diverge, so
+-- they live in one table rather than being split across structures.
+CREATE TABLE skill_representation (
+    node_id     TEXT PRIMARY KEY,
+    content     TEXT NOT NULL,
+    embedding   BLOB NOT NULL    -- serialized via numpy.ndarray.tobytes();
+                                  -- deserialize with np.frombuffer(...)
+);
+
+-- Graph state: mutated every episode. Q/n/Q_omega/n_omega/evidence_ids
+-- are JSON-serialized dicts/lists in TEXT columns — adequate at Phase 1
+-- scale; revisit only if profiling shows JSON (de)serialization cost
+-- matters.
+CREATE TABLE skill_graph_state (
+    node_id             TEXT PRIMARY KEY,
+    depth               INTEGER NOT NULL,
+    parent_id           TEXT,                  -- NULL only for virtual root
+    task_type_primary   TEXT,
+    t_create            INTEGER,
+    last_accessed_step  INTEGER,
+    decay_rate          REAL DEFAULT 0.0,
+    absorbed_by_sleep   INTEGER DEFAULT 0,      -- boolean as 0/1; meaningful at d=2 only
+    Q                   TEXT,                   -- JSON dict[str, float]; tactical only
+    n                   TEXT,                   -- JSON dict[str, int]; tactical only
+    Q_omega             TEXT,                   -- JSON dict[str, float]; strategic only
+    n_omega             TEXT,                   -- JSON dict[str, int]; strategic only
+    evidence_ids        TEXT                    -- JSON list[str], reservoir-capped at R
+);
+
+CREATE INDEX idx_parent ON skill_graph_state(parent_id);
+CREATE INDEX idx_depth  ON skill_graph_state(depth);
+```
+
+`children(node_id)` is then `SELECT node_id FROM skill_graph_state WHERE parent_id = ?` — a cheap indexed query, not a maintained structure. Reparenting (float-up §6.4, sleep consolidation §6.6.2) becomes a single-column `UPDATE`, with no second structure to keep in sync and therefore no race between two writers disagreeing about graph shape.
+
+**Working-set protocol (avoids per-step SQL round-trips):** at episode start, load the candidate `SkillNode` objects relevant to the episode's task type into an in-memory Python working set (plain dataclass instances, as in §6.3). All step-level mutation — TD updates, `last_accessed_step`, `decay_rate` recomputation — happens against this in-memory working set during the episode, exactly as the §10 pseudocode already describes. At episode end, flush the working set back to `skill_graph_state` in one batch write, alongside Gate 2 formation, graph maintenance, and the sleep-trigger check. SQLite is the durable store and the natural unit for forking state between ablation runs (copy the file); the in-memory working set is scratch space for the duration of one episode. This mirrors the RAM/disk tiering MemGPT uses for context, applied here to graph state instead of conversation history.
+
+**Embeddings are computed once, not at inference/retrieval time.** `content` is write-once per node (never mutated after creation), so its embedding is a deterministic function of a fixed input — recomputing it on every retrieval, float-up comparison, or consolidation pass would mean repeatedly recomputing a constant via an external embedding-model call, which is the single most expensive operation available on the hot path. Embed once at node creation (Gate 2 tactical formation, or scaffold synthesis in sleep consolidation), write the vector into `skill_representation`, and read it back for every subsequent similarity comparison. The only embedding that is genuinely computed at inference time is the query embedding $e_q$ for whatever context is currently being searched against — that's necessarily fresh every call and was never a candidate for caching.
+
+**Why not a vector index (FAISS/ScaNN) instead of brute-force cosine in SQL/Python:** at Phase 1's node counts, a brute-force cosine pass over all rows returned by a depth/task-type-filtered SQL query (e.g. all $d=3$ nodes tagged with the current $t_k$) is fast enough and avoids adding a second index structure that must be kept consistent with `skill_representation`. Revisit only if the live tactical population grows past the point where this is measurably a bottleneck — not preemptively.
 
 ### 6.2 Depth Assignment
 
@@ -360,21 +409,16 @@ Before the tactical layer has produced enough material to consolidate, $d=1$ is 
 
 `SkillNode` is shared across both tiers. A given instance populates **either** the tactical fields (`Q`, `n`) **or** the strategic fields (`Q_omega`, `n_omega`), determined by `depth` — never both. This is enforced by convention, not by separate classes, to keep the graph homogeneous for traversal; the coding agent must not write to the tactical dict on a $d=1$ node or vice versa.
 
+`SkillNode` corresponds to a row in `skill_graph_state` (§6.1.1) and represents mutable algorithmic state — the part of a skill that changes every episode. `content` and `embedding` are deliberately **not** fields on this dataclass: they are write-once representation, live in the separate `skill_representation` table, and are looked up by `id` only when a similarity comparison is actually needed (retrieval, float-up parent-finding, sleep-consolidation clustering). This keeps the in-memory working set loaded each episode (§6.1.1) lightweight — Q-updates and decay recomputation never need to carry a vector around — and keeps representation and state independently cacheable/serializable.
+
 ```python
 from dataclasses import dataclass, field
-import numpy as np
 
 @dataclass
 class SkillNode:
     # --- Identity ---
-    id: str                          # UUID, assigned at creation
-
-    # --- Skill Representation ---
-    content: str                     # LLM-generated procedural summary (tactical) or
-                                     # synthesized strategic framing (strategic, from sleep
-                                     # consolidation — see §6.6)
-    embedding: np.ndarray            # Dense vector; used for retrieval ranking and
-                                     # parent-finding on float-up / cluster absorption
+    id: str                          # UUID, assigned at creation. Joins to
+                                     # skill_representation.node_id for (content, embedding).
 
     # --- Provenance ---
     task_type_primary: str           # Task type t_k under which skill was first formed.
@@ -386,6 +430,8 @@ class SkillNode:
     depth: int                       # Current depth ∈ {1, 2, 3}. Tactical nodes always
                                      # 3 at creation; strategic nodes always 1 at creation.
     parent_id: str | None            # UUID of parent node. None only for virtual root.
+                                     # Single source of truth for tree structure — children
+                                     # are derived via query (§6.1.1), never separately stored.
     secondary_parents: list[str] = field(default_factory=list)
                                      # Reserved for Phase 2 DAG extension. Empty in Phase 1.
 
@@ -481,14 +527,15 @@ class SkillNode:
 
 | Field | Notes |
 |---|---|
-| `content` | Open: raw reasoning trace vs. distilled procedural summary (tactical). For strategic nodes, content is LLM-synthesized from a cluster of $d=2$ skill descriptions during sleep consolidation (§6.6.2) — a different prompt than tactical extraction. |
-| `embedding` | Open: frozen LLM encoder vs. fine-tuned. Populated at node creation. For strategic nodes created by consolidation, may be the cluster centroid embedding or a fresh embedding of the synthesized content — pick one and document it; do not leave ambiguous. |
+| `id` | Primary key in both `skill_graph_state` and `skill_representation` (§6.1.1). Joins the two tables — this is the only link between mutable state and write-once representation. |
 | `decay_rate` | Tactical: always equals `λ_d / (Q̄_w + ε)`. Strategic: always `0.0`. Never compute retention inline without calling `recompute_decay_rate()` first. |
 | `Q` vs `Q_omega` | Mutually exclusive by depth. A coding-time assertion (`assert depth == 1 or not Q_omega`, `assert depth != 1 or not Q`) is recommended to catch accidental cross-writes early. |
 | `evidence_ids` | Reservoir-sampled. Implement `add_evidence(eid)` with reservoir sampling at cap $R$. $R$ is a hyperparameter (suggested starting: 50). |
 | `absorbed_by_sleep` | Only meaningful on $d=2$ nodes. Drives the unabsorbed-count sleep trigger (§6.6.1) — do not repurpose for any other bookkeeping. |
 | `secondary_parents` | Do not read or write in Phase 1. Initialize empty. |
 | `total_accessed` | A `@property`. Do not add a stored counter — it will diverge. |
+
+**`content` and `embedding` (in `skill_representation`, not on `SkillNode`):** `content` is open: raw reasoning trace vs. distilled procedural summary, for tactical nodes. For strategic nodes, `content` is LLM-synthesized from a cluster of $d=2$ skill descriptions during sleep consolidation (§6.6.2) — a different prompt than tactical extraction. `embedding` is open on encoder choice (frozen vs. fine-tuned); computed once at node creation and written to `skill_representation`, never recomputed on read (§6.1.1). For strategic nodes created by consolidation, the embedding may be the cluster centroid or a fresh embedding of the synthesized content — pick one and document it, do not leave ambiguous.
 
 ### 6.4 Float-Up Mechanism (Gates 3 and 4) — $d=3 \to d=2$ ONLY
 
@@ -515,18 +562,19 @@ def maybe_float_up(node: SkillNode, graph: SkillGraph, K: int,
     T_hat = compute_transferability(node)    # Q̄_w² / (Q̄_w² + Var_w)
 
     if T_hat >= theta_1:
-        # Reparent: find highest cosine-similarity node at depth 1... NO — at depth 2.
-        # Float-up never targets d=1 directly. The new parent is the best-matching
-        # existing d=2 node, or a freshly created d=2 "bucket" node if no suitable
-        # d=2 parent exists yet (bootstrap case for the d=2 layer itself).
-        new_parent = graph.find_best_parent(node, target_depth=2)
-        graph.reparent(node, new_parent)     # atomic: updates children_index + parent_id
+        # Reparent to the best-matching existing d=2 node, or a freshly created
+        # d=2 "bucket" node if no suitable d=2 parent exists yet (bootstrap case
+        # for the d=2 layer itself). Float-up never targets d=1 directly.
+        node_embedding = graph.get_embedding(node.id)              # skill_representation lookup
+        new_parent = graph.find_best_parent(node_embedding, target_depth=2)
+        graph.reparent(node, new_parent)     # single UPDATE on parent_id; no second
+                                              # structure to keep in sync (§6.1.1)
         node.depth = 2
         node.absorbed_by_sleep = False       # newly arrived at d=2; eligible for next sleep event
         node.recompute_decay_rate(graph.lambda_d[node.depth], graph.epsilon)
 ```
 
-`find_best_parent` uses cosine similarity over `embedding`. This is one of two structural uses of semantic similarity for graph rewiring — the other is cluster-centroid-to-scaffold matching during sleep consolidation (§6.6.2). Retrieval similarity (§9) is a separate, unrelated use for ranking only.
+`find_best_parent` uses cosine similarity over embeddings fetched from `skill_representation` (§6.1.1), never recomputed. This is one of two structural uses of semantic similarity for graph rewiring — the other is cluster-centroid-to-scaffold matching during sleep consolidation (§6.6.2). Retrieval similarity (§9) is a separate, unrelated use for ranking only.
 
 **Important:** a node arriving at $d=2$ via float-up starts with `absorbed_by_sleep = False`. This is what makes it visible to the sleep-trigger counter (§6.6.1) and eligible for the next consolidation event.
 
@@ -566,17 +614,20 @@ def sleep_consolidation(graph: SkillGraph, theta_absorb: float) -> None:
     if not unabsorbed:
         return
 
-    # Step 1: cluster the unabsorbed set only (never re-cluster already-absorbed nodes)
-    clusters = cluster_embeddings([n.embedding for n in unabsorbed])  # e.g. HDBSCAN
+    # Step 1: cluster the unabsorbed set only (never re-cluster already-absorbed nodes).
+    # Embeddings are fetched from skill_representation by id, never recomputed (§6.1.1).
+    embeddings = {n.id: graph.get_embedding(n.id) for n in unabsorbed}
+    clusters = cluster_embeddings(unabsorbed, embeddings)  # e.g. HDBSCAN
 
     for cluster in clusters:
-        centroid = mean_embedding(cluster)
+        centroid = mean_embedding([embeddings[n.id] for n in cluster])
 
         # Step 2: check absorption against EXISTING d=1 scaffolds
         existing_d1 = graph.nodes_at_depth(1)
         if existing_d1:
+            d1_embeddings = {p.id: graph.get_embedding(p.id) for p in existing_d1}
             best_parent, similarity = max(
-                ((p, cosine_sim(centroid, p.embedding)) for p in existing_d1),
+                ((p, cosine_sim(centroid, d1_embeddings[p.id])) for p in existing_d1),
                 key=lambda x: x[1]
             )
         else:
@@ -585,17 +636,19 @@ def sleep_consolidation(graph: SkillGraph, theta_absorb: float) -> None:
         if similarity >= theta_absorb:
             # Absorb: reparent the whole cluster under the existing scaffold
             for node in cluster:
-                graph.reparent(node, best_parent)   # children_index updated atomically
+                graph.reparent(node, best_parent)   # single UPDATE on parent_id (§6.1.1)
                 node.absorbed_by_sleep = True
-            # Optionally update best_parent.embedding as a running average — pick one
-            # policy and document it; do not leave ambiguous.
+            # Optionally update best_parent's stored embedding (skill_representation row)
+            # as a running average — pick one policy and document it; do not leave ambiguous.
         else:
             # Spawn: synthesize a new d=1 scaffold from this cluster
-            content = llm_synthesize_scaffold([n.content for n in cluster])  # new prompt,
-                                                                              # distinct from
-                                                                              # tactical extraction
+            cluster_contents = [graph.get_content(n.id) for n in cluster]
+            content = llm_synthesize_scaffold(cluster_contents)  # new prompt, distinct
+                                                                    # from tactical extraction
+            new_id = new_uuid()
+            graph.write_representation(new_id, content, centroid)  # skill_representation row
             new_scaffold = SkillNode(
-                id=new_uuid(), content=content, embedding=centroid,
+                id=new_id,
                 task_type_primary=majority_task_type(cluster),
                 t_create=graph.current_step, depth=1, parent_id=graph.root.id,
                 Q_omega={}, n_omega={}, decay_rate=0.0,
@@ -606,7 +659,7 @@ def sleep_consolidation(graph: SkillGraph, theta_absorb: float) -> None:
                 node.absorbed_by_sleep = True
 ```
 
-**Ordering constraint:** sleep consolidation must run strictly after all per-node float-up resolution in a given maintenance pass (§10), and the two must never run concurrently against the same node set. Float-up writes `parent_id`/`children_index` for $d=3 \to d=2$ transitions; consolidation writes them for $d=2 \to d=1$ transitions. Sequencing float-up first, then checking the sleep trigger, then running consolidation if triggered, avoids the node being mid-evaluation in one process while reassigned by the other.
+**Ordering constraint:** sleep consolidation must run strictly after all per-node float-up resolution in a given maintenance pass (§10), and the two must never run concurrently against the same node set. Float-up writes `parent_id` for $d=3 \to d=2$ transitions; consolidation writes it for $d=2 \to d=1$ transitions. Since `parent_id` is the single source of truth (§6.1.1, no separate index to desynchronize), the remaining risk is purely temporal — two processes updating the same row in overlapping passes — which sequencing float-up first, then checking the sleep trigger, then running consolidation if triggered, avoids entirely.
 
 **New hyperparameter:** $\theta_{\text{absorb}}$ — minimum cluster-centroid-to-scaffold cosine similarity for absorption rather than spawning a new scaffold. Added to §12.
 
@@ -857,10 +910,12 @@ for each episode:
 |---|---|---|
 | Retrieval technique | **Open** | ANN (FAISS/ScaNN) vs. BM25 vs. hybrid; shortlist method TBD |
 | Content representation | **Open** | Raw trace vs. distilled procedural summary vs. structured template |
-| Embedding strategy | **Open** | Frozen LLM encoder vs. fine-tuned vs. task-conditioned |
+| Embedding strategy | **Open** | Frozen LLM encoder vs. fine-tuned vs. task-conditioned. Storage backend (SQLite, §6.1.1) is decided independent of this choice. |
+| Clustering method (sleep consolidation) | **Open** | HDBSCAN vs. k-means vs. agglomerative for clustering unabsorbed $d=2$ embeddings (§6.6.2); minimum cluster size and distance metric also unset |
 | Task type definition $t_k$ | **Open** | Benchmark-derived, clustered, or hierarchical taxonomy |
 | Skill extraction method | **Open** | LLM prompt + output format for procedural skill summary |
 | Evidence reservoir size $R$ | **Open** | Suggested starting: 50 per node |
+| Scaffold embedding policy on absorb | **Open** | Whether `skill_representation.embedding` for an existing $d=1$ scaffold updates as a running average when new clusters absorb into it, or stays fixed at creation (§6.6.2) |
 | DAG extension | **Deferred Phase 2** | Multi-parent nodes at $d = 2$ |
 | Affect/personalization graph | **Deferred Phase 2** | Volatile user-preference memory |
 | Double Q-learning | **Deferred Phase 2** | Overestimation bias correction |
@@ -903,11 +958,13 @@ $K$ in $N_{\min} = 5K$ is not a hyperparameter — it is the observed count of d
 
 | Aspect | MemRL | This Work |
 |---|---|---|
-| Memory structure | Flat bank | Hierarchical skill graph (depth encodes transferability) |
-| Skill formation | All experiences stored | Two-gate pipeline (novelty + utility pre-filter) |
-| Retention | Recency / retrieval frequency | Ebbinghaus decay modulated by global weighted-mean utility |
-| Generalization | None (flat retrieval) | Transferability scoring via confidence-weighted variance (Gates 3–4) |
-| Graph structure | None | Unified tree; float-up/demotion with hysteresis |
-| Action space | Unbounded | Hard cap $|A| \leq N$ per depth + soft decay pruning |
-| Utility signal | Global scalar | Per-task-type Q-values via TD learning |
+| Memory structure | Flat bank | Hierarchical skill graph (depth encodes transferability and role) |
+| Storage backend | SQLite via SQLAlchemy (`MemoryService`) | Same backend, two tables: write-once `skill_representation` (content, embedding) and mutable `skill_graph_state` (Q, depth, parent_id, decay_rate, ...) — see §6.1.1 |
+| Skill formation | All experiences stored | Two-gate pipeline (novelty + utility pre-filter) for tactical skills; separate sleep-consolidation pipeline for strategic scaffolds |
+| Retention | Recency / retrieval frequency | Ebbinghaus decay modulated by global weighted-mean utility (tactical layer only; strategic scaffolds never decay) |
+| Generalization | None (flat retrieval) | Transferability scoring via confidence-weighted variance (Gates 3–4), governing float-up $d{=}3 \to d{=}2$ only |
+| Graph structure | None | Unified tree; float-up/demotion with hysteresis ($d{=}2 \leftrightarrow d{=}3$); sleep consolidation for $d{=}1$ formation |
+| Action space | Flat, single-tier | Two-tier: strategic option (once per episode, $d=1$) + tactical action (every step, $d{\in}\{2,3\}$) |
+| Action space bound | Unbounded | Hard cap $|A| \leq N$ per tactical depth + soft decay pruning |
+| Utility signal | Global scalar | Per-task-type Q-values via TD learning (tactical); separate per-task-type option-value $Q^\Omega$ via full-episode-return credit (strategic) |
 | Decay salience | N/A | $\bar{Q}_{i,w}$ — global, task-agnostic; consistent with unified graph |

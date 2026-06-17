@@ -1,9 +1,13 @@
 # Agent.md
+
 ## 1. Think Before Coding
 
 **Don't assume. Don't hide confusion. Surface tradeoffs.**
 
 Before implementing:
+- If `project.md` or similar infomration exists, re-read it.
+- Reflect the changes made in the project.
+- Ground your implementation based on the project information provided - ask if unsure.
 - State your assumptions explicitly. If uncertain, ask.
 - If multiple interpretations exist, present them - don't pick silently.
 - If a simpler approach exists, say so. Push back when warranted.

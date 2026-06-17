@@ -64,7 +64,7 @@ class MemoryConfig(BaseModel):
     build_strategy: str = Field(default="proceduralization", 
                                description="Build strategy: trajectory, script, proceduralization")
     retrieve_strategy: str = Field(default="query",
-                                  description="Retrieve strategy: random, query, avefact") 
+                                  description="Retrieve strategy: random, query") 
     update_strategy: str = Field(default="adjustment",
                                 description="Update strategy: vanilla, validation, adjustment")
     
@@ -186,6 +186,10 @@ class MemoryConfig(BaseModel):
     mos_config_path: str = Field(default="configs/mos_config.json",
                                 description="Path to MemOS configuration file")
     user_id: str = Field(default="memp_user", description="User ID for memory management")
+    skill_db_path: str = Field(
+        default="results/memrl/skill_memory.sqlite",
+        description="Path to the persistent SQLite database for skill representation.",
+    )
     sim_norm_mean: float = Field(default=0, description="Mean for similarity normalization")
     sim_norm_std: float = Field(default=0, description="Standard deviation for similarity normalization")
 

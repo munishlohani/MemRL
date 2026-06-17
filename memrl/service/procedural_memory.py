@@ -46,8 +46,6 @@ class MempMetadata:
     script_content: Optional[str] = None      # Generated script content
     
     # Retrieval and similarity
-    avefact_keywords: Optional[List[str]] = None
-    avefact_vector: Optional[List[float]] = None
     query_vector: Optional[List[float]] = None
     
     # Performance and quality metrics
@@ -89,7 +87,12 @@ class MempMetadata:
         if 'build_strategy' in data:
             data['build_strategy'] = BuildStrategy(data['build_strategy'])
         if 'retrieve_strategy' in data:
-            data['retrieve_strategy'] = RetrieveStrategy(data['retrieve_strategy'])
+            retrieve_strategy = data['retrieve_strategy']
+            if retrieve_strategy not in {item.value for item in RetrieveStrategy}:
+                retrieve_strategy = RetrieveStrategy.QUERY.value
+            else:
+                data['retrieve_strategy'] = RetrieveStrategy(data['retrieve_strategy'])
+            data['retrieve_strategy'] = RetrieveStrategy(retrieve_strategy)
         if 'update_strategy' in data:
             data['update_strategy'] = UpdateStrategy(data['update_strategy'])
             
@@ -160,9 +163,7 @@ class ProceduralMemory:
         ]
         
         # Add strategy-specific tags
-        if self.memp_metadata.retrieve_strategy == RetrieveStrategy.AVEFACT:
-            tags.append("avefact")
-        elif self.memp_metadata.retrieve_strategy == RetrieveStrategy.QUERY:
+        if self.memp_metadata.retrieve_strategy == RetrieveStrategy.QUERY:
             tags.append("query")
         elif self.memp_metadata.retrieve_strategy == RetrieveStrategy.RANDOM:
             tags.append("random")

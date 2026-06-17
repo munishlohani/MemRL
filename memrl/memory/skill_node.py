@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
-import numpy as np
 
 
 @dataclass
@@ -13,25 +12,21 @@ class SkillNode:
     """Unified node type used by both tactical and strategic tiers."""
 
     id: str
-    content: str
-    embedding: object
     task_type_primary: str
     t_create: int
     depth: int
     parent_id: Optional[str]
-    secondary_parents: List[str] = field(default_factory=list)
+    secondary_parents: list[str] = field(default_factory=list)
     last_accessed_step: int = 0
     Q: Dict[str, float] = field(default_factory=dict)
     n: Dict[str, int] = field(default_factory=dict)
     Q_omega: Dict[str, float] = field(default_factory=dict)
     n_omega: Dict[str, int] = field(default_factory=dict)
     decay_rate: float = 0.0
-    evidence_ids: List[str] = field(default_factory=list)
+    evidence_ids: list[str] = field(default_factory=list)
     absorbed_by_sleep: bool = False
 
     def __post_init__(self) -> None:
-        self.embedding = np.asarray(self.embedding, dtype=float)
-
         if self.depth not in {1, 2, 3}:
             raise ValueError("SkillNode depth must be 1, 2, or 3.")
 
@@ -52,18 +47,14 @@ class SkillNode:
         cls,
         *,
         id: str,
-        content: str,
-        embedding: object,
         task_type_primary: str,
         t_create: int,
         parent_id: Optional[str],
         last_accessed_step: int = 0,
-        evidence_ids: Optional[List[str]] = None,
+        evidence_ids: Optional[list[str]] = None,
     ) -> "SkillNode":
         return cls(
             id=id,
-            content=content,
-            embedding=embedding,
             task_type_primary=task_type_primary,
             t_create=t_create,
             depth=3,
@@ -77,18 +68,14 @@ class SkillNode:
         cls,
         *,
         id: str,
-        content: str,
-        embedding: object,
         task_type_primary: str,
         t_create: int,
         parent_id: Optional[str],
         last_accessed_step: int = 0,
-        evidence_ids: Optional[List[str]] = None,
+        evidence_ids: Optional[list[str]] = None,
     ) -> "SkillNode":
         return cls(
             id=id,
-            content=content,
-            embedding=embedding,
             task_type_primary=task_type_primary,
             t_create=t_create,
             depth=1,
@@ -103,7 +90,7 @@ class SkillNode:
 
     @property
     def is_tactical(self) -> bool:
-        return not {self.depth==1}
+        return self.depth in {2, 3}
 
     @property
     def total_accessed(self) -> int:

@@ -43,6 +43,20 @@ class SkillGraph:
     def nodes_at_depth(self, depth: int) -> List[SkillNode]:
         return [node for node in self.nodes.values() if node.depth == depth]
 
+    def node_count(self, depth: Optional[int] = None) -> int:
+        """Count nodes globally or within a specific depth."""
+        if depth is None:
+            return len(self.nodes)
+        return sum(1 for node in self.nodes.values() if node.depth == depth)
+
+    def unabsorbed_tactical_count(self) -> int:
+        """Count tactical d=2 nodes that have not yet been absorbed by sleep."""
+        return sum(
+            1
+            for node in self.nodes.values()
+            if node.depth == 2 and not node.absorbed_by_sleep
+        )
+
     def child_ids(self, parent_id: str) -> Set[str]:
         return {
             node.id

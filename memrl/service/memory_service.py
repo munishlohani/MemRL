@@ -4,34 +4,26 @@ from __future__ import annotations
 
 import json
 import os
-import sqlite3
 from pathlib import Path
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 import numpy as np
-try:
-    from sqlalchemy import (
-        Boolean,
-        Column,
-        Float,
-        Integer,
-        JSON,
-        LargeBinary,
-        MetaData,
-        String,
-        Table,
-        Text,
-        create_engine,
-        delete,
-        select,
-    )
-    from sqlalchemy.dialects.sqlite import insert as sqlite_insert
-
-    _HAS_SQLALCHEMY = True
-except Exception:  # pragma: no cover - optional runtime dependency
-    Boolean = Column = Float = Integer = JSON = LargeBinary = MetaData = String = Table = Text = Any  # type: ignore[assignment]
-    create_engine = delete = select = sqlite_insert = None  # type: ignore[assignment]
-    _HAS_SQLALCHEMY = False
+from sqlalchemy import (
+    Boolean,
+    Column,
+    Float,
+    Integer,
+    JSON,
+    LargeBinary,
+    MetaData,
+    String,
+    Table,
+    Text,
+    create_engine,
+    delete,
+    select,
+)
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from ..memory.graph import SkillGraph
 from ..memory.skill_node import SkillNode
@@ -77,50 +69,43 @@ class MemoryService:
         if db_dir:
             os.makedirs(db_dir, exist_ok=True)
 
-        self._use_sqlalchemy = _HAS_SQLALCHEMY
-        self._db = None
         self._engine = None
         self._metadata = None
         self.skill_representation_table = None
         self.skill_graph_state_table = None
 
-        if self._use_sqlalchemy:
-            self._engine = create_engine(
-                f"sqlite+pysqlite:///{Path(self.db_path).as_posix()}",
-                future=True,
-                connect_args={"check_same_thread": False},
-            )
-            self._metadata = MetaData()
-            self.skill_representation_table = Table(
-                "skill_representation",
-                self._metadata,
-                Column("node_id", String, primary_key=True),
-                Column("content", Text, nullable=False),
-                Column("embedding", LargeBinary, nullable=False),
-            )
-            self.skill_graph_state_table = Table(
-                "skill_graph_state",
-                self._metadata,
-                Column("node_id", String, primary_key=True),
-                Column("depth", Integer, nullable=False),
-                Column("parent_id", String, nullable=True),
-                Column("task_type_primary", String, nullable=False),
-                Column("t_create", Integer, nullable=False),
-                Column("last_accessed_step", Integer, nullable=False),
-                Column("decay_rate", Float, nullable=False),
-                Column("absorbed_by_sleep", Boolean, nullable=False, default=False),
-                Column("Q", JSON, nullable=False),
-                Column("n", JSON, nullable=False),
-                Column("Q_omega", JSON, nullable=False),
-                Column("n_omega", JSON, nullable=False),
-                Column("secondary_parents", JSON, nullable=False),
-                Column("evidence_ids", JSON, nullable=False),
-            )
-            self._metadata.create_all(self._engine)
-        else:
-            self._db = sqlite3.connect(self.db_path)
-            self._db.row_factory = sqlite3.Row
-            self._init_sqlite_schema()
+        self._engine = create_engine(
+            f"sqlite+pysqlite:///{Path(self.db_path).as_posix()}",
+            future=True,
+            connect_args={"check_same_thread": False},
+        )
+        self._metadata = MetaData()
+        self.skill_representation_table = Table(
+            "skill_representation",
+            self._metadata,
+            Column("node_id", String, primary_key=True),
+            Column("content", Text, nullable=False),
+            Column("embedding", LargeBinary, nullable=False),
+        )
+        self.skill_graph_state_table = Table(
+            "skill_graph_state",
+            self._metadata,
+            Column("node_id", String, primary_key=True),
+            Column("depth", Integer, nullable=False),
+            Column("parent_id", String, nullable=True),
+            Column("task_type_primary", String, nullable=False),
+            Column("t_create", Integer, nullable=False),
+            Column("last_accessed_step", Integer, nullable=False),
+            Column("decay_rate", Float, nullable=False),
+            Column("absorbed_by_sleep", Boolean, nullable=False, default=False),
+            Column("Q", JSON, nullable=False),
+            Column("n", JSON, nullable=False),
+            Column("Q_omega", JSON, nullable=False),
+            Column("n_omega", JSON, nullable=False),
+            Column("secondary_parents", JSON, nullable=False),
+            Column("evidence_ids", JSON, nullable=False),
+        )
+        self._metadata.create_all(self._engine)
 
         if self.graph.nodes:
             self._sync_graph_state_to_db()
@@ -525,6 +510,39 @@ class MemoryService:
         if best is None:
             return None
         return self.graph.get(best.id)
+
+    def transferability_score(self, node_id: str) -> float:
+        """Compute the float-up transferability score for a tactical node."""
+        node = self.get_node(node_id)
+        return node.transferability_score(
+            lambda_shrink=getattr(self.memory_config, "lambda_shrink", 10.0)
+        )
+
+    def should_float_up(self, node_id: str) -> bool:
+        """Check whether a tactical node qualifies for d=3 -> d=2 promotion."""
+        theta_1 = getattr(self.memory_config, "theta_1", 0.75)
+        theta_cv = getattr(self.memory_config, "theta_cv", None)
+        n_min = getattr(self.memory_config, "n_min", None)
+        node = self.get_node(node_id)
+        if theta_cv is None or n_min is None:
+            return False
+        return node.should_float_up(
+            n_min=int(n_min),
+            theta_cv=float(theta_cv),
+            theta_1=float(theta_1),
+            lambda_shrink=getattr(self.memory_config, "lambda_shrink", 10.0),
+        )
+
+    def sleep_consolidation_count(self) -> int:
+        """Return the active count used to decide whether sleep consolidation fires."""
+        return self.graph.unabsorbed_tactical_count()
+
+    def should_sleep_consolidate(self) -> bool:
+        """Check whether the current graph should trigger sleep consolidation."""
+        threshold = getattr(self.memory_config, "n_sleep", None)
+        if threshold is None:
+            return False
+        return self.sleep_consolidation_count() >= int(threshold)
 
     def close(self) -> None:
         """Close the SQLite connection."""

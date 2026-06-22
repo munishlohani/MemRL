@@ -128,3 +128,59 @@ class SkillNode:
         if weight_sum == 0.0:
             return 0.0
         return weighted_sum / weight_sum
+
+    def _weighted_utility_variance(self, lambda_shrink: float = 10.0) -> float:
+        """Confidence-weighted variance over tactical Q values."""
+        if not self.Q:
+            return 0.0
+
+        q_bar_w = self._weighted_mean_utility(lambda_shrink=lambda_shrink)
+        weighted_sum = 0.0
+        weight_sum = 0.0
+
+        for task_type, q_value in self.Q.items():
+            count = self.n.get(task_type, 0)
+            weight = count / (count + lambda_shrink)
+            diff = q_value - q_bar_w
+            weighted_sum += weight * diff * diff
+            weight_sum += weight
+
+        if weight_sum == 0.0:
+            return 0.0
+        return weighted_sum / weight_sum
+
+    def coefficient_of_variation(self, lambda_shrink: float = 10.0) -> float:
+        """Compute the weighted coefficient of variation used for float-up gating."""
+        q_bar_w = self._weighted_mean_utility(lambda_shrink=lambda_shrink)
+        if q_bar_w == 0.0:
+            return 0.0
+        variance = self._weighted_utility_variance(lambda_shrink=lambda_shrink)
+        return (variance ** 0.5) / abs(q_bar_w)
+
+    def transferability_score(self, lambda_shrink: float = 10.0) -> float:
+        """Compute the tactical transferability score used for float-up."""
+        if self.depth != 3 or not self.Q:
+            return 0.0
+
+        q_bar_w = self._weighted_mean_utility(lambda_shrink=lambda_shrink)
+        variance = self._weighted_utility_variance(lambda_shrink=lambda_shrink)
+        denominator = (q_bar_w * q_bar_w) + variance
+        if denominator <= 0.0:
+            return 0.0
+        return (q_bar_w * q_bar_w) / denominator
+
+    def should_float_up(
+        self,
+        n_min: int,
+        theta_cv: float,
+        theta_1: float,
+        lambda_shrink: float = 10.0,
+    ) -> bool:
+        """Check whether a tactical node qualifies for d=3 -> d=2 float-up."""
+        if self.depth != 3:
+            return False
+        if self.total_accessed < n_min:
+            return False
+        if self.coefficient_of_variation(lambda_shrink=lambda_shrink) >= theta_cv:
+            return False
+        return self.transferability_score(lambda_shrink) >= theta_1

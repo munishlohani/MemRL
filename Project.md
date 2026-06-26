@@ -760,7 +760,6 @@ for each episode:
 | Causal credit assignment | **Known gap** | Recency-weighted failure credit is causally imprecise for multi-step chains; learned credit model deferred to Phase 2 |
 | Task-dynamic normalization of Q for transfer | **Known gap** | $\bar{Q}_{i,w}$ conflates task-dynamic dissimilarity with skill specificity; normalization deferred to Phase 2 |
 | Learned formation policy $\pi_{\text{form}}$ | **Deferred Phase 2** | Replaces TD pre-filter with off-policy learned classifier |
-| Transferability scoring + float-up | **Deferred Phase 2** | $\hat{T}$, Gates 3–4, depth differentiation within tactical layer |
 | Affect/personalization graph | **Deferred Phase 2** | Volatile user-preference memory |
 | Double Q-learning | **Deferred Phase 2** | Overestimation bias correction |
 | Memory-quality reward bonus | **Deferred Phase 2** | $r_t^{\text{mem}} = Q_i(t_k) - \bar{Q}(t_k)$ |

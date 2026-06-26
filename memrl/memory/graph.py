@@ -12,27 +12,21 @@ from .skill_node import SkillNode
 class SkillGraph:
     """Unified hierarchical graph for tactical skills and strategic scaffolds."""
 
-    lambda_slow: Optional[float] = None
-    lambda_fast: Optional[float] = None
+    lambda_base: Optional[float] = None
     lambda_shrink: float = 10.0
     epsilon: float = 0.01
     root_id: str = "root"
     current_step: int = 0
     nodes: Dict[str, SkillNode] = field(default_factory=dict)
 
-    @property
-    def lambda_d(self) -> Dict[int, float]:
-        """Depth-indexed base decay rates."""
-        slow = float(self.lambda_slow) if self.lambda_slow is not None else 0.0
-        fast = (
-            float(self.lambda_fast)
-            if self.lambda_fast is not None
-            else 5.0 * slow
-        )
-        return {1: 0.0, 2: slow, 3: fast}
-
     def lambda_for_depth(self, depth: int) -> float:
-        return self.lambda_d.get(depth, 0.0)
+        if depth == 1:
+            return 0.0
+        if depth == 2:
+            if self.lambda_base is None:
+                raise ValueError("SkillGraph.lambda_base must be set for tactical nodes.")
+            return float(self.lambda_base)
+        raise ValueError("SkillGraph only supports layers 1 and 2.")
 
     def has_node(self, node_id: str) -> bool:
         return node_id in self.nodes
@@ -50,11 +44,11 @@ class SkillGraph:
         return sum(1 for node in self.nodes.values() if node.depth == depth)
 
     def unabsorbed_tactical_count(self) -> int:
-        """Count tactical d=2 nodes that have not yet been absorbed by sleep."""
+        """Count tactical nodes that have not yet been consolidated by sleep."""
         return sum(
             1
             for node in self.nodes.values()
-            if node.depth == 2 and not node.absorbed_by_sleep
+            if node.is_tactical and not node.consolidated
         )
 
     def child_ids(self, parent_id: str) -> Set[str]:
@@ -81,7 +75,7 @@ class SkillGraph:
     def refresh_decay_rate(self, node: SkillNode) -> None:
         """Update the cached decay rate for a node."""
         node.recompute_decay_rate(
-            lambda_d=self.lambda_for_depth(node.depth),
+            lambda_base=self.lambda_for_depth(node.depth),
             epsilon=self.epsilon,
             lambda_shrink=self.lambda_shrink,
         )
@@ -97,8 +91,15 @@ class SkillGraph:
 
         node.parent_id = new_parent_id
 
-    def remove(self, node_or_id: Union[SkillNode, str]) -> List[str]:
+    def remove(
+        self,
+        node_or_id: Union[SkillNode, str],
+        *,
+        allow_strategic: bool = False,
+    ) -> List[str]:
         node = self._resolve_node(node_or_id)
+        if node.depth == 1 and not allow_strategic:
+            raise ValueError("Strategic nodes may only be removed by the LLM.")
         removed: List[str] = []
         self._remove_subtree(node.id, removed)
         return removed

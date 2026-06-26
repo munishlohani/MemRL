@@ -24,8 +24,7 @@ def main() -> None:
     with TemporaryDirectory() as tmpdir:
         db_path = str(Path(tmpdir) / "skill_memory.sqlite")
         config = SimpleNamespace(
-            lambda_slow=0.1,
-            effective_lambda_fast=0.5,
+            lambda_base=0.1,
             epsilon_decay=0.01,
             skill_db_path=db_path,
         )
@@ -34,17 +33,17 @@ def main() -> None:
         first.add_node_from_text(
             id="node-root",
             content="scan room",
-            task_type_primary="alfworld",
+            task_type_dominant="alfworld",
             t_create=1,
-            depth=3,
+            depth=2,
             embedding=[1.0, 1.0],
         )
         first.add_node_from_text(
             id="node-leaf",
             content="pick apple",
-            task_type_primary="alfworld",
+            task_type_dominant="alfworld",
             t_create=2,
-            depth=3,
+            depth=2,
             parent_id="node-root",
             embedding=[4.0, 5.0],
         )

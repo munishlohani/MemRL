@@ -1,4 +1,4 @@
-"""Memory graph primitives for the updated MemRL design."""
+"""Memory graph primitives """
 
 from .graph import SkillGraph
 from .skill_representation import SkillRepresentation

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 import numpy as np
 from sqlalchemy import (
@@ -54,8 +54,7 @@ class MemoryService:
         self.memory_config = memory_config
         self.embedding_provider = embedding_provider
         self.graph = graph or SkillGraph(
-            lambda_slow=memory_config.lambda_slow,
-            lambda_fast=memory_config.effective_lambda_fast,
+            lambda_base=memory_config.lambda_base,
             lambda_shrink=getattr(memory_config, "lambda_shrink", 10.0),
             epsilon=memory_config.epsilon_decay,
         )
@@ -93,11 +92,11 @@ class MemoryService:
             Column("node_id", String, primary_key=True),
             Column("depth", Integer, nullable=False),
             Column("parent_id", String, nullable=True),
-            Column("task_type_primary", String, nullable=False),
+            Column("task_type_dominant", String, nullable=False),
             Column("t_create", Integer, nullable=False),
             Column("last_accessed_step", Integer, nullable=False),
             Column("decay_rate", Float, nullable=False),
-            Column("absorbed_by_sleep", Boolean, nullable=False, default=False),
+            Column("consolidated", Boolean, nullable=False, default=False),
             Column("Q", JSON, nullable=False),
             Column("n", JSON, nullable=False),
             Column("Q_omega", JSON, nullable=False),
@@ -185,11 +184,11 @@ class MemoryService:
             node_id=node.id,
             depth=node.depth,
             parent_id=node.parent_id,
-            task_type_primary=node.task_type_primary,
+            task_type_dominant=node.task_type_dominant,
             t_create=node.t_create,
             last_accessed_step=node.last_accessed_step,
             decay_rate=node.decay_rate,
-            absorbed_by_sleep=bool(node.absorbed_by_sleep),
+            consolidated=bool(node.consolidated),
             Q=self._serialize_json(node.Q),
             n=self._serialize_json(node.n),
             Q_omega=self._serialize_json(node.Q_omega),
@@ -202,11 +201,11 @@ class MemoryService:
             set_={
                 "depth": stmt.excluded.depth,
                 "parent_id": stmt.excluded.parent_id,
-                "task_type_primary": stmt.excluded.task_type_primary,
+                "task_type_dominant": stmt.excluded.task_type_dominant,
                 "t_create": stmt.excluded.t_create,
                 "last_accessed_step": stmt.excluded.last_accessed_step,
                 "decay_rate": stmt.excluded.decay_rate,
-                "absorbed_by_sleep": stmt.excluded.absorbed_by_sleep,
+                "consolidated": stmt.excluded.consolidated,
                 "Q": stmt.excluded.Q,
                 "n": stmt.excluded.n,
                 "Q_omega": stmt.excluded.Q_omega,
@@ -244,7 +243,7 @@ class MemoryService:
             raise KeyError(node_id)
         return SkillNode(
             id=row["node_id"],
-            task_type_primary=row["task_type_primary"],
+            task_type_dominant=row["task_type_dominant"],
             t_create=int(row["t_create"]),
             depth=int(row["depth"]),
             parent_id=row["parent_id"],
@@ -258,7 +257,7 @@ class MemoryService:
             n_omega=dict(self._deserialize_json(row["n_omega"], {})),
             decay_rate=float(row["decay_rate"]),
             evidence_ids=list(self._deserialize_json(row["evidence_ids"], [])),
-            absorbed_by_sleep=bool(row["absorbed_by_sleep"]),
+            consolidated=bool(row["consolidated"]),
         )
 
     def _load_graph_state(self) -> None:
@@ -301,16 +300,16 @@ class MemoryService:
         *,
         node_ids: Optional[List[str]] = None,
         depth: Optional[int] = None,
-        task_type_primary: Optional[str] = None,
+        task_type_dominant: Optional[str] = None,
         limit: Optional[int] = None,
     ) -> List[SkillRepresentation]:
         if node_ids is None:
             stmt = select(self.skill_graph_state_table.c.node_id)
             if depth is not None:
                 stmt = stmt.where(self.skill_graph_state_table.c.depth == depth)
-            if task_type_primary is not None:
+            if task_type_dominant is not None:
                 stmt = stmt.where(
-                    self.skill_graph_state_table.c.task_type_primary == task_type_primary
+                    self.skill_graph_state_table.c.task_type_dominant == task_type_dominant
                 )
             stmt = stmt.order_by(
                 self.skill_graph_state_table.c.depth.asc(),
@@ -346,14 +345,6 @@ class MemoryService:
     def epsilon(self) -> float:
         return float(self.memory_config.epsilon_decay)
 
-    @property
-    def lambda_slow(self) -> Optional[float]:
-        return self.memory_config.lambda_slow
-
-    @property
-    def lambda_fast(self) -> Optional[float]:
-        return self.memory_config.effective_lambda_fast
-
     def add_node(
         self,
         node: SkillNode,
@@ -373,7 +364,7 @@ class MemoryService:
         *,
         id: str,
         content: str,
-        task_type_primary: str,
+        task_type_dominant: str,
         t_create: int,
         depth: int,
         parent_id: Optional[str] = None,
@@ -391,21 +382,21 @@ class MemoryService:
         if depth == 1:
             node = SkillNode.create_strategic(
                 id=id,
-                task_type_primary=task_type_primary,
+                task_type_dominant=task_type_dominant,
                 t_create=t_create,
                 parent_id=parent_id,
                 evidence_ids=list(evidence_ids or []),
             )
-        elif depth == 3:
+        elif depth == 2:
             node = SkillNode.create_tactical(
                 id=id,
-                task_type_primary=task_type_primary,
+                task_type_dominant=task_type_dominant,
                 t_create=t_create,
                 parent_id=parent_id,
                 evidence_ids=list(evidence_ids or []),
             )
         else:
-            raise ValueError("depth must be 1 or 3")
+            raise ValueError("depth must be 1 or 2")
 
         representation = SkillRepresentation(
             id=id,
@@ -430,11 +421,11 @@ class MemoryService:
         self,
         depth: Optional[int] = None,
         *,
-        task_type_primary: Optional[str] = None,
+        task_type_dominant: Optional[str] = None,
     ) -> List[SkillRepresentation]:
         return self._fetch_representations(
             depth=depth,
-            task_type_primary=task_type_primary,
+            task_type_dominant=task_type_dominant,
         )
 
     def search_nodes(
@@ -443,13 +434,13 @@ class MemoryService:
         *,
         top_k: int = 5,
         depth: Optional[int] = None,
-        task_type_primary: Optional[str] = None,
+        task_type_dominant: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """Similarity search over stored skill nodes."""
         return self.retriever.search(
             self._fetch_representations(
                 depth=depth,
-                task_type_primary=task_type_primary,
+                task_type_dominant=task_type_dominant,
             ),
             query_embedding,
             top_k=top_k,
@@ -462,14 +453,14 @@ class MemoryService:
         *,
         top_k: int = 5,
         depth: Optional[int] = None,
-        task_type_primary: Optional[str] = None,
+        task_type_dominant: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """Alias for embedding-based similarity search."""
         return self.search_nodes(
             query_embedding,
             top_k=top_k,
             depth=depth,
-            task_type_primary=task_type_primary,
+            task_type_dominant=task_type_dominant,
         )
 
     def search_by_text(
@@ -478,7 +469,7 @@ class MemoryService:
         *,
         top_k: int = 5,
         depth: Optional[int] = None,
-        task_type_primary: Optional[str] = None,
+        task_type_dominant: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """Convenience wrapper that embeds text before similarity search."""
         if self.embedding_provider is None:
@@ -488,7 +479,7 @@ class MemoryService:
             query_embedding,
             top_k=top_k,
             depth=depth,
-            task_type_primary=task_type_primary,
+            task_type_dominant=task_type_dominant,
         )
 
     def find_best_parent(
@@ -496,13 +487,13 @@ class MemoryService:
         query_embedding: List[float],
         *,
         target_depth: int,
-        task_type_primary: Optional[str] = None,
+        task_type_dominant: Optional[str] = None,
     ) -> Optional[SkillNode]:
         """Find the best parent candidate for a query embedding."""
         best = self.retriever.best_node(
             self._fetch_representations(
                 depth=target_depth,
-                task_type_primary=task_type_primary,
+                task_type_dominant=task_type_dominant,
             ),
             query_embedding,
             depth=None,
@@ -510,28 +501,6 @@ class MemoryService:
         if best is None:
             return None
         return self.graph.get(best.id)
-
-    def transferability_score(self, node_id: str) -> float:
-        """Compute the float-up transferability score for a tactical node."""
-        node = self.get_node(node_id)
-        return node.transferability_score(
-            lambda_shrink=getattr(self.memory_config, "lambda_shrink", 10.0)
-        )
-
-    def should_float_up(self, node_id: str) -> bool:
-        """Check whether a tactical node qualifies for d=3 -> d=2 promotion."""
-        theta_1 = getattr(self.memory_config, "theta_1", 0.75)
-        theta_cv = getattr(self.memory_config, "theta_cv", None)
-        n_min = getattr(self.memory_config, "n_min", None)
-        node = self.get_node(node_id)
-        if theta_cv is None or n_min is None:
-            return False
-        return node.should_float_up(
-            n_min=int(n_min),
-            theta_cv=float(theta_cv),
-            theta_1=float(theta_1),
-            lambda_shrink=getattr(self.memory_config, "lambda_shrink", 10.0),
-        )
 
     def sleep_consolidation_count(self) -> int:
         """Return the active count used to decide whether sleep consolidation fires."""
@@ -590,6 +559,40 @@ class MemoryService:
         *,
         k: int = 5,
         depth: Optional[int] = None,
-    ) -> List[Dict[str, Any]]:
-        """Compatibility alias for text-based similarity search."""
-        return self.search_by_text(query_text, top_k=k, depth=depth)
+        threshold: float = 0.0,
+        current_step: Optional[int] = None,
+        task_type_dominant: Optional[str] = None,
+    ) -> Tuple[Dict[str, Any], List[Tuple[str, float]]]:
+        """Retrieve memories using the current graph state and legacy tuple output."""
+        if self.embedding_provider is None:
+            raise ValueError("embedding_provider is required for text retrieval")
+
+        query_embedding = self.embedding_provider.embed_single(query_text)
+        nodes = list(self.graph.nodes.values())
+        representations = self._fetch_representations(
+            depth=1 if depth == 1 else 2,
+        )
+
+        if depth == 1:
+            return self.retriever.strategic_retrieve(
+                query_text=query_text,
+                nodes=nodes,
+                representations=representations,
+                top_k=k,
+                task_type_dominant=task_type_dominant,
+            )
+
+        if depth not in (None, 2):
+            raise ValueError("retrieve_query only supports depth=1 or depth=2")
+
+        resolved_step = int(current_step if current_step is not None else getattr(self.graph, "current_step", 0) or 0)
+        return self.retriever.tactical_retrieve(
+            query_text=query_text,
+            query_embedding=query_embedding,
+            nodes=nodes,
+            representations=representations,
+            top_k=k,
+            threshold=threshold,
+            current_step=resolved_step,
+            lambda_shrink=float(getattr(self.graph, "lambda_shrink", 10.0) or 10.0),
+        )

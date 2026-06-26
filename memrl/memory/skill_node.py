@@ -6,13 +6,12 @@ from dataclasses import dataclass, field
 from typing import Dict, Optional
 
 
-
 @dataclass
 class SkillNode:
     """Unified node type used by both tactical and strategic tiers."""
 
     id: str
-    task_type_primary: str
+    task_type_dominant: str
     t_create: int
     depth: int
     parent_id: Optional[str]
@@ -24,30 +23,27 @@ class SkillNode:
     n_omega: Dict[str, int] = field(default_factory=dict)
     decay_rate: float = 0.0
     evidence_ids: list[str] = field(default_factory=list)
-    absorbed_by_sleep: bool = False
+    consolidated: bool = False
 
     def __post_init__(self) -> None:
-        if self.depth not in {1, 2, 3}:
-            raise ValueError("SkillNode depth must be 1, 2, or 3.")
+        if self.depth not in {1, 2}:
+            raise ValueError("SkillNode depth must be 1 or 2.")
 
         if self.depth == 1:
             if self.Q or self.n:
                 raise ValueError("Strategic nodes must not populate tactical fields.")
-            self.absorbed_by_sleep = False
+            self.consolidated = False
             self.decay_rate = 0.0
         else:
             if self.Q_omega or self.n_omega:
                 raise ValueError("Tactical nodes must not populate strategic fields.")
-
-        if self.depth != 2:
-            self.absorbed_by_sleep = False
 
     @classmethod
     def create_tactical(
         cls,
         *,
         id: str,
-        task_type_primary: str,
+        task_type_dominant: str,
         t_create: int,
         parent_id: Optional[str],
         last_accessed_step: int = 0,
@@ -55,9 +51,9 @@ class SkillNode:
     ) -> "SkillNode":
         return cls(
             id=id,
-            task_type_primary=task_type_primary,
+            task_type_dominant=task_type_dominant,
             t_create=t_create,
-            depth=3,
+            depth=2,
             parent_id=parent_id,
             last_accessed_step=last_accessed_step,
             evidence_ids=list(evidence_ids or []),
@@ -68,7 +64,7 @@ class SkillNode:
         cls,
         *,
         id: str,
-        task_type_primary: str,
+        task_type_dominant: str,
         t_create: int,
         parent_id: Optional[str],
         last_accessed_step: int = 0,
@@ -76,7 +72,7 @@ class SkillNode:
     ) -> "SkillNode":
         return cls(
             id=id,
-            task_type_primary=task_type_primary,
+            task_type_dominant=task_type_dominant,
             t_create=t_create,
             depth=1,
             parent_id=parent_id,
@@ -90,16 +86,20 @@ class SkillNode:
 
     @property
     def is_tactical(self) -> bool:
-        return self.depth in {2, 3}
+        return self.depth == 2
 
     @property
     def total_accessed(self) -> int:
         """Total tactical retrievals across all task types."""
         return sum(self.n.values())
 
+    def q_salience(self, lambda_shrink: float = 10.0) -> float:
+        """Return the task-agnostic utility salience used by decay."""
+        return self._weighted_mean_utility(lambda_shrink=lambda_shrink)
+
     def recompute_decay_rate(
         self,
-        lambda_d: float,
+        lambda_base: float,
         epsilon: float,
         lambda_shrink: float,
     ) -> None:
@@ -109,7 +109,7 @@ class SkillNode:
             return
 
         q_bar_w = self._weighted_mean_utility(lambda_shrink=lambda_shrink)
-        self.decay_rate = lambda_d / (q_bar_w + epsilon)
+        self.decay_rate = lambda_base / (q_bar_w + epsilon)
 
     def _weighted_mean_utility(self, lambda_shrink: float = 10.0) -> float:
         """Confidence-weighted mean over tactical Q values."""
@@ -128,59 +128,3 @@ class SkillNode:
         if weight_sum == 0.0:
             return 0.0
         return weighted_sum / weight_sum
-
-    def _weighted_utility_variance(self, lambda_shrink: float = 10.0) -> float:
-        """Confidence-weighted variance over tactical Q values."""
-        if not self.Q:
-            return 0.0
-
-        q_bar_w = self._weighted_mean_utility(lambda_shrink=lambda_shrink)
-        weighted_sum = 0.0
-        weight_sum = 0.0
-
-        for task_type, q_value in self.Q.items():
-            count = self.n.get(task_type, 0)
-            weight = count / (count + lambda_shrink)
-            diff = q_value - q_bar_w
-            weighted_sum += weight * diff * diff
-            weight_sum += weight
-
-        if weight_sum == 0.0:
-            return 0.0
-        return weighted_sum / weight_sum
-
-    def coefficient_of_variation(self, lambda_shrink: float = 10.0) -> float:
-        """Compute the weighted coefficient of variation used for float-up gating."""
-        q_bar_w = self._weighted_mean_utility(lambda_shrink=lambda_shrink)
-        if q_bar_w == 0.0:
-            return 0.0
-        variance = self._weighted_utility_variance(lambda_shrink=lambda_shrink)
-        return (variance ** 0.5) / abs(q_bar_w)
-
-    def transferability_score(self, lambda_shrink: float = 10.0) -> float:
-        """Compute the tactical transferability score used for float-up."""
-        if self.depth != 3 or not self.Q:
-            return 0.0
-
-        q_bar_w = self._weighted_mean_utility(lambda_shrink=lambda_shrink)
-        variance = self._weighted_utility_variance(lambda_shrink=lambda_shrink)
-        denominator = (q_bar_w * q_bar_w) + variance
-        if denominator <= 0.0:
-            return 0.0
-        return (q_bar_w * q_bar_w) / denominator
-
-    def should_float_up(
-        self,
-        n_min: int,
-        theta_cv: float,
-        theta_1: float,
-        lambda_shrink: float = 10.0,
-    ) -> bool:
-        """Check whether a tactical node qualifies for d=3 -> d=2 float-up."""
-        if self.depth != 3:
-            return False
-        if self.total_accessed < n_min:
-            return False
-        if self.coefficient_of_variation(lambda_shrink=lambda_shrink) >= theta_cv:
-            return False
-        return self.transferability_score(lambda_shrink) >= theta_1

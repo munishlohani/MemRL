@@ -15,7 +15,7 @@ class SkillNode:
     t_create: int
     depth: int
     parent_id: Optional[str]
-    secondary_parents: list[str] = field(default_factory=list)
+    secondary_parents: list[str] = field(default_factory=list) #not used at this stage ( we have only d=1.2)
     last_accessed_step: int = 0
     Q: Dict[str, float] = field(default_factory=dict)
     n: Dict[str, int] = field(default_factory=dict)

@@ -4,10 +4,15 @@ from __future__ import annotations
 
 import json
 import os
+from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
+from uuid import uuid4
 
-import numpy as np
+try:
+    import numpy as np
+except Exception:  # pragma: no cover - optional dependency fallback
+    np = None
 from sqlalchemy import (
     Boolean,
     Column,
@@ -28,6 +33,12 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from ..memory.graph import SkillGraph
 from ..memory.skill_node import SkillNode
 from ..memory.skill_representation import SkillRepresentation
+from .sleep_consolidation import (
+    SleepConsolidationAction,
+    SleepConsolidationResult,
+    SleepConsolidationService,
+    StrategicScaffoldContext,
+)
 from .retrievers import SkillSimilarityRetriever
 
 if TYPE_CHECKING:
@@ -114,7 +125,10 @@ class MemoryService:
 
     @staticmethod
     def _serialize_embedding(embedding: List[float]) -> bytes:
-        array = np.asarray([float(value) for value in embedding], dtype=np.float32)
+        values = [float(value) for value in embedding]
+        if np is None:
+            return json.dumps(values).encode("utf-8")
+        array = np.asarray(values, dtype=np.float32)
         return array.tobytes()
 
     @staticmethod
@@ -124,7 +138,7 @@ class MemoryService:
         if isinstance(blob, memoryview):
             blob = blob.tobytes()
         if isinstance(blob, (bytes, bytearray)):
-            if len(blob) % np.dtype(np.float32).itemsize == 0:
+            if np is not None and len(blob) % np.dtype(np.float32).itemsize == 0:
                 return np.frombuffer(blob, dtype=np.float32).astype(float).tolist()
             try:
                 text = bytes(blob).decode("utf-8")
@@ -512,6 +526,226 @@ class MemoryService:
         if threshold is None:
             return False
         return self.sleep_consolidation_count() >= int(threshold)
+
+    def sleep_consolidate(
+        self,
+        consolidation_service: SleepConsolidationService,
+        *,
+        theta_consolidate: Optional[float] = None,
+    ) -> List[SleepConsolidationResult]:
+        """Run sleep consolidation and wire consolidation outcomes into the graph.
+
+        This performs the graph mutation phase only: cluster eligible tactical nodes,
+        ask the LLM for a structured spawn/absorb/discard action, and materialize a
+        strategic scaffold node for clusters judged to spawn one. Tactical nodes
+        processed in any branch are marked consolidated.
+        """
+        resolved_threshold = theta_consolidate
+        if resolved_threshold is None:
+            resolved_threshold = getattr(self.memory_config, "theta_consolidate", None)
+        threshold = float(resolved_threshold) if resolved_threshold is not None else 0.0
+
+        eligible_nodes = [
+            node
+            for node in self.graph.nodes.values()
+            if node.is_tactical
+            and not node.consolidated
+            and node.q_salience(self.graph.lambda_shrink) > threshold
+        ]
+        eligible_nodes.sort(key=lambda node: (int(node.t_create), node.id))
+        if not eligible_nodes:
+            return []
+
+        eligible_representations = {
+            node.id: self._fetch_representation(node.id) for node in eligible_nodes
+        }
+
+        eligible_embeddings = [
+            eligible_representations[node.id].embedding for node in eligible_nodes
+        ]
+        clusters = consolidation_service.cluster_embeddings(eligible_embeddings)
+        existing_scaffolds = self._strategic_scaffold_contexts()
+
+        results: List[SleepConsolidationResult] = []
+        for indices in clusters:
+            cluster_nodes = [eligible_nodes[idx] for idx in indices]
+            if not cluster_nodes:
+                continue
+
+            cluster_texts = [
+                eligible_representations[node.id].content for node in cluster_nodes
+            ]
+            decision, prompt, raw_response = consolidation_service.decide_cluster(
+                cluster_texts,
+                existing_scaffolds=existing_scaffolds,
+            )
+            result = SleepConsolidationResult(
+                cluster_indices=list(indices),
+                cluster_texts=cluster_texts,
+                action=decision.action,
+                summary=decision.summary,
+                target_scaffold_id=decision.target_scaffold_id,
+                prompt=prompt,
+                raw_response=raw_response,
+            )
+            results.append(result)
+
+            if decision.action == SleepConsolidationAction.SPAWN:
+                if decision.summary is None:
+                    raise ValueError("Spawn decisions must include a scaffold summary")
+                scaffold_node = self._spawn_strategic_scaffold(
+                    cluster_nodes=cluster_nodes,
+                    cluster_embeddings=[
+                        eligible_representations[node.id].embedding
+                        for node in cluster_nodes
+                    ],
+                    scaffold_content=decision.summary,
+                )
+                for node in cluster_nodes:
+                    self.graph.reparent(node, scaffold_node.id)
+                    node.consolidated = True
+                    self._upsert_graph_state(node)
+            elif decision.action == SleepConsolidationAction.ABSORB:
+                if decision.target_scaffold_id is None:
+                    raise ValueError("Absorb decisions must include a target scaffold id")
+                target_scaffold = self._resolve_strategic_scaffold(
+                    decision.target_scaffold_id
+                )
+                for node in cluster_nodes:
+                    self.graph.reparent(node, target_scaffold.id)
+                    node.consolidated = True
+                    self._upsert_graph_state(node)
+            elif decision.action == SleepConsolidationAction.DISCARD:
+                for node in cluster_nodes:
+                    node.consolidated = True
+                    self._upsert_graph_state(node)
+            else:
+                raise ValueError(
+                    f"Unsupported sleep-consolidation action: {decision.action!r}"
+                )
+
+        return results
+
+    def _strategic_scaffold_contexts(self) -> List[StrategicScaffoldContext]:
+        scaffolds = sorted(
+            self.graph.nodes_at_depth(1),
+            key=lambda node: (int(node.t_create), node.id),
+        )
+        return [
+            StrategicScaffoldContext(
+                node_id=node.id,
+                summary=self._fetch_representation(node.id).content,
+            )
+            for node in scaffolds
+        ]
+
+    def _resolve_strategic_scaffold(self, scaffold_id: str) -> SkillNode:
+        node = self.graph.get(scaffold_id)
+        if not node.is_strategic:
+            raise ValueError(f"Target node is not a strategic scaffold: {scaffold_id}")
+        return node
+
+    def _spawn_strategic_scaffold(
+        self,
+        *,
+        cluster_nodes: List[SkillNode],
+        cluster_embeddings: List[List[float]],
+        scaffold_content: str,
+    ) -> SkillNode:
+        scaffold_id = uuid4().hex
+        task_type_dominant = self._majority_task_type(cluster_nodes)
+        scaffold_embedding = self._scaffold_embedding(
+            scaffold_content=scaffold_content,
+            cluster_embeddings=cluster_embeddings,
+        )
+        scaffold_q_omega = self._spawned_scaffold_q_omega(cluster_nodes)
+        scaffold_evidence_ids = self._merged_evidence_ids(cluster_nodes)
+
+        scaffold_node = SkillNode.create_strategic(
+            id=scaffold_id,
+            task_type_dominant=task_type_dominant,
+            t_create=int(self.graph.current_step),
+            parent_id=self.graph.root_id,
+            evidence_ids=scaffold_evidence_ids,
+        )
+        scaffold_node.Q_omega = scaffold_q_omega
+
+        representation = SkillRepresentation(
+            id=scaffold_id,
+            content=scaffold_content,
+            embedding=scaffold_embedding,
+        )
+        self.add_node(scaffold_node, representation, parent_id=self.graph.root_id)
+        return scaffold_node
+
+    def _scaffold_embedding(
+        self,
+        *,
+        scaffold_content: str,
+        cluster_embeddings: List[List[float]],
+    ) -> List[float]:
+        if self.embedding_provider is not None:
+            return self.embedding_provider.embed_single(scaffold_content)
+        return self._mean_embedding(cluster_embeddings)
+
+    @staticmethod
+    def _mean_embedding(cluster_embeddings: List[List[float]]) -> List[float]:
+        if not cluster_embeddings:
+            return []
+        dim = min(len(row) for row in cluster_embeddings)
+        if dim <= 0:
+            return []
+        totals = [0.0] * dim
+        for row in cluster_embeddings:
+            for idx in range(dim):
+                totals[idx] += float(row[idx])
+        count = float(len(cluster_embeddings))
+        return [value / count for value in totals]
+
+    def _spawned_scaffold_q_omega(self, cluster_nodes: List[SkillNode]) -> Dict[str, float]:
+        gamma_omega = float(getattr(self.memory_config, "gamma_omega", 0.95))
+        lambda_shrink = float(getattr(self.memory_config, "lambda_shrink", self.graph.lambda_shrink))
+        scale = 1.0 / max(1e-12, 1.0 - gamma_omega)
+
+        q_values_by_task: Dict[str, List[float]] = {}
+        weights_by_task: Dict[str, List[float]] = {}
+        for node in cluster_nodes:
+            for task_type, q_value in node.Q.items():
+                count = float(node.n.get(task_type, 0) or 0)
+                weight = count / (count + lambda_shrink)
+                if weight <= 0.0:
+                    continue
+                q_values_by_task.setdefault(task_type, []).append(float(q_value))
+                weights_by_task.setdefault(task_type, []).append(weight)
+
+        q_omega: Dict[str, float] = {}
+        for task_type, values in q_values_by_task.items():
+            weights = weights_by_task.get(task_type, [])
+            weight_sum = float(sum(weights))
+            if weight_sum <= 0.0:
+                continue
+            weighted_mean = sum(weight * value for weight, value in zip(weights, values)) / weight_sum
+            q_omega[task_type] = scale * weighted_mean
+        return q_omega
+
+    @staticmethod
+    def _majority_task_type(cluster_nodes: List[SkillNode]) -> str:
+        counts = Counter(node.task_type_dominant for node in cluster_nodes if node.task_type_dominant)
+        if not counts:
+            return "unknown"
+        return max(counts.items(), key=lambda item: (item[1], item[0]))[0]
+
+    @staticmethod
+    def _merged_evidence_ids(cluster_nodes: List[SkillNode]) -> List[str]:
+        merged: List[str] = []
+        seen = set()
+        for node in cluster_nodes:
+            for evidence_id in node.evidence_ids:
+                if evidence_id in seen:
+                    continue
+                seen.add(evidence_id)
+                merged.append(evidence_id)
+        return merged
 
     def close(self) -> None:
         """Close the SQLite connection."""

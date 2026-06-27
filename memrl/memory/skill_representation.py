@@ -8,7 +8,7 @@ from typing import List
 
 @dataclass
 class SkillRepresentation:
-    """Immutable payload for content and embedding storage."""
+    """Immutable payload for summary content and embedding storage."""
 
     id: str
     content: str
@@ -16,4 +16,3 @@ class SkillRepresentation:
 
     def __post_init__(self) -> None:
         self.embedding = [float(value) for value in self.embedding]
-

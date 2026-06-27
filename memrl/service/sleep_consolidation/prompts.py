@@ -1,25 +1,66 @@
-"""Prompt template for sleep-consolidation LLM judgment."""
+"""Prompt templates for sleep-consolidation LLM decisions."""
 
-SLEEP_CONSOLIDATION_PROMPT = """You are judging whether a cluster of tactical memories should be consolidated.
+from __future__ import annotations
 
-Task:
-Decide if the cluster represents a reusable general skill or only a task-specific trace.
+from typing import Sequence
 
-Criteria:
-1. The cluster should be semantically coherent.
-2. The cluster should represent genuine capability, not noise or stochastic outcome.
-3. The cluster should be general enough to justify consolidation into a strategic scaffold.
+from .types import StrategicScaffoldContext
 
-Input:
+SLEEP_CONSOLIDATION_PROMPT = """You are deciding how to consolidate one tactical cluster into the memory graph.
+
+Return a single JSON object and nothing else.
+
+Schema:
+{{
+  "action": "spawn" | "absorb" | "discard",
+  "summary": string | null,
+  "target_scaffold_id": string | null
+}}
+
+Rules:
+- "spawn": create a new d=1 strategic scaffold. Set summary to a concise reusable scaffold summary. Set target_scaffold_id to null.
+- "absorb": use one existing d=1 scaffold. Set target_scaffold_id to the chosen scaffold id. Set summary to null.
+- "discard": leave the tactical cluster as-is. Do not create a new scaffold, do not reparent the cluster, and do not otherwise modify graph structure. Set summary and target_scaffold_id to null.
+- The summary field becomes SkillRepresentation.content.
+- Do not output embeddings, Q-values, explanations, markdown, or extra keys.
+- If there are no suitable existing scaffolds, choose spawn or discard, not absorb.
+
+Cluster:
 {cluster_contents}
 
-Output:
-Return only one of:
-- GENERAL
-- NOT_GENERAL
+Existing d=1 scaffolds:
+{existing_scaffolds}
 """
 
 
-def build_sleep_consolidation_prompt(cluster_contents: str) -> str:
-    """Format the sleep-consolidation judgment prompt."""
-    return SLEEP_CONSOLIDATION_PROMPT.format(cluster_contents=cluster_contents)
+def format_cluster_contents(cluster_texts: Sequence[str]) -> str:
+    """Format cluster texts into a compact prompt-ready block."""
+    if not cluster_texts:
+        return "(empty cluster)"
+    return "\n".join(
+        f"{idx + 1}. {text.strip()}"
+        for idx, text in enumerate(cluster_texts)
+    )
+
+
+def format_existing_scaffolds(
+    existing_scaffolds: Sequence[StrategicScaffoldContext],
+) -> str:
+    """Format existing strategic scaffolds for prompt input."""
+    if not existing_scaffolds:
+        return "(none)"
+    return "\n".join(
+        f"- {scaffold.node_id}: {scaffold.summary.strip()}"
+        for scaffold in existing_scaffolds
+    )
+
+
+def build_sleep_consolidation_prompt(
+    cluster_contents: str,
+    existing_scaffolds: str,
+) -> str:
+    """Format the structured sleep-consolidation prompt."""
+    return SLEEP_CONSOLIDATION_PROMPT.format(
+        cluster_contents=cluster_contents,
+        existing_scaffolds=existing_scaffolds,
+    )

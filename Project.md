@@ -178,17 +178,15 @@ Drives the Q-update and serves as the Stage 1 pre-filter signal for tactical for
 
 **Strategic nodes — spawn case** (new $d=1$ node created by consolidation):
 
-$$Q^{\Omega}_\omega(t_k) = \frac{\sum_{j \in \text{cluster}} w_j \cdot Q_j(t_k)}{\sum_{j \in \text{cluster}} w_j}, \qquad w_j = \frac{n_{jk}}{n_{jk} + \lambda_{\text{shrink}}}$$
+$$Q^{\Omega}_\omega(t_k) = \frac{1}{1 - \gamma^\Omega} \cdot \frac{\sum_{j \in \text{cluster}} w_j \cdot Q_j(t_k)}{\sum_{j \in \text{cluster}} w_j}, \qquad w_j = \frac{n_{jk}}{n_{jk} + \lambda_{\text{shrink}}}$$
 
-Shrinkage-weighted mean over the absorbed cluster's per-task-type Q-values. Nodes with more evidence on $t_k$ contribute more. Task types not observed by any cluster member are absent from $Q^\Omega$ at creation — cold task type fallback (§9.1) handles this at retrieval time by normalizing the scaffold's per-task counts into a task distribution and taking the expected value under that distribution.
+The shrinkage-weighted mean converts cluster tactical Q-values (per-step scale) to episode-return scale via the $\frac{1}{1-\gamma^\Omega}$ infinite-horizon factor. This is required because $Q^\Omega$ accumulates full-episode discounted returns through normal strategic updates, while $Q_j(t_k)$ is a per-step estimate. Without this normalization, spawned scaffolds are systematically undervalued relative to scaffolds that have accumulated real strategic updates, producing the same under-selection failure as zero-initialization.
 
-**Do not initialize spawned scaffolds to zero** — this causes systematic under-selection post-consolidation (FeUdal Networks dead-layer problem, Vezhnevets et al., 2017): zero-initialized scaffolds are never selected, so $Q^\Omega$ never gets updated, so they remain at zero indefinitely.
+**Approximation note:** $\frac{1}{1-\gamma^\Omega}$ is an infinite-horizon upper bound. For finite episodes of length $T$, the actual sum $\sum_{t=0}^{T-1}(\gamma^\Omega)^t < \frac{1}{1-\gamma^\Omega}$. This overestimates $Q^\Omega$ at initialization — acceptable for Phase 1, self-correcting through subsequent strategic updates. Empirical episode-length normalization deferred to Phase 2.
 
-**Strategic nodes — absorb case** (existing tactical node promoted to $d=1$): carries tactical Q-values forward with dampening:
+**Task types not observed** by any cluster member are absent from $Q^\Omega$ at creation — cold task type fallback (§9.1) handles this at retrieval time.
 
-$$Q^{\Omega}_\omega(t_k) \leftarrow \rho \cdot Q_\tau(t_k), \qquad \rho \in (0.5,\ 1.0)$$
-
-$\rho$ corrects for the fact that Q-values calibrated in the tactical competitive context may overestimate strategic value when the node moves to a different competitive tier. Starting value: $\rho = 0.7$, swept in ablation.
+**Do not initialize spawned scaffolds to zero** — zero-initialized scaffolds are never selected, so $Q^\Omega$ never gets updated, so they remain at zero indefinitely (FeUdal Networks dead-layer problem, Vezhnevets et al., 2017).
 
 ### 3.6 Tactical Action Selection
 
@@ -216,13 +214,7 @@ $$Q^{\Omega}_{\omega}(t_k)\ \leftarrow\ Q^{\Omega}_{\omega}(t_k)\ +\ \alpha^{\Om
 
 Uses $\gamma^\Omega$, not tactical $\gamma$. No per-step bootstrap term in Phase 1 (scaffold runs to episode termination, no early termination). **Storage:** `Q_omega` dict, never merged with tactical `Q`.
 
-**Cold task type fallback:** if $Q^\Omega_{\omega_j}(t_k)$ is undefined for the current task type on every scaffold, score each scaffold by its normalized per-task distribution:
-
-$$p_{\omega_j}(t_\ell) = \frac{n^\Omega_{\omega_j}(t_\ell)}{\sum_m n^\Omega_{\omega_j}(t_m)}$$
-
-$$\bar{Q}^\Omega_{\omega_j} = \sum_{\ell} p_{\omega_j}(t_\ell)\, Q^\Omega_{\omega_j}(t_\ell)$$
-
-Then select the scaffold with the highest $\bar{Q}^\Omega_{\omega_j}$. If a scaffold has no task counts yet, its fallback score is $0$. The issue this addresses is that a cold task has no direct option-value estimate, and a raw or unnormalized mean can unfairly favor scaffolds with sparse or skewed task histories.
+**Cold task type fallback:** if $Q^\Omega_{\omega_j}(t_k)$ undefined for all $\omega_j$, select scaffold with highest $\bar{Q}^\Omega_{\omega_j}$ across all observed task types (same shrinkage-weighted mean construction as Phase 1b utility).
 
 ---
 
@@ -308,8 +300,12 @@ Until the first sleep consolidation event fires, $d=1$ is empty or manually seed
 -- Write-once at creation. content and embedding never diverge.
 CREATE TABLE skill_representation (
     node_id     TEXT PRIMARY KEY,
-    content     TEXT NOT NULL,
-    embedding   BLOB NOT NULL    -- numpy.ndarray.tobytes(); np.frombuffer() to deserialize
+    content     TEXT NOT NULL,      -- LLM-generated summary. NOT raw experience trace.
+                                    -- Kept concise for context-window efficiency at retrieval.
+                                    -- Tactical: LLM-distilled procedural summary of the experience.
+                                    -- Strategic: LLM-synthesized abstraction from cluster summaries.
+    embedding   BLOB NOT NULL       -- Vector of content summary. numpy.ndarray.tobytes();
+                                    -- np.frombuffer() to deserialize.
 );
 
 -- Mutable algorithmic state. Updated every episode.
@@ -338,7 +334,9 @@ CREATE INDEX idx_consolidated ON skill_graph_state(consolidated);  -- for sleep 
 
 **Working-set protocol:** load relevant `SkillNode` objects into in-memory working set at episode start. All step-level mutation happens in-memory. Flush to `skill_graph_state` in one batch write at episode end. SQLite is the durable store; the working set is scratch space for one episode.
 
-**Embeddings computed once at creation**, never recomputed on read. Query embedding $e_q$ is the only embedding computed at inference time.
+**Content generation:** at tactical node creation, the LLM is called once to produce a concise procedural summary of the experience — not the raw trace. The raw trace is stored in `EpisodicMemoryBank` via `evidence_ids` and is available for inspection but never surfaced directly at retrieval. This keeps retrieved content short enough to fit within the agent's context window when multiple nodes are retrieved per step.
+
+**Embeddings computed once at creation**, over the LLM-generated summary, never recomputed on read. Query embedding $e_q$ is the only embedding computed at inference time.
 
 **`task_type_dominant`** is dynamic: $\arg\max_k n_{ik}$ from the retrieval count dict. Updated at episode end when `n` is flushed. Replaces the old static `task_type_primary` (formation-time artifact). For strategic nodes: dominant task type across the absorbed cluster at consolidation time.
 
@@ -453,7 +451,7 @@ class SkillNode:
 | `evidence_ids` | Reservoir-sampled at cap $R$. Implement `add_evidence(eid)` with reservoir sampling. |
 | `total_accessed` | `@property` over `n`. Never store separately — it will diverge. |
 
-**`content` and `embedding`** live in `skill_representation`, not on `SkillNode`. For tactical nodes: LLM-extracted procedural summary + embedding. For strategic nodes: LLM-synthesized abstraction from cluster contents + either cluster centroid embedding or fresh embedding of synthesized content (pick one, document it — do not leave ambiguous).
+**`content` and `embedding`** live in `skill_representation`, not on `SkillNode`. For tactical nodes: LLM-generated concise procedural summary + embedding of that summary. Raw experience trace is stored separately in `EpisodicMemoryBank` via `evidence_ids` — never surfaced directly at retrieval. For strategic nodes: LLM-synthesized abstraction from cluster summaries + embedding of that abstraction. Cluster centroid embedding is used as the initial embedding; can be replaced with a fresh embedding of the synthesized content — pick one, document it, do not leave ambiguous.
 
 ---
 
@@ -564,46 +562,49 @@ def sleep_consolidation(graph: SkillGraph, theta_absorb: float,
 
     # Step 1: cluster eligible nodes by embedding similarity
     embeddings = {n.id: graph.get_embedding(n.id) for n in eligible}
-    clusters = cluster_embeddings(eligible, embeddings)  # HDBSCAN or k-means — open (§10)
+    clusters = cluster_embeddings(eligible, embeddings)  # K-means; k selection open (§10)
 
     for cluster in clusters:
         centroid = mean_embedding([embeddings[n.id] for n in cluster])
         cluster_contents = [graph.get_content(n.id) for n in cluster]
 
-        # Step 2: LLM judges generalizability of this cluster
-        is_general = llm_judge_generalizability(cluster_contents)
-        if not is_general:
-            # Mark consolidated to prevent re-clustering; do not create d=1 node
+        # Step 2: LLM judges generalizability of this cluster AND decides absorb vs. spawn
+        # LLM receives: cluster contents + existing d=1 scaffold summaries
+        # LLM returns: (decision, target_scaffold_id | None)
+        #   decision = "absorb" → reparent under target_scaffold_id
+        #   decision = "spawn"  → synthesize new d=1 scaffold
+        #   decision = "discard" → cluster not general enough; mark consolidated, no d=1 node
+        existing_d1 = graph.nodes_at_depth(1)
+        existing_d1_summaries = {p.id: graph.get_content(p.id) for p in existing_d1}
+
+        decision, target_id = llm_judge_consolidation(
+            cluster_contents, existing_d1_summaries
+        )
+
+        if decision == "discard":
             for node in cluster:
                 node.consolidated = True
             continue
 
-        # Step 3: check absorption against existing d=1 scaffolds
-        existing_d1 = graph.nodes_at_depth(1)
-        if existing_d1:
-            d1_embeddings = {p.id: graph.get_embedding(p.id) for p in existing_d1}
-            best_parent, similarity = max(
-                ((p, cosine_sim(centroid, d1_embeddings[p.id])) for p in existing_d1),
-                key=lambda x: x[1]
-            )
-        else:
-            similarity = -1.0  # force spawn
-
-        if similarity >= theta_absorb:
-            # Absorb: reparent cluster under existing scaffold
+        if decision == "absorb":
+            # Absorb: reparent cluster under the LLM-selected existing scaffold
+            target_scaffold = graph.get_node(target_id)
             for node in cluster:
-                graph.reparent(node, best_parent)
+                graph.reparent(node, target_scaffold)
                 node.consolidated = True
-            # Q_omega of best_parent updated as running average (optional — document policy)
 
-        else:
+        else:  # decision == "spawn"
             # Spawn: synthesize new d=1 scaffold from cluster
             content = llm_synthesize_scaffold(cluster_contents)
             new_id = new_uuid()
             graph.write_representation(new_id, content, centroid)
 
-            # Q_omega initialization: shrinkage-weighted mean over cluster (§3.5)
-            q_omega_init = shrinkage_weighted_mean_Q(cluster, graph.lambda_shrink)
+            # Q_omega initialization: horizon-normalized shrinkage-weighted mean (§3.5)
+            q_omega_init = horizon_normalized_mean_Q(
+                cluster, graph.lambda_shrink, graph.gamma_omega
+            )
+            # horizon_normalized_mean_Q computes:
+            # Q_omega[t_k] = (1 / (1 - gamma_omega)) * shrinkage_weighted_mean(cluster, t_k)
 
             new_scaffold = SkillNode(
                 id=new_id,
@@ -621,12 +622,13 @@ def sleep_consolidation(graph: SkillGraph, theta_absorb: float,
                 node.consolidated = True
 ```
 
-**Key additions vs. old spec:**
+**Key design decisions in this procedure:**
 
-- `theta_consolidate` pre-filter applied before clustering (cheap, prevents low-utility node pollution)
-- LLM generalizability judgment added per cluster before absorb/spawn decision
-- `consolidated` flag replaces `absorbed_by_sleep` — broader semantics covering both absorb and spawn outcomes, and the case where LLM judges a cluster as not general enough
-- $Q^\Omega$ initialized from cluster Q-values, not zero (§3.5)
+- `theta_consolidate` pre-filter applied before clustering (cheap arithmetic gate, prevents low-utility node pollution before LLM calls)
+- LLM makes the absorb/spawn/discard decision in a single call — receives cluster contents and existing $d=1$ scaffold summaries; no cosine-threshold absorb gate
+- `consolidated` flag covers all three outcomes (absorb, spawn, discard) — prevents re-clustering in subsequent sleep events
+- $Q^\Omega$ initialized from horizon-normalized cluster Q-values, not zero (§3.5)
+- K-means clustering over node embeddings; $k$ selection is an open design decision (§11)
 
 **Ordering constraint:** sleep consolidation runs strictly after decay-based pruning in the same maintenance pass. Pruning writes graph removals; consolidation writes `parent_id` updates. Sequencing prune-first ensures consolidation never reparents a node that has simultaneously been marked for removal.
 
@@ -644,7 +646,7 @@ $$\omega = \arg\max_{\omega_j \in \mathcal{G}_{d=1}} Q^{\Omega}_{\omega_j}(t_k)$
 
 Full scan over $d=1$ (small by construction). No embedding step — choice driven entirely by option-value evidence. If $d=1$ empty, $\omega = \text{null}$.
 
-**Cold task type:** fall back to the scaffold with the highest task-distribution-normalized expected option-value $\bar{Q}^\Omega_{\omega_j}$ computed from its per-task $Q^\Omega$ and $n^\Omega$.
+**Cold task type:** fall back to scaffold with highest shrinkage-weighted mean $\bar{Q}^\Omega_{\omega_j}$ across all observed task types.
 
 ### 9.2 Tactical Retrieval (Every Step, flat tactical layer)
 
@@ -748,18 +750,20 @@ for each episode:
 
 | Item | Status | Notes |
 |---|---|---|
-| Q-value representation | **Open (Phase 1a vs 1b)** | Start with global scalar (1a); switch to per-task-type weighted mean (1b) after debugging |
+| Q-value representation | **Confirmed** | Per-task-type dict for both tactical and strategic nodes; decay salience uses $\bar{Q}_{i,w}$ |
+| Content representation | **Confirmed** | LLM-generated concise summary; raw trace stored in `EpisodicMemoryBank` via `evidence_ids` |
+| Clustering method (sleep consolidation) | **Confirmed** | K-means over node embeddings; $k$ selection open — sweep or elbow heuristic |
 | Tactical retrieval technique | **Open** | ANN (FAISS/ScaNN) vs. BM25 vs. hybrid |
-| Content representation | **Open** | Raw trace vs. distilled procedural summary |
 | Embedding strategy | **Open** | Frozen LLM encoder vs. fine-tuned |
-| Clustering method (sleep consolidation) | **Open** | HDBSCAN vs. k-means; minimum cluster size, distance metric |
 | Task type definition $t_k$ | **Open** | Benchmark-derived, clustered, or fixed taxonomy |
-| Scaffold embedding on absorb | **Open** | Fixed at creation vs. running average update |
-| LLM judgment prompt design | **Open** | Formation judgment (Stage 2) and consolidation judgment prompts |
-| Avoidance skill formation | **Known gap** | Negative-surprise experiences currently discarded; avoidance nodes deferred to Phase 2 |
+| Scaffold embedding strategy | **Open** | Cluster centroid vs. fresh embedding of synthesized content |
+| LLM judgment prompt design | **Open** | Formation judgment (Stage 2) and consolidation judgment (absorb/spawn/discard) prompts |
+| $Q^\Omega$ initialization timescale approximation | **Known gap** | $\frac{1}{1-\gamma^\Omega}$ is infinite-horizon approximation; overestimates for short episodes; empirical episode-length normalization deferred to Phase 2 |
+| Avoidance skill formation | **Known gap** | Negative-surprise experiences discarded; avoidance nodes deferred to Phase 2 |
 | Causal credit assignment | **Known gap** | Recency-weighted failure credit is causally imprecise for multi-step chains; learned credit model deferred to Phase 2 |
 | Task-dynamic normalization of Q for transfer | **Known gap** | $\bar{Q}_{i,w}$ conflates task-dynamic dissimilarity with skill specificity; normalization deferred to Phase 2 |
 | Learned formation policy $\pi_{\text{form}}$ | **Deferred Phase 2** | Replaces TD pre-filter with off-policy learned classifier |
+| Transferability scoring + float-up | **Deferred Phase 2** | $\hat{T}$, depth differentiation within tactical layer |
 | Affect/personalization graph | **Deferred Phase 2** | Volatile user-preference memory |
 | Double Q-learning | **Deferred Phase 2** | Overestimation bias correction |
 | Memory-quality reward bonus | **Deferred Phase 2** | $r_t^{\text{mem}} = Q_i(t_k) - \bar{Q}(t_k)$ |
@@ -784,11 +788,10 @@ for each episode:
 | $R$ | Evidence reservoir size per node | $50$ | sweep |
 | $N_{\text{sleep}}$ | Unconsolidated tactical count triggering sleep | — | sweep |
 | $\theta_{\text{consolidate}}$ | Minimum $\bar{Q}_{i,w}$ for consolidation eligibility | — | sweep |
-| $\theta_{\text{absorb}}$ | Min cluster-centroid-to-scaffold cosine for absorption | — | sweep |
-| $\rho$ | Q-dampening factor on absorbed node promotion | $0.7$ | sweep |
+| $k$ | Number of clusters in K-means sleep consolidation | — | sweep or elbow heuristic |
 
 **Removed from Phase 1 (deferred to Phase 2):**
-$\theta_1$, $\theta_2$, $\theta_{\text{CV}}$, $N_{\min}$, $\epsilon_{\text{hyst}}$, $M_{\text{wait}}$, $\lambda_{\text{slow}}$, $\lambda_{\text{fast}}$
+$\theta_1$, $\theta_2$, $\theta_{\text{CV}}$, $N_{\min}$, $\epsilon_{\text{hyst}}$, $M_{\text{wait}}$, $\lambda_{\text{slow}}$, $\lambda_{\text{fast}}$, $\theta_{\text{absorb}}$, $\rho$
 
 ---
 
@@ -800,8 +803,8 @@ $\theta_1$, $\theta_2$, $\theta_{\text{CV}}$, $N_{\min}$, $\epsilon_{\text{hyst}
 | Storage backend | SQLite via SQLAlchemy (`MemoryService`) | Same; two tables: write-once `skill_representation`, mutable `skill_graph_state` |
 | Skill formation | All experiences stored | TD pre-filter → LLM judgment → immediate storage |
 | Formation signal | LLM judgment only | TD error (algorithmic, cheap) gates before LLM (semantic, expensive) |
-| Retention | Recency / retrieval frequency | Ebbinghaus decay modulated by utility salience (Phase 1a: global scalar; Phase 1b: shrinkage-weighted mean) |
-| Abstraction | None | Periodic sleep consolidation: cluster surviving tactical memories → LLM synthesis → $d=1$ scaffold |
+| Retention | Recency / retrieval frequency | Ebbinghaus decay modulated by $\bar{Q}_{i,w}$ — shrinkage-weighted mean across task types; task-agnostic |
+| Abstraction | None | Periodic sleep consolidation: K-means cluster surviving tactical memories → LLM judges generalizability and decides absorb/spawn/discard → $d=1$ scaffold |
 | Action space | Flat, single-tier | Two-tier: strategic option (once per episode) + tactical action (every step) |
 | Action space bound | Unbounded | Hard cap $\|A^\tau\| \leq N$ + soft decay pruning |
 | Utility signal | LLM-assessed at retrieval | Q-learning TD updates per task type (tactical); option-value full-episode return per task type (strategic) |

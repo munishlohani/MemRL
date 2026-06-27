@@ -67,6 +67,10 @@ class MemoryConfig(BaseModel):
                                   description="Retrieve strategy: random, query") 
     update_strategy: str = Field(default="adjustment",
                                 description="Update strategy: vanilla, validation, adjustment")
+    cluster_strategy: str = Field(
+        default="kmeans",
+        description="Sleep-consolidation clustering strategy: kmeans",
+    )
     
     # Memory parameters
     k_retrieve: int = Field(default=1, gt=-1, description="Number of memories to retrieve")
@@ -121,6 +125,10 @@ class MemoryConfig(BaseModel):
         default=0.95,
         description="Discount factor shared by tactical and strategic updates.",
     )
+    gamma_omega: float = Field(
+        default=0.95,
+        description="Strategic option-value discount factor.",
+    )
     r_evidence: int = Field(
         default=50,
         description="Reservoir size for evidence IDs stored on a node.",
@@ -128,6 +136,10 @@ class MemoryConfig(BaseModel):
     n_sleep: Optional[int] = Field(
         default=None,
         description="Sleep-consolidation trigger threshold for unabsorbed d=2 nodes.",
+    )
+    theta_consolidate: Optional[float] = Field(
+        default=None,
+        description="Minimum Q-salience required for a tactical node to enter sleep consolidation.",
     )
     theta_absorb: Optional[float] = Field(
         default=None,
@@ -403,6 +415,12 @@ class MempConfig(BaseModel):
             retrieve=self.memory.retrieve_strategy,
             update=self.memory.update_strategy
         )
+
+    def get_cluster_strategy(self):
+        """Get cluster strategy for sleep consolidation."""
+        from ..service.strategies import ClusterStrategy
+
+        return ClusterStrategy.from_string(self.memory.cluster_strategy)
     
     def validate_paths(self) -> None:
         """

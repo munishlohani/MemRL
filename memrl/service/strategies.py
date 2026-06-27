@@ -59,6 +59,23 @@ class UpdateStrategy(Enum):
     """Reflect and adjust existing memories when tasks fail (recommended main method)."""
 
 
+class ClusterStrategy(Enum):
+    """
+    Cluster strategies define how eligible memories are grouped during sleep consolidation.
+
+    The clustering phase determines which tactical memories are considered together
+    before LLM-based consolidation judgment.
+    """
+
+    KMEANS = "kmeans"
+    """Cluster eligible memories with k-means (default Phase 1 strategy)."""
+
+    @classmethod
+    def from_string(cls, value: str) -> "ClusterStrategy":
+        """Create a cluster strategy from a string name."""
+        return cls(value.lower())
+
+
 class StrategyConfiguration:
     """
     Container for a complete strategy configuration.

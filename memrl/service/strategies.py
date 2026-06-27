@@ -70,6 +70,9 @@ class ClusterStrategy(Enum):
     KMEANS = "kmeans"
     """Cluster eligible memories with k-means (default Phase 1 strategy)."""
 
+    HDBSCAN = "hdbscan"
+    """Cluster eligible memories with HDBSCAN (density-based alternative)."""
+
     @classmethod
     def from_string(cls, value: str) -> "ClusterStrategy":
         """Create a cluster strategy from a string name."""

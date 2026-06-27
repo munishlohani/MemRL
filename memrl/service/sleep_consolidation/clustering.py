@@ -19,6 +19,12 @@ class KMeansClusteringStrategy(ClusteringStrategyBase):
 
     def cluster(self, embeddings: Sequence[Sequence[float]]) -> List[List[int]]:
         raise NotImplementedError("K-means clustering will be implemented next.")
+    
+    
+class HDBSCANStrategy(ClusteringStrategyBase):
+    
+    def cluster(self, embeddings: Sequence[Sequence[float]]) -> List[List[int]]:
+        return NotImplementedError("HDBSCAN clustering will be implemented next")
 
 
 #Implementation of custom strategies 

@@ -69,7 +69,7 @@ class MemoryConfig(BaseModel):
                                 description="Update strategy: vanilla, validation, adjustment")
     cluster_strategy: str = Field(
         default="kmeans",
-        description="Sleep-consolidation clustering strategy: kmeans",
+        description="Sleep-consolidation clustering strategy: kmeans, hdbscan",
     )
     
     # Memory parameters

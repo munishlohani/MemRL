@@ -6,17 +6,12 @@ from abc import ABC, abstractmethod
 from math import sqrt
 from typing import List, Optional, Sequence
 
-try:  # Optional acceleration when scientific deps are installed.
-    import numpy as np  # type: ignore
-except Exception:  # pragma: no cover - optional dependency fallback
-    np = None
+import numpy as np  # type: ignore
 
-try:  # Preferred sklearn backend when available.
-    from sklearn.cluster import KMeans
-    from sklearn.metrics import davies_bouldin_score
-except Exception:  # pragma: no cover - optional dependency fallback
-    KMeans = None
-    davies_bouldin_score = None
+
+from sklearn.cluster import KMeans
+from sklearn.metrics import davies_bouldin_score
+
 
 from ..strategies import ClusterStrategy
 
@@ -85,74 +80,16 @@ class KMeansClusteringStrategy(ClusteringStrategyBase):
             return 1
         return max(2, int(sqrt(n_samples)))
 
-    def _fallback_kmeans(self, vectors: List[List[float]], k: int) -> List[int]:
-        """Small deterministic k-means fallback when scientific deps are unavailable."""
-        centroids = [vectors[idx][:] for idx in self._initial_centroid_indices(len(vectors), k)]
-        labels = [-1] * len(vectors)
-
-        for _ in range(50):
-            new_labels: List[int] = []
-            clusters: List[List[int]] = [[] for _ in range(k)]
-            for idx, row in enumerate(vectors):
-                label = min(
-                    range(k),
-                    key=lambda cluster_idx: (
-                        self._squared_distance(row, centroids[cluster_idx]),
-                        cluster_idx,
-                    ),
-                )
-                clusters[label].append(idx)
-                new_labels.append(label)
-
-            if new_labels == labels:
-                break
-            labels = new_labels
-
-            for cluster_idx, member_indices in enumerate(clusters):
-                if not member_indices:
-                    continue
-                centroids[cluster_idx] = self._mean_vector(vectors, member_indices)
-
-        return labels
-
-    @staticmethod
-    def _initial_centroid_indices(n_samples: int, k: int) -> List[int]:
-        if k == 1:
-            return [0]
-        if k == n_samples:
-            return list(range(n_samples))
-        return [
-            min(n_samples - 1, round(i * (n_samples - 1) / (k - 1)))
-            for i in range(k)
-        ]
-
-    @staticmethod
-    def _mean_vector(vectors: List[List[float]], indices: List[int]) -> List[float]:
-        dim = len(vectors[0])
-        totals = [0.0] * dim
-        for idx in indices:
-            row = vectors[idx]
-            for dim_idx, value in enumerate(row):
-                totals[dim_idx] += value
-        count = float(len(indices))
-        return [value / count for value in totals]
-
-    @staticmethod
-    def _squared_distance(left: List[float], right: List[float]) -> float:
-        return sum((l - r) * (l - r) for l, r in zip(left, right))
-
     def _run_kmeans(self, vectors: List[List[float]], k: int) -> List[int]:
-        if KMeans is not None:
-            try:
-                labels = KMeans(
-                    n_clusters=k,
-                    n_init="auto",
-                    random_state=self.random_state,
-                ).fit_predict(np.asarray(vectors, dtype=float) if np is not None else vectors)
-                return [int(label) for label in labels.tolist()]
-            except Exception:
-                pass
-        return self._fallback_kmeans(vectors, k)
+        try:
+            labels = KMeans(
+                n_clusters=k,
+                n_init="auto",
+                random_state=self.random_state,
+            ).fit_predict(np.asarray(vectors, dtype=float) if np is not None else vectors)
+            return [int(label) for label in labels.tolist()]
+        except Exception:
+            pass
     
     def _best_k_local(self, vectors: List[List[float]], k_init: int) -> int:
         n_samples = len(vectors)

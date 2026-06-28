@@ -114,6 +114,7 @@ class SkillSimilarityRetriever:
         threshold: float = 0.0,
         current_step: int = 0,
         lambda_shrink: float = 10.0,
+        cluster_scoped: bool = False,
     ) -> Tuple[Dict[str, Any], List[Tuple[str, float]]]:
         rep_by_id = {getattr(rep, "id", None): rep for rep in representations}
         selected: List[Dict[str, Any]] = []
@@ -126,16 +127,20 @@ class SkillSimilarityRetriever:
             if rep is None:
                 continue
 
-            similarity = cosine_similarity(query_embedding, getattr(rep, "embedding", None))
-            if threshold is not None and similarity < float(threshold):
-                continue
-
             last_accessed_step = int(getattr(node, "last_accessed_step", 0) or 0)
             decay_rate = float(getattr(node, "decay_rate", 0.0) or 0.0)
             delta_t = max(0, int(current_step) - last_accessed_step)
             decay_factor = math.exp(-decay_rate * float(delta_t))
             q_value = self._weighted_mean_q(node, lambda_shrink=lambda_shrink)
-            score = similarity * decay_factor
+
+            if cluster_scoped:
+                similarity = 1.0
+                score = q_value
+            else:
+                similarity = cosine_similarity(query_embedding, getattr(rep, "embedding", None))
+                if threshold is not None and similarity < float(threshold):
+                    continue
+                score = similarity * decay_factor
 
             selected.append(
                 self._format_selected_payload(

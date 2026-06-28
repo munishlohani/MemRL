@@ -796,8 +796,14 @@ class MemoryService:
         threshold: float = 0.0,
         current_step: Optional[int] = None,
         task_type_dominant: Optional[str] = None,
+        active_strategic_node_id: Optional[str] = None,
     ) -> Tuple[Dict[str, Any], List[Tuple[str, float]]]:
-        """Retrieve memories using the current graph state and legacy tuple output."""
+        """Retrieve memories using the current graph state and legacy tuple output.
+
+        Strategic retrieval selects the active d=1 scaffold first. Tactical retrieval
+        is then scoped to that scaffold's direct children. If no strategic scaffold
+        exists yet, fall back to a flat tactical scan for bootstrap behavior only.
+        """
         if self.embedding_provider is None:
             raise ValueError("embedding_provider is required for text retrieval")
 
@@ -819,14 +825,87 @@ class MemoryService:
         if depth not in (None, 2):
             raise ValueError("retrieve_query only supports depth=1 or depth=2")
 
+        active_scaffold = self._select_active_strategic_scaffold(
+            task_type_dominant=task_type_dominant,
+            forced_scaffold_id=active_strategic_node_id,
+        )
+
+        if active_scaffold is None:
+            tactical_nodes = [
+                node
+                for node in nodes
+                if getattr(node, "depth", None) == 2
+            ]
+            resolved_step = int(
+                current_step
+                if current_step is not None
+                else getattr(self.graph, "current_step", 0) or 0
+            )
+            return self.retriever.tactical_retrieve(
+                query_text=query_text,
+                query_embedding=query_embedding,
+                nodes=tactical_nodes,
+                representations=representations,
+                top_k=k,
+                threshold=threshold,
+                current_step=resolved_step,
+                lambda_shrink=float(getattr(self.graph, "lambda_shrink", 10.0) or 10.0),
+                cluster_scoped=False,
+            )
+
+        tactical_node_ids = self.graph.child_ids(active_scaffold.id)
+        tactical_nodes = [
+            node
+            for node in nodes
+            if getattr(node, "id", None) in tactical_node_ids
+        ]
+
         resolved_step = int(current_step if current_step is not None else getattr(self.graph, "current_step", 0) or 0)
-        return self.retriever.tactical_retrieve(
+        tactical_result, topk_queries = self.retriever.tactical_retrieve(
             query_text=query_text,
             query_embedding=query_embedding,
-            nodes=nodes,
+            nodes=tactical_nodes,
             representations=representations,
             top_k=k,
             threshold=threshold,
             current_step=resolved_step,
             lambda_shrink=float(getattr(self.graph, "lambda_shrink", 10.0) or 10.0),
+            cluster_scoped=True,
+        )
+        tactical_result["active_strategic_node_id"] = active_scaffold.id
+        tactical_result["active_strategic_score"] = float(
+            self.retriever._expected_option_value(
+                active_scaffold,
+                task_type_dominant=task_type_dominant,
+            )
+        )
+        return tactical_result, topk_queries
+
+    def _select_active_strategic_scaffold(
+        self,
+        *,
+        task_type_dominant: Optional[str],
+        forced_scaffold_id: Optional[str] = None,
+    ) -> Optional[SkillNode]:
+        if forced_scaffold_id is not None:
+            return self.graph.get(forced_scaffold_id)
+
+        strategic_nodes = self.graph.nodes_at_depth(1)
+        if not strategic_nodes:
+            return None
+
+        def _score(node: SkillNode) -> float:
+            if task_type_dominant is not None:
+                q_omega = getattr(node, "Q_omega", None) or {}
+                if task_type_dominant in q_omega:
+                    return float(q_omega.get(task_type_dominant, 0.0) or 0.0)
+            return float(self.retriever._expected_option_value(node, task_type_dominant))
+
+        return max(
+            strategic_nodes,
+            key=lambda node: (
+                _score(node),
+                int(node.t_create),
+                node.id,
+            ),
         )

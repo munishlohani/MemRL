@@ -33,6 +33,10 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from ..memory.graph import SkillGraph
 from ..memory.skill_node import SkillNode
 from ..memory.skill_representation import SkillRepresentation
+from ..utils.q_utils import (
+    compute_shrinkage_weighted_mean_from_samples,
+    get_expected_option_value,
+)
 from .sleep_consolidation import (
     SleepConsolidationAction,
     SleepConsolidationResult,
@@ -704,28 +708,25 @@ class MemoryService:
 
     def _spawned_scaffold_q_omega(self, cluster_nodes: List[SkillNode]) -> Dict[str, float]:
         gamma_omega = float(getattr(self.memory_config, "gamma_omega", 0.95))
-        lambda_shrink = float(getattr(self.memory_config, "lambda_shrink", self.graph.lambda_shrink))
+        lambda_shrink = float(
+            getattr(self.memory_config, "lambda_shrink", self.graph.lambda_shrink)
+        )
         scale = 1.0 / max(1e-12, 1.0 - gamma_omega)
 
-        q_values_by_task: Dict[str, List[float]] = {}
-        weights_by_task: Dict[str, List[float]] = {}
-        for node in cluster_nodes:
-            for task_type, q_value in node.Q.items():
-                count = float(node.n.get(task_type, 0) or 0)
-                weight = count / (count + lambda_shrink)
-                if weight <= 0.0:
-                    continue
-                q_values_by_task.setdefault(task_type, []).append(float(q_value))
-                weights_by_task.setdefault(task_type, []).append(weight)
-
         q_omega: Dict[str, float] = {}
-        for task_type, values in q_values_by_task.items():
-            weights = weights_by_task.get(task_type, [])
-            weight_sum = float(sum(weights))
-            if weight_sum <= 0.0:
+        task_types = sorted({task_type for node in cluster_nodes for task_type in node.Q})
+        for task_type in task_types:
+            samples = [
+                (float(node.Q[task_type]), int(node.n.get(task_type, 0) or 0))
+                for node in cluster_nodes
+                if task_type in node.Q and int(node.n.get(task_type, 0) or 0) > 0
+            ]
+            if not samples:
                 continue
-            weighted_mean = sum(weight * value for weight, value in zip(weights, values)) / weight_sum
-            q_omega[task_type] = scale * weighted_mean
+            q_omega[task_type] = scale * compute_shrinkage_weighted_mean_from_samples(
+                samples,
+                lambda_shrink=lambda_shrink,
+            )
         return q_omega
 
     @staticmethod
@@ -874,10 +875,7 @@ class MemoryService:
         )
         tactical_result["active_strategic_node_id"] = active_scaffold.id
         tactical_result["active_strategic_score"] = float(
-            self.retriever._expected_option_value(
-                active_scaffold,
-                task_type_dominant=task_type_dominant,
-            )
+            get_expected_option_value(active_scaffold, task_type_dominant)
         )
         return tactical_result, topk_queries
 
@@ -895,11 +893,7 @@ class MemoryService:
             return None
 
         def _score(node: SkillNode) -> float:
-            if task_type_dominant is not None:
-                q_omega = getattr(node, "Q_omega", None) or {}
-                if task_type_dominant in q_omega:
-                    return float(q_omega.get(task_type_dominant, 0.0) or 0.0)
-            return float(self.retriever._expected_option_value(node, task_type_dominant))
+            return float(get_expected_option_value(node, task_type_dominant))
 
         return max(
             strategic_nodes,

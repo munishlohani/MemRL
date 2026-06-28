@@ -6,6 +6,8 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from math import sqrt
 import math
 
+from memrl.utils.q_utils import get_expected_option_value, get_q_salience
+
 
 def cosine_similarity(left: Any, right: Any) -> float:
     """Compute cosine similarity between two embedding vectors."""
@@ -131,7 +133,7 @@ class SkillSimilarityRetriever:
             decay_rate = float(getattr(node, "decay_rate", 0.0) or 0.0)
             delta_t = max(0, int(current_step) - last_accessed_step)
             decay_factor = math.exp(-decay_rate * float(delta_t))
-            q_value = self._weighted_mean_q(node, lambda_shrink=lambda_shrink)
+            q_value = get_q_salience(node, lambda_shrink=lambda_shrink)
 
             if cluster_scoped:
                 similarity = 1.0
@@ -182,7 +184,7 @@ class SkillSimilarityRetriever:
             if getattr(node, "depth", None) != 1:
                 continue
 
-            q_estimate = self._expected_option_value(node, task_type_dominant)
+            q_estimate = get_expected_option_value(node, task_type_dominant)
             rep = rep_by_id.get(getattr(node, "id", None))
             selected.append(
                 self._format_selected_payload(
@@ -206,43 +208,6 @@ class SkillSimilarityRetriever:
         simmax = max((float(item.get("score", 0.0) or 0.0) for item in selected), default=0.0)
         topk_queries = [(task_type_dominant or query_text, 1.0)] if (task_type_dominant or query_text) else []
         return {"selected": selected, "simmax": simmax}, topk_queries
-
-    @staticmethod
-    def _weighted_mean_q(node: Any, lambda_shrink: float = 10.0) -> float:
-        q_values = getattr(node, "Q", None) or {}
-        if not q_values:
-            return 0.0
-
-        n_values = getattr(node, "n", None) or {}
-        weighted_sum = 0.0
-        weight_sum = 0.0
-        for task_type, q_value in q_values.items():
-            count = float(n_values.get(task_type, 0) or 0)
-            weight = count / (count + float(lambda_shrink))
-            weighted_sum += weight * float(q_value)
-            weight_sum += weight
-        if weight_sum == 0.0:
-            return 0.0
-        return weighted_sum / weight_sum
-
-    @staticmethod
-    def _expected_option_value(node: Any, task_type_dominant: Optional[str] = None) -> float:
-        q_omega = getattr(node, "Q_omega", None) or {}
-        if task_type_dominant is not None and task_type_dominant in q_omega:
-            return float(q_omega.get(task_type_dominant, 0.0) or 0.0)
-        if not q_omega:
-            return 0.0
-
-        n_omega = getattr(node, "n_omega", None) or {}
-        total_counts = float(sum(int(v) for v in n_omega.values()))
-        if total_counts <= 0.0:
-            return 0.0
-
-        expected = 0.0
-        for task_type, q_value in q_omega.items():
-            weight = float(n_omega.get(task_type, 0) or 0) / total_counts
-            expected += weight * float(q_value)
-        return expected
 
     @staticmethod
     def _format_selected_payload(

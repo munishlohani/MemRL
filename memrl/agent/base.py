@@ -1,29 +1,25 @@
-# memp/agent/base.py
+"""Abstract agent interface for the single-agent MemRL pipeline."""
+
 from abc import ABC, abstractmethod
-from typing import List, Dict, Any
+from typing import Any, Dict, List
+
 
 class BaseAgent(ABC):
-    """
-    Abstract Base Class for an agent that can act in an environment.
-    """
-    @abstractmethod
-    def reset(self, task_description: str) -> None:
-        """
-        Resets the agent's state for a new episode.
-        This is where memory retrieval should happen.
-        """
-        pass
+    """Abstract base class for agents that generate actions for an episode."""
 
     @abstractmethod
-    def act(self, observation: str) -> str:
-        """
-        Given an observation, decide on the next action to take.
-        """
-        pass
+    def reset(self, task_description: str, **kwargs: Any) -> None:
+        """Reset agent state for a new episode."""
+
+    @abstractmethod
+    def act(
+        self,
+        observation: str,
+        history_messages: List[Dict[str, str]],
+        first_step: bool = False,
+    ) -> str:
+        """Produce the next action from the current observation and history."""
 
     @abstractmethod
     def get_trajectory(self) -> List[Dict[str, str]]:
-        """
-        Returns the full trajectory of the completed episode.
-        """
-        pass
+        """Return the completed episode trajectory."""

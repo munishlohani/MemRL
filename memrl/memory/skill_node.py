@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, Optional
 
+from memrl.utils.q_utils import get_q_salience
+
 
 @dataclass
 class SkillNode:
@@ -95,7 +97,7 @@ class SkillNode:
 
     def q_salience(self, lambda_shrink: float = 10.0) -> float:
         """Return the task-agnostic utility salience used by decay."""
-        return self._weighted_mean_utility(lambda_shrink=lambda_shrink)
+        return get_q_salience(self, lambda_shrink=lambda_shrink)
 
     def recompute_decay_rate(
         self,
@@ -108,23 +110,5 @@ class SkillNode:
             self.decay_rate = 0.0
             return
 
-        q_bar_w = self._weighted_mean_utility(lambda_shrink=lambda_shrink)
+        q_bar_w = get_q_salience(self, lambda_shrink=lambda_shrink)
         self.decay_rate = lambda_base / (q_bar_w + epsilon)
-
-    def _weighted_mean_utility(self, lambda_shrink: float = 10.0) -> float:
-        """Confidence-weighted mean over tactical Q values."""
-        if not self.Q:
-            return 0.0
-
-        weighted_sum = 0.0
-        weight_sum = 0.0
-
-        for task_type, q_value in self.Q.items():
-            count = self.n.get(task_type, 0)
-            weight = count / (count + lambda_shrink)
-            weighted_sum += weight * q_value
-            weight_sum += weight
-
-        if weight_sum == 0.0:
-            return 0.0
-        return weighted_sum / weight_sum

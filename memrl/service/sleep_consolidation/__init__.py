@@ -1,8 +1,4 @@
-"""Sleep consolidation package.
-
-This package will host clustering, prompt, and orchestration code for the
-LLM-driven sleep consolidation pipeline.
-"""
+"""Sleep consolidation package."""
 
 from .clustering import (
     ClusteringStrategyBase,
@@ -17,6 +13,7 @@ from .prompts import (
     format_cluster_contents,
 )
 from .service import SleepConsolidationService
+from .checkpoint import SleepConsolidationCheckpoint
 from .types import (
     SleepConsolidationAction,
     SleepConsolidationDecision,
@@ -30,6 +27,7 @@ __all__ = [
     "HDBSCANStrategy",
     "get_clustering_strategy",
     "SleepConsolidationService",
+    "SleepConsolidationCheckpoint",
     "SleepConsolidationAction",
     "SleepConsolidationDecision",
     "SleepConsolidationResult",

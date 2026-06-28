@@ -5,8 +5,7 @@ This module defines Pydantic models for configuration management,
 supporting both YAML and JSON configuration files.
 """
 
-import os
-from typing import Optional, Dict, Any, List
+from typing import List, Optional
 from pathlib import Path
 from pydantic import BaseModel, Field, field_validator, ConfigDict
 import yaml
@@ -58,7 +57,7 @@ class EmbeddingConfig(BaseModel):
 
 
 class MemoryConfig(BaseModel):
-    """Configuration for the memory system and Phase 1 architecture hyperparameters."""
+    """Configuration for the memory system and runner compatibility knobs."""
     
     # Strategy configuration
     build_strategy: str = Field(default="proceduralization", 
@@ -88,7 +87,7 @@ class MemoryConfig(BaseModel):
     memory_budget_tokens: int = Field(default=0,
                                       description="Token budget (character-level) for injected memory context. 0 means unlimited (no truncation).")
 
-    # Phase 1 architecture hyperparameters from Project.md
+    # Phase 1 hyperparameters from Project.md.
     theta_delta: Optional[float] = Field(
         default=None,
         description="Gate 1 TD-error admission threshold for tactical skill formation.",
@@ -123,7 +122,7 @@ class MemoryConfig(BaseModel):
     )
     gamma: float = Field(
         default=0.95,
-        description="Discount factor shared by tactical and strategic updates.",
+        description="Tactical discount factor.",
     )
     gamma_omega: float = Field(
         default=0.95,
@@ -141,21 +140,6 @@ class MemoryConfig(BaseModel):
         default=None,
         description="Minimum Q-salience required for a tactical node to enter sleep consolidation.",
     )
-    theta_absorb: Optional[float] = Field(
-        default=None,
-        description="Minimum centroid-to-scaffold similarity for sleep absorption.",
-    )
-    k_bootstrap: Optional[int] = Field(
-        default=None,
-        description="Bootstrap limit before sleep consolidation becomes the normal source of d=1 nodes.",
-    )
-
-    @property
-    def effective_k_bootstrap(self) -> Optional[int]:
-        """Return the bootstrap threshold implied by the sleep trigger."""
-        if self.k_bootstrap is not None:
-            return self.k_bootstrap
-        return self.n_sleep
 
     user_id: str = Field(default="memp_user", description="User ID for memory management")
     skill_db_path: str = Field(
@@ -409,7 +393,7 @@ class MempConfig(BaseModel):
     def get_strategy_config(self):
         """Get strategy configuration for MemoryService."""
         from ..service.strategies import StrategyConfiguration
-        
+
         return StrategyConfiguration.from_strings(
             build=self.memory.build_strategy,
             retrieve=self.memory.retrieve_strategy,
@@ -417,30 +401,11 @@ class MempConfig(BaseModel):
         )
 
     def get_cluster_strategy(self):
-        """Get cluster strategy for sleep consolidation."""
+        """Get the sleep-consolidation clustering strategy."""
         from ..service.strategies import ClusterStrategy
 
         return ClusterStrategy.from_string(self.memory.cluster_strategy)
-    
-    def validate_paths(self) -> None:
-        """
-        Validate that all specified paths exist.
-        
-        Raises:
-            FileNotFoundError: If required paths don't exist
-        """
-        paths_to_check = [
-            (self.environment.alfworld_config_path, "ALFWorld config file"),
-        ]
-        
-        # Only check TravelPlanner data dir if it's not the default relative path
-        if not self.environment.travelplanner_data_dir.startswith("../"):
-            paths_to_check.append((self.environment.travelplanner_data_dir, "TravelPlanner data directory"))
-        
-        for path, description in paths_to_check:
-            if not Path(path).exists():
-                print(f"Warning: {description} not found at {path}")
-    
+
     def __str__(self) -> str:
         """String representation of the configuration."""
         strategy_str = f"{self.memory.build_strategy}+{self.memory.retrieve_strategy}+{self.memory.update_strategy}"

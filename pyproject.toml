@@ -39,6 +39,7 @@ dependencies = [
     "tenacity>=8.0.0",
     # Benchmark-specific dependencies are installed via `requirements.txt`
     # (see `requirements/benchmarks.txt`) to keep the core package lightweight.
+    "pytest>=9.1.0",
 ]
 
 [project.optional-dependencies]

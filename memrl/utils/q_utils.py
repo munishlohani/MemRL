@@ -183,10 +183,33 @@ def get_expected_option_value(
         return compute_shrinkage_weighted_mean(q_omega, n_omega)
 
 
+def compute_td_error(
+    reward: float,
+    *,
+    gamma: float,
+    next_value: float,
+    current_value: float,
+) -> float:
+    """Compute the standard one-step TD error."""
+    return float(reward) + float(gamma) * float(next_value) - float(current_value)
+
+
+def apply_q_update(
+    current_value: float,
+    td_error: float,
+    *,
+    alpha: float,
+) -> float:
+    """Apply a vanilla TD update to a scalar Q estimate."""
+    return float(current_value) + float(alpha) * float(td_error)
+
+
 __all__ = [
     "compute_shrinkage_weighted_mean_from_samples",
     "compute_shrinkage_weighted_mean",
     "get_q_salience",
     "get_q_omega_salience",
     "get_expected_option_value",
+    "compute_td_error",
+    "apply_q_update",
 ]

@@ -32,13 +32,18 @@ class SleepConsolidationCheckpoint:
 
     def check_and_trigger(self) -> Optional[Dict[str, Any]]:
         """Check whether sleep consolidation should fire."""
+        n_sleep = getattr(self.memory_config, "n_sleep", None)
+        if n_sleep is None:
+            logger.debug("Sleep consolidation disabled: n_sleep is unset")
+            return None
+
         unconsolidated_count = sum(
             1
             for node in self.graph.nodes.values()
             if node.is_tactical and not node.consolidated
         )
 
-        n_sleep = getattr(self.memory_config, "n_sleep", 10)
+        n_sleep = int(n_sleep)
         if unconsolidated_count < n_sleep:
             logger.debug(
                 "Sleep consolidation not triggered: "

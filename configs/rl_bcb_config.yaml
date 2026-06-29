@@ -44,6 +44,7 @@ memory:
   confidence_threshold: 0.0
   memory_confidence: 100.0
   add_similarity_threshold: 0.9
+  n_sleep: 10
   # Token budget (character-level) for injected memory context.
   # 0 means unlimited – all retrieved memories are included without truncation.
   memory_budget_tokens: 0

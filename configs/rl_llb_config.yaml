@@ -43,6 +43,7 @@ memory:  # Memory system settings (strategies + thresholds).
   confidence_threshold: 0.0         # Min similarity threshold (used by some retrieval modes).
   memory_confidence: 100.0          # Default confidence score for new memories (used by some builders).
   add_similarity_threshold: 0.99    # Similarity threshold to merge/skip when adding memories.
+  n_sleep: 10
 
   # MemOS
   mos_config_path: "configs/mos_config.json"  # MemOS config path (NOTE: run/run_llb.py overrides this at runtime).

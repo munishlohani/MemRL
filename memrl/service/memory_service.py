@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import math
 from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
@@ -235,6 +236,11 @@ class MemoryService:
         with self._engine.begin() as conn:
             conn.execute(stmt)
 
+    def persist_node_state(self, node_or_id: SkillNode | str) -> None:
+        """Persist the current in-memory node state back to SQLite."""
+        node = node_or_id if isinstance(node_or_id, SkillNode) else self.graph.get(node_or_id)
+        self._upsert_graph_state(node)
+
     def _fetch_representation(self, node_id: str) -> SkillRepresentation:
         stmt = select(
             self.skill_representation_table.c.node_id,
@@ -388,6 +394,7 @@ class MemoryService:
         parent_id: Optional[str] = None,
         embedding: Optional[List[float]] = None,
         evidence_ids: Optional[List[str]] = None,
+        last_accessed_step: Optional[int] = None,
     ) -> SkillNode:
         """Create a node from text and add it to the service."""
         if embedding is None:
@@ -416,12 +423,62 @@ class MemoryService:
         else:
             raise ValueError("depth must be 1 or 2")
 
+        if last_accessed_step is not None:
+            node.last_accessed_step = int(last_accessed_step)
+
         representation = SkillRepresentation(
             id=id,
             content=content,
             embedding=embedding,
         )
         return self.add_node(node, representation, parent_id=parent_id)
+
+#O(n^2) time complexity. Need to work on this
+
+    def prune_tactical_nodes(
+        self,
+        *,
+        current_step: Optional[int] = None,
+        theta_prune: Optional[float] = None,
+    ) -> List[str]:
+        """Prune tactical nodes whose decay-based retention falls below threshold."""
+        resolved_threshold = theta_prune
+        if resolved_threshold is None:
+            resolved_threshold = getattr(self.memory_config, "theta_prune", None)
+        if resolved_threshold is None:
+            return []
+
+        threshold = float(resolved_threshold)
+        resolved_step = int(
+            current_step
+            if current_step is not None
+            else getattr(self.graph, "current_step", 0) or 0
+        )
+
+        removed_ids: List[str] = []
+        tactical_nodes = [
+            node for node in list(self.graph.nodes.values()) if node.is_tactical
+        ]
+        for node in tactical_nodes:
+            delta_t = max(0, resolved_step - int(node.last_accessed_step))
+            retention = math.exp(-float(node.decay_rate) * float(delta_t))
+            if retention < threshold:
+                node_removed_ids = self.graph.remove(node.id)
+                removed_ids.extend(node_removed_ids)
+                with self._engine.begin() as conn:
+                    for rid in node_removed_ids:
+                        conn.execute(
+                            delete(self.skill_representation_table).where(
+                                self.skill_representation_table.c.node_id == rid
+                            )
+                        )
+                        conn.execute(
+                            delete(self.skill_graph_state_table).where(
+                                self.skill_graph_state_table.c.node_id == rid
+                            )
+                        )
+
+        return removed_ids
 
     def get_node(self, node_id: str) -> SkillNode:
         return self.graph.get(node_id)

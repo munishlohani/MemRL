@@ -3,12 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 import copy
 import logging
-import os
 from uuid import uuid4
-import yaml
 import time
 import numpy as np
-import pandas as pd
 import json
 import random
 
@@ -41,21 +38,6 @@ MAX_SKILL_INVOCATIONS=3
 
 
 logger=logging.getLogger(__name__)
-
-
-def load_config_from_path(config_path: str, params=None):
-    assert os.path.exists(config_path), f"Invalid config file: {config_path}"
-    with open(config_path) as reader:
-        config = yaml.safe_load(reader)
-    if params is not None:
-        for param in params:
-            fqn_key, value = param.split("=")
-            entry_to_change = config
-            keys = fqn_key.split(".")
-            for k in keys[:-1]:
-                entry_to_change = entry_to_change[k]
-            entry_to_change[keys[-1]] = value
-    return config
 
 class EpisodeRunner(BaseEpisodeRunner):
 
@@ -138,16 +120,13 @@ class EpisodeRunner(BaseEpisodeRunner):
         self.ckpt_resume_epoch = ckpt_resume_epoch
 
         self.current_step = 0
-        self.current_episode = 0
         self.results_log: List[Dict[str, Any]] = []
-        self.episode_history = EpisodeHistory()
         self.episode_histories = [EpisodeHistory() for _ in range(self.batch_size)]
         self.pending_formations: List[Dict[str, Any]] = []
         self.episode_rewards: List[float] = []
         self.active_strategic_node_ids: List[Optional[str]] = []
         self.active_strategic_node_summaries: List[Optional[str]] = []
         self.sleep_bootstrap_tactical_min = getattr(self.memory_config, "n_sleep", None)
-        self.metrics_backend = "ray"
         self.metrics_namespace = f"episode/{self.experiment_name}"
         self.metrics_history: List[Dict[str, Any]] = []
         self.metrics_reporter = self._report_metrics
@@ -156,8 +135,6 @@ class EpisodeRunner(BaseEpisodeRunner):
         if self.random_seed is not None:
             random.seed(int(self.random_seed))
             np.random.seed(int(self.random_seed))
-
-        self._resume_state: Dict[str, Any] = {}
 
     def run(self) -> Dict[str, Any]:
         reset_result = self.env_adapter.reset()
@@ -319,11 +296,24 @@ class EpisodeRunner(BaseEpisodeRunner):
                     episode_infos[slot_idx] = merged_info
                     self.episode_histories[slot_idx].add_step(next_obs)
 
+                    # The env info does not carry the retrieved memory id, so the
+                    # per-step Q-update would otherwise never know which tactical
+                    # node the agent actually used. Resolve the active retrieved
+                    # tactical node from this slot's retrieval state and feed it
+                    # into the Q-update (and downstream formation pipeline).
+                    active_memory_id = self._resolve_active_tactical_id(
+                        slot_contexts[slot_idx]
+                    )
+                    q_update_info = dict(step_infos[slot_idx] if slot_idx < len(step_infos) else {})
+                    if active_memory_id is not None and "memory_id" not in q_update_info:
+                        q_update_info["memory_id"] = active_memory_id
+
                     source_memory_id, td_error = self._update_step_q_values(
                         task_type=task_types[slot_idx],
                         reward=reward,
-                        info=step_infos[slot_idx] if slot_idx < len(step_infos) else {},
+                        info=q_update_info,
                         done=done,
+                        active_strategic_node_id=active_strategic_node_ids[slot_idx],
                     )
                     if td_error is not None and td_error > 0.0:
                         slot_context = slot_contexts[slot_idx]
@@ -702,7 +692,29 @@ class EpisodeRunner(BaseEpisodeRunner):
             value = info.get(key)
             if isinstance(value, str) and value.strip():
                 return value.strip()
+        mode = str(getattr(self.memory_config, "task_type_mode", "explicit")).lower()
+        if mode == "benchmark":
+            mapped = self._benchmark_task_type()
+            if mapped is not None:
+                return mapped
         return f"episode_{index}"
+
+    def _benchmark_task_type(self) -> Optional[str]:
+        """Coarse benchmark-level taxonomy (W5) when no explicit task type.
+
+        alfworld -> embodied, bcb -> coding, hle -> reasoning, llb -> lifelong.
+        Returns None when the benchmark cannot be inferred from the experiment name.
+        """
+        name = (self.experiment_name or "").lower()
+        if "alf" in name:
+            return "embodied"
+        if "bcb" in name or "bigcode" in name:
+            return "coding"
+        if "hle" in name:
+            return "reasoning"
+        if "llb" in name or "lifelong" in name:
+            return "lifelong"
+        return None
 
     def _infer_episode_id(self, index: int, info: Dict[str, Any]) -> str:
         for key in ("episode_id", "id", "sample_id", "task_id", "gamefile"):
@@ -742,6 +754,7 @@ class EpisodeRunner(BaseEpisodeRunner):
         reward: float,
         info: Dict[str, Any],
         done: bool,
+        active_strategic_node_id: Optional[str],
     ) -> tuple[Optional[str], Optional[float]]:
         node_id = self._resolve_tactical_node_id(info)
         if node_id is None:
@@ -752,7 +765,10 @@ class EpisodeRunner(BaseEpisodeRunner):
             return None, None
 
         current_value = float((node.Q or {}).get(task_type, 0.0))
-        next_value = 0.0 if done else float(info.get("next_q_estimate", 0.0) or 0.0)
+        next_value = 0.0 if done else self._estimate_next_tactical_value(
+            task_type=task_type,
+            active_strategic_node_id=active_strategic_node_id,
+        )
         gamma = float(getattr(self.memory_config, "gamma", 0.95))
         alpha = float(getattr(self.memory_config, "alpha", 0.1))
         td_error = compute_td_error(
@@ -788,6 +804,53 @@ class EpisodeRunner(BaseEpisodeRunner):
 
         return node_id, td_error
 
+    def _estimate_next_tactical_value(
+        self,
+        *,
+        task_type: str,
+        active_strategic_node_id: Optional[str],
+    ) -> float:
+        graph = getattr(self.memory_service, "graph", None)
+        if graph is None:
+            return 0.0
+
+        if active_strategic_node_id is not None:
+            candidate_ids = self._graph_child_ids(graph, active_strategic_node_id)
+            candidate_nodes = [
+                graph.nodes[node_id]
+                for node_id in candidate_ids
+                if node_id in graph.nodes
+                and getattr(graph.nodes[node_id], "is_tactical", False)
+            ]
+        else:
+            candidate_nodes = [
+                node
+                for node in graph.nodes.values()
+                if getattr(node, "is_tactical", False)
+            ]
+
+        if not candidate_nodes:
+            return 0.0
+
+        return max(
+            float((node.Q or {}).get(task_type, 0.0) or 0.0)
+            for node in candidate_nodes
+        )
+
+    @staticmethod
+    def _graph_child_ids(graph: Any, parent_id: str) -> set[str]:
+        if hasattr(graph, "child_ids"):
+            try:
+                return set(graph.child_ids(parent_id))
+            except Exception:
+                logger.debug("Failed to query graph child ids", exc_info=True)
+
+        return {
+            getattr(node, "id", "")
+            for node in getattr(graph, "nodes", {}).values()
+            if getattr(node, "parent_id", None) == parent_id
+        }
+
     def _update_episode_q_omega(
         self,
         *,
@@ -800,6 +863,11 @@ class EpisodeRunner(BaseEpisodeRunner):
     ) -> None:
         gamma_omega = float(getattr(self.memory_config, "gamma_omega", 0.95))
         alpha_omega = float(getattr(self.memory_config, "alpha_omega", 0.1))
+        # W4 single-discount ablation: when strategic_discount_mode == "shared",
+        # collapse the strategic discount onto the tactical gamma so the
+        # separate-gamma claim can be tested against the single-gamma control.
+        if str(getattr(self.memory_config, "strategic_discount_mode", "separate")).lower() == "shared":
+            gamma_omega = float(getattr(self.memory_config, "gamma", gamma_omega))
         for slot_idx, rewards in enumerate(reward_histories):
             node_id = active_strategic_node_ids[slot_idx] if slot_idx < len(active_strategic_node_ids) else None
             if node_id is None:
@@ -833,6 +901,17 @@ class EpisodeRunner(BaseEpisodeRunner):
                 node.n_omega[task_type] = int(node.n_omega.get(task_type, 0) or 0) + 1
 
             self.memory_service.persist_node_state(node)
+
+            # Feed empirical episode-length statistics for finite-horizon
+            # Q^Omega init of future spawned scaffolds (spec §3.5, W3).
+            if hasattr(self.memory_service, "record_episode_length"):
+                try:
+                    self.memory_service.record_episode_length(
+                        task_types[slot_idx],
+                        int(step_counts[slot_idx] if slot_idx < len(step_counts) else len(rewards)),
+                    )
+                except Exception:
+                    logger.debug("Failed to record episode length", exc_info=True)
 
             self._report_metrics(
                 {
@@ -988,6 +1067,33 @@ class EpisodeRunner(BaseEpisodeRunner):
             value = info.get(key)
             if isinstance(value, str) and value.strip():
                 return value.strip()
+        return None
+
+    def _resolve_active_tactical_id(self, slot_context: Dict[str, Any]) -> Optional[str]:
+        """Return the tactical node id the agent retrieved for this slot, if any.
+
+        The env adapter does not know which memory the agent used, so without
+        this the per-step Q-update and TD-driven formation pipeline never fire
+        in the real loop. We look up the retrieval state captured during the
+        agent turn and return the first selected id that is currently a
+        *tactical* node in the graph.
+        """
+        retrieval_state = slot_context.get("retrieval_state") if isinstance(slot_context, dict) else None
+        if not isinstance(retrieval_state, dict):
+            return None
+        raw_ids = retrieval_state.get("selected_ids")
+        if not isinstance(raw_ids, list):
+            return None
+        graph = getattr(self.memory_service, "graph", None)
+        for raw in raw_ids:
+            node_id = str(raw or "").strip()
+            if not node_id:
+                continue
+            if graph is not None:
+                node = graph.nodes.get(node_id)
+                if node is None or not getattr(node, "is_tactical", False):
+                    continue
+            return node_id
         return None
 
     def _has_strategic_scaffolds(self) -> bool:

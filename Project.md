@@ -184,6 +184,8 @@ The shrinkage-weighted mean converts cluster tactical Q-values (per-step scale) 
 
 **Approximation note:** $\frac{1}{1-\gamma^\Omega}$ is an infinite-horizon upper bound. For finite episodes of length $T$, the actual sum $\sum_{t=0}^{T-1}(\gamma^\Omega)^t < \frac{1}{1-\gamma^\Omega}$. This overestimates $Q^\Omega$ at initialization — acceptable for Phase 1, self-correcting through subsequent strategic updates. Empirical episode-length normalization deferred to Phase 2.
 
+**Implemented mitigation (W3, this revision):** the reference implementation now supports a `q_omega_init_horizon` mode. The default `"infinite"` preserves the $\frac{1}{1-\gamma^\Omega}$ bound above for backward compatibility. The `"empirical"` mode replaces the bound with the finite-horizon geometric sum $S(T)=\frac{1-(\gamma^\Omega)^T}{1-\gamma^\Omega}$, where $T$ is the running mean episode length tracked per task type (`MemoryService.record_episode_length`). Because $S(T)\le \frac{1}{1-\gamma^\Omega}$ for all $T\ge 0$, empirical init **never exceeds** the infinite-horizon bound — it only reduces the overestimation. When no episode-length statistics are available yet, `"empirical"` falls back to the infinite bound. This makes the spawned-scaffold utility testable independently of the overestimation artifact (Reviewer W3): a zero-init control can now be compared against both infinite- and empirical-horizon init.
+
 **Task types not observed** by any cluster member are absent from $Q^\Omega$ at creation — cold task type fallback (§9.1) handles this at retrieval time.
 
 **Do not initialize spawned scaffolds to zero** — zero-initialized scaffolds are never selected, so $Q^\Omega$ never gets updated, so they remain at zero indefinitely (FeUdal Networks dead-layer problem, Vezhnevets et al., 2017).
@@ -837,3 +839,56 @@ $\theta_1$, $\theta_2$, $\theta_{\text{CV}}$, $N_{\min}$, $\epsilon_{\text{hyst}
 | Decay salience | N/A | $\bar{Q}_{i,w}$ — shrinkage-weighted mean across task types; task-agnostic; consistent with unified graph |
 | Strategic scaffolds | None | Permanent $d=1$ nodes; never decay; $Q^\Omega$ per task type; initialized from cluster shrinkage-weighted mean, not zero |
 | LLM dependency | All memory decisions | Semantic judgment only (formation quality, consolidation synthesis); structural decisions are algorithmic |
+
+---
+
+## 14. Theoretical Derivation: Single-Discount Bias in $Q^\Omega$ (W4)
+
+The spec (§2.6) claims that sharing a single discount $\gamma$ across both tiers introduces *systematic bias* in $Q^\Omega$ estimates when episodes are long, and that separate $\gamma$ (tactical) and $\gamma^\Omega$ (strategic) are therefore required. This section derives the claim formally so it is asserted, not merely stated.
+
+**Setup.** Let an episode have length $T$. The strategic option-value accumulates the *full-episode discounted return*
+
+$$G^\Omega = \sum_{t=0}^{T-1} (\gamma^\Omega)^t\, r_t$$
+
+and is updated once per episode toward $G^\Omega$ (§3.8). The tactical Q-value is updated per *step* toward the one-step bootstrap target $r_t + \gamma\,\max Q(\cdot)$ (§3.2). These two estimates live on **different timescales**: $Q^\Omega$ is on the *episode-return* scale; $Q_i$ is on the *per-step* scale.
+
+**Claim.** Using a single shared discount $\gamma_{\text{shared}}$ for both tiers conflates two distinct quantities and biases $Q^\Omega$ whenever $\gamma_{\text{shared}}$ is chosen to suit the *tactical* (per-step) regime.
+
+**Derivation.** Under a single discount $\gamma_{\text{shared}}$:
+- The tactical update requires $\gamma_{\text{shared}} \in [0.9, 0.99]$ so that $Q_i$ propagates credit across local steps (a tactical $\gamma \approx 0$ collapses to greedy one-step lookahead).
+- The strategic target then becomes $G^\Omega_{\text{shared}} = \sum_{t=0}^{T-1} (\gamma_{\text{shared}})^t r_t$.
+
+But the *correct* strategic target under the semi-MDP options formulation is the **model-free estimate of the option's value**, which for an option of duration $T$ should discount by the **option's own discount** $\gamma^\Omega$ over the *whole-option* trajectory, not by the intra-option per-step discount. Concretely, the semi-MDP value of an option is
+
+$$Q^\Omega(s,\omega) = \mathbb{E}\!\left[\sum_{k=0}^{K-1} (\gamma^\Omega)^k\, R^{(k)} \;\middle|\; s_0=s,\ \omega_0=\omega\right]$$
+
+where $R^{(k)}$ is the *cumulative reward over the $k$-th option execution* and $K$ is the number of options. In Phase 1 each episode runs a single option to termination, so $K=1$ and the strategic target is the **undiscounted** (or $\gamma^\Omega$-discounted) episode return — **not** $\sum_t (\gamma_{\text{shared}})^t r_t$.
+
+The bias is the ratio of the two geometric sums:
+
+$$\text{bias}(T) \;=\; \frac{G^\Omega_{\text{shared}}}{G^\Omega} \;=\; \frac{\sum_{t=0}^{T-1} (\gamma_{\text{shared}})^t r_t}{\sum_{t=0}^{T-1} r_t} \;=\; \frac{1 - (\gamma_{\text{shared}})^T}{(1-\gamma_{\text{shared}})\,T} \quad (\text{for constant } r_t)$$
+
+For $\gamma_{\text{shared}} = 0.95$, $T = 30$ (default `max_steps`): $\text{bias} \approx \frac{1 - 0.95^{30}}{0.05 \cdot 30} = \frac{1 - 0.215}{1.5} \approx 0.52$. The single-discount estimate is **≈48% below** the undiscounted episode return that $Q^\Omega$ is supposed to track. For $T = 50$: bias $\approx 0.37$ (a 63% underestimation). The bias is **monotone decreasing in $T$** — exactly the "systematic bias for long episodes" claimed in §2.6.
+
+**Why separate discounts fix it.** With $\gamma^\Omega$ chosen *independently* of $\gamma$, the strategic target $G^\Omega = \sum_t (\gamma^\Omega)^t r_t$ can be set to track the whole-option return directly (e.g., $\gamma^\Omega \to 1$ recovers the undiscounted return; $\gamma^\Omega = 0.99$ gives mild across-episode decay when $K>1$ in Phase 2), while $\gamma$ remains free to tune per-step tactical credit. The two hyperparameters index two distinct timescales that a single scalar cannot span.
+
+**Empirical ablation control (implemented).** The reference implementation exposes `strategic_discount_mode`: `"separate"` (default, $\gamma$ vs $\gamma^\Omega$) vs `"shared"` (collapses $\gamma^\Omega$ onto $\gamma$, reproducing the single-discount regime above). This makes the §2.6 claim *falsifiable*: an ablation comparing the two modes on long-episode benchmarks (ALFWorld, LLB-os) should show the shared mode systematically under-estimates $Q^\Omega$ and degrades scaffold selection. If the ablation shows no difference, the claim must be retracted per Reviewer W4.
+
+---
+
+## 15. Relationship to Hierarchical RL Literature (W6)
+
+The architecture reuses well-known hierarchical-RL (HRL) and skill-discovery primitives. This section maps each component to its closest HRL analogue and states what is genuinely new beyond domain transfer, so the contribution is not over-claimed.
+
+| Component | Closest HRL analogue | What is new here (beyond domain transfer) |
+|---|---|---|
+| Two-tier options ($d=1$ strategic / flat tactical) | Sutton, Precup & Singh (1999) *Options*; Vezhnevets et al. (2017) *FeUdal Networks* (manager/worker) | Memory side-channel $\mathcal{M}$ conditioning the policy (not part of $S$); options are *retrieved skill scaffolds* with LLM-synthesized content, not learned sub-policies |
+| Strategic option-value $Q^\Omega$ | Semi-MDP option-value (Sutton et al. 1999; Bacon et al. 2017 *Option-Critic*) | Per-task-type storage + shrinkage-weighted salience; horizon-normalized cluster-mean initialization (not zero, avoiding FeUdal dead-layer) |
+| Tactical TD Q-learning | Standard one-step Q-learning over a discrete action set | The "action set" is a *self-organizing skill graph* with utility-modulated decay controlling its membership and a hard cap $\|A^\tau\|\le N$ |
+| Skill discovery via clustering | Eysenbach et al. (2019) *DIAYN*; Tessler et al. (2017) *H-DRLN* (skill discovery + reuse) | Discovery is *offline batch* (sleep consolidation) over semantically meaningful LLM-summarized skills, not over latent policy states; LLM returns a structured spawn/absorb/discard decision |
+| Utility-based retention | Prioritized experience replay (Schaul et al. 2016) recency/frequency heuristics | Biologically-grounded **Ebbinghaus decay modulated by $\bar{Q}_{i,w}$** — retention is a continuous function of *utility evidence*, decoupled from recency; task-agnostic global salience for a unified graph |
+| TD-error formation gate | Surprise-driven learning signals; prioritized replay TD-error | **Two-stage gate**: cheap algorithmic TD-error pre-filter *before* an expensive LLM semantic judgment — explicitly offloads the *structural* "what to store" decision off the LLM |
+
+**The genuine contribution**, beyond applying HRL primitives to LLM agents, is the **division of labor between an algorithmic structural layer and an LLM semantic-judgment layer**: TD error, Ebbinghaus decay, and clustering decide *formation, retention, and consolidation timing*; the LLM is invoked only for *semantic* judgment (is this a coherent skill? does this cluster generalize?). This is the opposite of base MemRL, which delegates *all* memory-quality judgment to the backbone LLM's in-context reasoning at retrieval time. The side-channel $\mathcal{M}$ formulation (memory conditions the policy without entering $S$, preserving convergence) and the TD-pre-filter-gates-LLM-call pattern are the domain-specific novelty — not the options or clustering themselves, which are acknowledged HRL borrowings.
+
+**Positioning vs Option-Critic / DIAYN:** those works *learn* the option policy and termination end-to-end from reward. This work does **not** learn sub-policies — the backbone LLM is the (fixed) policy; the options are *memory structures* that condition the LLM's context. The contribution is a memory architecture, not a new HRL algorithm, and should be framed as such.

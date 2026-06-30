@@ -1,0 +1,32 @@
+# Ray execution profile for ALFWorld EpisodeRunner runs.
+#
+# Usage:
+#   python run/run_alfworld_ray.py --config configs/rl_alf_config.yaml --ray-config configs/rl_alf_ray.yml
+#
+# The `trials` list can hold one or many override sets. Each trial is merged
+# into the base MemRL YAML config before the runner is constructed.
+
+ray:
+  address: null
+  local_mode: false
+  ignore_reinit_error: true
+  log_to_driver: true
+  resources_per_trial:
+    num_cpus: 1
+
+trials:
+  - name: alfworld-baseline
+    overrides:
+      experiment:
+        experiment_name: alfworld_memrl_ray
+        mode: train
+        batch_size: 1
+        num_sections: 1
+        max_steps: 25
+      memory:
+        k_retrieve: 5
+        cluster_strategy: kmeans
+        task_type_mode: explicit
+      rl_config:
+        alpha: 0.3
+        gamma: 0.0

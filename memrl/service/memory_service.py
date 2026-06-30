@@ -128,6 +128,40 @@ class MemoryService:
             self._load_graph_state()
         self.retriever = SkillSimilarityRetriever()
 
+        # Empirical episode-length statistics per task type, used by the
+        # finite-horizon Q^Omega initialization for spawned scaffolds
+        # (spec §3.5, W3). Running mean to keep memory O(#task types).
+        self._episode_length_sum: Dict[str, float] = {}
+        self._episode_length_count: Dict[str, int] = {}
+
+    def record_episode_length(self, task_type: str, length: int) -> None:
+        """Feed an observed episode length into the per-task-type running mean.
+
+        Used by the finite-horizon Q^Omega initialization. Call once per
+        finished episode. No-op when ``length`` is not a positive int.
+        """
+        try:
+            length_f = float(int(length))
+        except (TypeError, ValueError):
+            return
+        if length_f <= 0.0 or not task_type:
+            return
+        self._episode_length_sum[task_type] = (
+            self._episode_length_sum.get(task_type, 0.0) + length_f
+        )
+        self._episode_length_count[task_type] = (
+            self._episode_length_count.get(task_type, 0) + 1
+        )
+
+    def mean_episode_length(self, task_type: Optional[str]) -> Optional[float]:
+        """Return the tracked mean episode length for a task type, or None."""
+        if not task_type:
+            return None
+        count = self._episode_length_count.get(task_type, 0)
+        if count <= 0:
+            return None
+        return self._episode_length_sum.get(task_type, 0.0) / float(count)
+
     @staticmethod
     def _serialize_embedding(embedding: List[float]) -> bytes:
         values = [float(value) for value in embedding]
@@ -768,7 +802,23 @@ class MemoryService:
         lambda_shrink = float(
             getattr(self.memory_config, "lambda_shrink", self.graph.lambda_shrink)
         )
-        scale = 1.0 / max(1e-12, 1.0 - gamma_omega)
+        horizon_mode = str(
+            getattr(self.memory_config, "q_omega_init_horizon", "infinite")
+        ).lower()
+        min_horizon = max(1, int(getattr(self.memory_config, "q_omega_init_min_horizon", 1)))
+        infinite_scale = 1.0 / max(1e-12, 1.0 - gamma_omega)
+
+        def _scale_for(task_type: str) -> float:
+            # Finite-horizon geometric sum S(T) = (1 - gamma^T) / (1 - gamma).
+            # Always <= 1/(1-gamma), so empirical init never exceeds the
+            # infinite-horizon upper bound (spec §3.5 approximation note).
+            if horizon_mode != "empirical":
+                return infinite_scale
+            mean_len = self.mean_episode_length(task_type)
+            if mean_len is None:
+                return infinite_scale
+            horizon = max(min_horizon, int(round(mean_len)))
+            return (1.0 - gamma_omega ** float(horizon)) / max(1e-12, 1.0 - gamma_omega)
 
         q_omega: Dict[str, float] = {}
         task_types = sorted({task_type for node in cluster_nodes for task_type in node.Q})
@@ -780,7 +830,7 @@ class MemoryService:
             ]
             if not samples:
                 continue
-            q_omega[task_type] = scale * compute_shrinkage_weighted_mean_from_samples(
+            q_omega[task_type] = _scale_for(task_type) * compute_shrinkage_weighted_mean_from_samples(
                 samples,
                 lambda_shrink=lambda_shrink,
             )

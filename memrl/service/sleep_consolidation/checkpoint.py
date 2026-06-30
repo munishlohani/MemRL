@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, Optional
 
+from ..strategies import ClusterStrategy
 from .service import SleepConsolidationService
 
 logger = logging.getLogger(__name__)
@@ -69,7 +70,11 @@ class SleepConsolidationCheckpoint:
         if self.llm_provider is None:
             raise ValueError("llm_provider is required for sleep consolidation")
 
-        sleep_service = SleepConsolidationService(llm_provider=self.llm_provider)
+        cluster_strategy = self._resolved_cluster_strategy()
+        sleep_service = SleepConsolidationService(
+            llm_provider=self.llm_provider,
+            cluster_strategy=cluster_strategy,
+        )
         results = self.memory_service.sleep_consolidate(
             sleep_service,
             theta_consolidate=theta_consolidate,
@@ -86,3 +91,14 @@ class SleepConsolidationCheckpoint:
             summary["num_results"],
         )
         return summary
+
+    def _resolved_cluster_strategy(self) -> ClusterStrategy:
+        if self.memory_config is None:
+            return ClusterStrategy.KMEANS
+
+        getter = getattr(self.memory_config, "get_cluster_strategy", None)
+        if callable(getter):
+            return getter()
+
+        strategy_name = str(getattr(self.memory_config, "cluster_strategy", "kmeans"))
+        return ClusterStrategy.from_string(strategy_name)

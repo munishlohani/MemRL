@@ -315,8 +315,13 @@ class EpisodeRunner(BaseEpisodeRunner):
                         done=done,
                         active_strategic_node_id=active_strategic_node_ids[slot_idx],
                     )
-                    if td_error is not None and td_error > 0.0:
-                        slot_context = slot_contexts[slot_idx]
+                    slot_context = slot_contexts[slot_idx]
+                    if self._should_queue_tactical_candidate(
+                        observation=slot_context.get("current_observation", ""),
+                        reward=reward,
+                        action=actions[slot_idx],
+                        td_error=td_error,
+                    ):
                         retrieval_state = slot_context.get("retrieval_state", {})
                         retrieval_context = "No archived memories."
                         retrieved_ids: List[str] = []
@@ -1104,7 +1109,25 @@ class EpisodeRunner(BaseEpisodeRunner):
             return bool(graph.nodes_at_depth(1))
         except Exception:
             logger.debug("Failed to inspect strategic scaffold availability", exc_info=True)
+        return False
+
+    @staticmethod
+    def _should_queue_tactical_candidate(
+        *,
+        observation: Any,
+        reward: float,
+        action: Any,
+        td_error: Optional[float],
+    ) -> bool:
+        if td_error is None or td_error <= 0.0:
             return False
+        if float(reward) <= 0.0:
+            return False
+        if not str(observation or "").strip():
+            return False
+        if not str(action or "").strip():
+            return False
+        return True
 
     def _commit_pending_formations(self) -> Dict[str, Any]:
         candidates_raw = list(self.pending_formations)
@@ -1124,7 +1147,24 @@ class EpisodeRunner(BaseEpisodeRunner):
                 "skipped": True,
             }
 
-        candidates = [TacticalFormationCandidate(**candidate) for candidate in candidates_raw]
+        candidates = [
+            TacticalFormationCandidate(**candidate)
+            for candidate in candidates_raw
+            if self._should_queue_tactical_candidate(
+                observation=candidate.get("observation", ""),
+                reward=float(candidate.get("reward", 0.0) or 0.0),
+                action=candidate.get("action", ""),
+                td_error=float(candidate.get("td_error", 0.0) or 0.0),
+            )
+        ]
+        if not candidates:
+            return {
+                "candidates": len(candidates_raw),
+                "approved": 0,
+                "created_nodes": [],
+                "skipped": True,
+                "filtered": True,
+            }
         try:
             decisions = self.formation_judge.judge_candidates(candidates)
         except Exception as exc:

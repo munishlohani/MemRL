@@ -7,6 +7,7 @@ import time
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
+from memrl.agent.prompts import ALFWORLD_SYSTEM_PROMPT
 from memrl.configs.config import MempConfig
 from memrl.providers.llm import OpenAILLM
 from memrl.providers.embedding import OpenAIEmbedder
@@ -129,7 +130,11 @@ def main():
         else:
             logger.warning("Few-shot examples not found at %s; proceeding with empty examples.", few_shot_path)
             few_shot_examples = []
-        agent = MempAgent(llm_provider=llm_provider, few_shot_examples=few_shot_examples)
+        agent = MempAgent(
+            llm_provider=llm_provider,
+            few_shot_examples=few_shot_examples,
+            system_prompt=ALFWORLD_SYSTEM_PROMPT,
+        )
 
         alfworld_config_path = _resolve_alfworld_config_path(cfg)
         env_adapter = AlfWorldEpisodeEnvAdapter(

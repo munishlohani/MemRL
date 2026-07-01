@@ -15,6 +15,7 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 from memrl.agent.memp_agent import MempAgent
+from memrl.agent.prompts import ALFWORLD_SYSTEM_PROMPT
 from memrl.configs.config import MempConfig
 from memrl.episode.agent_runner import EpisodeRunner
 from memrl.envs.alfworld_episode_adapter import AlfWorldEpisodeEnvAdapter
@@ -162,7 +163,11 @@ def _build_runner(cfg: MempConfig, *, config_path: Path, run_root: Path) -> Epis
     else:
         few_shot_examples = []
 
-    agent = MempAgent(llm_provider=llm_provider, few_shot_examples=few_shot_examples)
+    agent = MempAgent(
+        llm_provider=llm_provider,
+        few_shot_examples=few_shot_examples,
+        system_prompt=ALFWORLD_SYSTEM_PROMPT,
+    )
     alfworld_config_path = Path(cfg.environment.alfworld_config_path)
     if not alfworld_config_path.is_absolute():
         alfworld_config_path = (project_root / alfworld_config_path).resolve()

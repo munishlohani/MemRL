@@ -36,6 +36,13 @@ def setup_logging(project_root: Path, name: str):
     return log_dir
 
 
+def _resolve_alfworld_config_path(cfg: MempConfig) -> Path:
+    path = Path(cfg.environment.alfworld_config_path)
+    if not path.is_absolute():
+        path = (project_root / path).resolve()
+    return path
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Run AlfWorld benchmark with the agentic two-tier EpisodeRunner")
     p.add_argument(
@@ -124,11 +131,17 @@ def main():
             few_shot_examples = []
         agent = MempAgent(llm_provider=llm_provider, few_shot_examples=few_shot_examples)
 
-        alfworld_config_path = project_root / "configs" / "envs" / "alfworld.yaml"
+        alfworld_config_path = _resolve_alfworld_config_path(cfg)
         env_adapter = AlfWorldEpisodeEnvAdapter(
             config_path=str(alfworld_config_path),
             task_type=str(cfg.experiment.mode or "train"),
             batch_size=int(cfg.experiment.batch_size),
+        )
+        logger.info(
+            "Building ALFWorld runner with env_config=%s skill_db=%s output_dir=%s",
+            alfworld_config_path,
+            memory_service.db_path,
+            run_dir,
         )
 
         runner = EpisodeRunner(

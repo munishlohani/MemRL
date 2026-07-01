@@ -21,7 +21,7 @@ trials:
         experiment_name: alfworld_memrl_ray
         mode: train
         batch_size: 1
-        num_sections: 1
+        num_sections: 10
         max_steps: 25
       memory:
         k_retrieve: 5

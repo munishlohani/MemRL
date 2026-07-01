@@ -46,6 +46,13 @@ def _task_type_from_gamefile(gamefile: Optional[str]) -> Optional[str]:
     return None
 
 
+def _shorten_text(text: Any, *, limit: int = 160) -> str:
+    value = str(text or "").strip()
+    if len(value) <= limit:
+        return value
+    return value[: limit - 3] + "..."
+
+
 class AlfWorldEpisodeEnvAdapter(EpisodeEnvAdapter):
     """Adapt a (possibly batched) AlfWorldEnv to the EpisodeRunner interface.
 
@@ -95,6 +102,7 @@ class AlfWorldEpisodeEnvAdapter(EpisodeEnvAdapter):
                 info.setdefault("task_type", task_type)
             infos.append(info)
         self._last_reset_infos = infos
+        self._log_reset_output(observations, infos)
         return EpisodeResetResult(observations=observations, infos=infos)
 
     def step(self, actions: List[Any], **kwargs: Any) -> EpisodeStepResult:
@@ -119,6 +127,7 @@ class AlfWorldEpisodeEnvAdapter(EpisodeEnvAdapter):
                 if key not in info and key in reset_info:
                     info[key] = reset_info[key]
             infos.append(info)
+        self._log_step_output(actions, observations, rewards, dones, infos)
         return EpisodeStepResult(
             observations=observations,
             rewards=rewards,
@@ -134,6 +143,9 @@ class AlfWorldEpisodeEnvAdapter(EpisodeEnvAdapter):
             alf_env.close()
         except Exception:
             logger.debug("AlfWorldEnv.close failed", exc_info=True)
+        finally:
+            self._alf_env = None
+            self._last_reset_infos = []
 
     def episode_id(self, index: int = 0) -> Optional[str]:
         if index >= len(self._last_reset_infos):
@@ -150,6 +162,48 @@ class AlfWorldEpisodeEnvAdapter(EpisodeEnvAdapter):
 
     def is_batch(self) -> bool:
         return self._batch_size > 1
+
+    def _log_reset_output(
+        self,
+        observations: List[str],
+        infos: List[Dict[str, Any]],
+    ) -> None:
+        if not logger.isEnabledFor(logging.INFO):
+            return
+        for idx, observation in enumerate(observations):
+            info = infos[idx] if idx < len(infos) else {}
+            logger.info(
+                "ALFWorld reset[%s]: task_type=%s gamefile=%s obs=%s",
+                idx,
+                info.get("task_type"),
+                info.get("gamefile"),
+                _shorten_text(observation),
+            )
+
+    def _log_step_output(
+        self,
+        actions: List[Any],
+        observations: List[str],
+        rewards: List[float],
+        dones: List[bool],
+        infos: List[Dict[str, Any]],
+    ) -> None:
+        if not logger.isEnabledFor(logging.INFO):
+            return
+        for idx, action in enumerate(actions):
+            observation = observations[idx] if idx < len(observations) else ""
+            reward = rewards[idx] if idx < len(rewards) else 0.0
+            done = dones[idx] if idx < len(dones) else False
+            info = infos[idx] if idx < len(infos) else {}
+            logger.info(
+                "ALFWorld step[%s]: action=%s reward=%.3f done=%s task_type=%s obs=%s",
+                idx,
+                _shorten_text(action),
+                float(reward),
+                bool(done),
+                info.get("task_type"),
+                _shorten_text(observation),
+            )
 
 
 __all__ = ["AlfWorldEpisodeEnvAdapter", "EpisodeResetResult", "EpisodeStepResult"]

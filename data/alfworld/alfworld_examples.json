@@ -1,0 +1,99 @@
+[
+  {
+    "task": "put",
+    "example": [
+      {
+        "role": "user",
+        "content": "You are in the middle of a room. Looking quickly around you, you see a bathtubbasin 1, a cabinet 2, a cabinet 1, a countertop 1, a garbagecan 1, a handtowelholder 1, a sinkbasin 1, a toilet 1, a toiletpaperhanger 1, and a towelholder 1.\n\nYour task is to: put a toiletpaper in toiletpaperhanger."
+      },
+      {
+        "role": "assistant",
+        "content": "Thought: I need to place a toilet paper roll on the toilet paper hanger. First, I should check if there's already a roll on the hanger or if it's empty.\nAction: go to toiletpaperhanger 1"
+      },
+      {
+        "role": "user",
+        "content": "Observation: On the toiletpaperhanger 1, you see nothing."
+      },
+      {
+        "role": "assistant",
+        "content": "Thought: The toilet paper hanger is empty, so I need to find a new roll of toilet paper to put on it.\nAction: go to toilet 1"
+      }
+    ]
+  },
+  {
+    "task": "clean",
+    "example": [
+      {
+        "role": "user",
+        "content": "You are in the middle of a room. Looking quickly around you, you see a bathtubbasin 1, a cart 1, a countertop 1, a drawer 4, a drawer 3, a drawer 2, a drawer 1, a garbagecan 1, a handtowelholder 1, a shelf 1, a sinkbasin 1, a toilet 1, a toiletpaperhanger 1, and a towelholder 1.\n\nYour task is to: put a clean dishsponge in drawer."
+      },
+      {
+        "role": "assistant",
+        "content": "Thought: I need to locate a clean dish sponge. The countertop is a common place where cleaning items are kept, so I should check there first.\nAction: go to countertop 1"
+      },
+      {
+        "role": "user",
+        "content": "Observation: On the countertop 1, you see a candle 1, a cloth 2, a dishsponge 3, a soapbottle 2, and a toiletpaper 2."
+      },
+      {
+        "role": "assistant",
+        "content": "Thought: I see a dish sponge here on the countertop. I need to pick it up to complete the task.\nAction: take dishsponge 3 from countertop 1"
+      }
+    ]
+  },
+  {
+    "task": "heat",
+    "example": [
+      {
+        "role": "user",
+        "content": "You are in the middle of a room. Looking quickly around you, you see a cabinet 4, a cabinet 3, a cabinet 2, a cabinet 1, a coffeemachine 1, a countertop 1, a diningtable 3, a diningtable 2, a diningtable 1, a drawer 1, a fridge 1, a garbagecan 1, a microwave 1, a sidetable 1, a sinkbasin 1, a stoveburner 4, a stoveburner 3, a stoveburner 2, a stoveburner 1, and a toaster 1.\n\nYour task is to: heat some apple and put it in sidetable."
+      },
+      {
+        "role": "assistant",
+        "content": "Thought: I need to locate an apple to heat up. The sink basin is a common place for fresh produce, so I should check there first.\nAction: go to sinkbasin 1"
+      },
+      {
+        "role": "user",
+        "content": "Observation: On the sinkbasin 1, you see an apple 1 and a dishsponge 1."
+      },
+      {
+        "role": "assistant",
+        "content": "Thought: There's an apple here on the sink basin. I'll need to pick it up to proceed with heating it.\nAction: take apple 1 from sinkbasin 1"
+      }
+    ]
+  },
+  {
+    "task": "cool",
+    "example": [
+      {
+        "role": "user",
+        "content": "You are in the middle of a room. Looking quickly around you, you see a cabinet 13, a cabinet 12, a cabinet 11, a cabinet 10, a cabinet 9, a cabinet 8, a cabinet 7, a cabinet 6, a cabinet 5, a cabinet 4, a cabinet 3, a cabinet 2, a cabinet 1, a coffeemachine 1, a countertop 2, a countertop 1, a diningtable 1, a drawer 4, a drawer 3, a drawer 2, a drawer 1, a fridge 1, a garbagecan 1, a microwave 1, a shelf 3, a shelf 2, a shelf 1, a sinkbasin 1, a stoveburner 4, a stoveburner 3, a stoveburner 2, a stoveburner 1, and a toaster 1.\n\nYour task is to: cool some tomato and put it in countertop."
+      },
+      {
+        "role": "assistant",
+        "content": "Thought: I need to locate a tomato to cool. The task description doesn't specify where the tomato is, so I should look around the room for it.\nAction: go to diningtable 1"
+      },
+      {
+        "role": "user",
+        "content": "Observation: On the diningtable 1, you see a bowl 2, a bowl 1, a bread 1, a butterknife 2, a cup 2, a houseplant 1, a lettuce 1, a peppershaker 2, a soapbottle 2, a spatula 1, a spoon 2, a statue 2, and a tomato 2."
+      },
+      {
+        "role": "assistant",
+        "content": "Thought: I have arrived at the dining table. Now I should look for a tomato here.\nAction: take tomato 2 from diningtable 1"
+      }
+    ]
+  },
+  {
+    "task": "examine",
+    "example": [
+      {
+        "role": "user",
+        "content": "You are in the middle of a room. Looking quickly around you, you see a bed 1, a desk 1, a drawer 5, a drawer 4, a drawer 3, a drawer 2, a drawer 1, a dresser 1, and a garbagecan 1.\n\nYour task is to: look at pillow under the desklamp."
+      },
+      {
+        "role": "assistant",
+        "content": "Thought: I need to find the pillow and inspect it under the desklamp. The desk is the most likely place to start.\nAction: go to desk 1"
+      }
+    ]
+  }
+]

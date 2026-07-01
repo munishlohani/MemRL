@@ -163,10 +163,20 @@ def _build_runner(cfg: MempConfig, *, config_path: Path, run_root: Path) -> Epis
         few_shot_examples = []
 
     agent = MempAgent(llm_provider=llm_provider, few_shot_examples=few_shot_examples)
+    alfworld_config_path = Path(cfg.environment.alfworld_config_path)
+    if not alfworld_config_path.is_absolute():
+        alfworld_config_path = (project_root / alfworld_config_path).resolve()
     env_adapter = AlfWorldEpisodeEnvAdapter(
-        config_path=str(project_root / "configs" / "envs" / "alfworld.yaml"),
+        config_path=str(alfworld_config_path),
         task_type=str(cfg.experiment.mode or "train"),
         batch_size=int(cfg.experiment.batch_size),
+    )
+
+    logging.getLogger(__name__).info(
+        "Building ALFWorld runner with env_config=%s skill_db=%s output_dir=%s",
+        alfworld_config_path,
+        memory_service.db_path,
+        run_root,
     )
 
     return EpisodeRunner(
@@ -291,12 +301,51 @@ def _run_trial(
         run_root = Path(cfg.experiment.output_dir) / "alfworld" / trial_name
         run_root.mkdir(parents=True, exist_ok=True)
         runner = _build_runner(cfg, config_path=resolved_config_path, run_root=run_root)
-        summary = runner.run()
+        num_episodes = max(1, int(cfg.experiment.num_sections))
+        logger = logging.getLogger(__name__)
+        logger.info(
+            "Starting Ray trial %s for %s episode section(s) with batch_size=%s max_steps=%s",
+            trial_name,
+            num_episodes,
+            cfg.experiment.batch_size,
+            cfg.experiment.max_steps,
+        )
+
+        episode_summaries: List[Dict[str, Any]] = []
+        for episode_idx in range(num_episodes):
+            logger.info(
+                "Ray trial %s running section %s/%s",
+                trial_name,
+                episode_idx + 1,
+                num_episodes,
+            )
+            episode_summaries.append(runner.run())
+
+        mean_reward = (
+            sum(float(item.get("mean_reward", 0.0)) for item in episode_summaries)
+            / float(len(episode_summaries))
+            if episode_summaries
+            else 0.0
+        )
+        mean_steps = (
+            sum(float(item.get("mean_steps", 0.0)) for item in episode_summaries)
+            / float(len(episode_summaries))
+            if episode_summaries
+            else 0.0
+        )
+        success_rate = (
+            sum(float(item.get("success_rate", 0.0)) for item in episode_summaries)
+            / float(len(episode_summaries))
+            if episode_summaries
+            else 0.0
+        )
         return {
             "trial_name": trial_name,
-            "mean_reward": summary.get("mean_reward", 0.0),
-            "mean_steps": summary.get("mean_steps", 0.0),
-            "success_rate": summary.get("success_rate", 0.0),
+            "episodes": num_episodes,
+            "mean_reward": mean_reward,
+            "mean_steps": mean_steps,
+            "success_rate": success_rate,
+            "episode_summaries": episode_summaries,
         }
 
 

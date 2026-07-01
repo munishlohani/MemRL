@@ -1,20 +1,12 @@
-# memp/run/base_runner.py
-from abc import ABC, abstractmethod
+"""Compatibility wrapper for the episode runner base class."""
 
-class BaseRunner(ABC):
-    """
-    Abstract Base Class for an experiment runner.
+from __future__ import annotations
 
-    The Runner is responsible for orchestrating the entire interaction between
-    the agent, the environment, and any other services (like memory).
-    """
+from memrl.episode.base import BaseEpisodeRunner
 
-    @abstractmethod
-    def run(self, num_episodes: int):
-        """
-        The main entry point to start the experiment.
 
-        Args:
-            num_episodes (int): The total number of episodes to run.
-        """
-        pass
+class BaseRunner(BaseEpisodeRunner):
+    """Backward-compatible alias kept for the existing benchmark runners."""
+
+
+__all__ = ["BaseRunner"]

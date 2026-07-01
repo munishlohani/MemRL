@@ -28,6 +28,7 @@ memory:
   confidence_threshold: 0.0
   memory_confidence: 100.0
   add_similarity_threshold: 0.90 
+  n_sleep: 10
   # MemOS configuration
   mos_config_path: "configs/mos_config_final.json"
   user_id: "memrl_user"

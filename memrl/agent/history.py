@@ -1,5 +1,5 @@
 # memp/agent/history.py
-from typing import List, Dict
+from typing import List, Dict, Any
 
 class EpisodeHistory:
     """
@@ -8,6 +8,7 @@ class EpisodeHistory:
     """
     def __init__(self):
         self.trajectory: List[Dict[str, str]] = []
+        self.messages: List[Dict[str, str]] = []
         self._last_action: str | None = None
 
     def add_step(self, observation: str):
@@ -20,10 +21,17 @@ class EpisodeHistory:
         """
         # A step is only complete when we have both the action and the resulting observation.
         if self._last_action is not None:
+            action = self._last_action
             self.trajectory.append({
-                "action": self._last_action,
+                "action": action,
                 "observation": observation,
             })
+            self.append_message(
+                {
+                    "role": "user",
+                    "content": f"Action: {action}\nObservation: {observation}",
+                }
+            )
         
         # The last action has now been consumed and paired with an observation.
         self._last_action = None
@@ -37,6 +45,26 @@ class EpisodeHistory:
             action (str): The action command chosen by the agent.
         """
         self._last_action = action
+
+    def append_message(self, message: Dict[str, Any]) -> None:
+        """Append a conversational message to the episode transcript."""
+        if not isinstance(message, dict):
+            return
+
+        role = str(message.get("role", "")).strip()
+        content = str(message.get("content", "")).strip()
+        if not role or not content:
+            return
+
+        payload: Dict[str, str] = {"role": role, "content": content}
+        name = message.get("name")
+        if isinstance(name, str) and name.strip():
+            payload["name"] = name.strip()
+        self.messages.append(payload)
+
+    def get_messages(self) -> List[Dict[str, str]]:
+        """Return the current conversational transcript."""
+        return [dict(message) for message in self.messages]
 
     def get_formatted_history(self, max_steps: int = 10) -> str:
         """
@@ -67,4 +95,5 @@ class EpisodeHistory:
     def clear(self):
         """Resets the history for a new episode."""
         self.trajectory = []
+        self.messages = []
         self._last_action = None

@@ -7,7 +7,6 @@ for OpenAI and OpenAI-compatible services.
 
 import json
 import re
-import json
 import threading
 import time
 from pathlib import Path
@@ -29,6 +28,8 @@ except Exception:  # fallback if tenacity is unavailable
 import logging
 
 from .base import BaseLLM, LLMError
+
+logger = logging.getLogger(__name__)
 
 
 class OpenAILLM(BaseLLM):
@@ -251,6 +252,11 @@ class OpenAILLM(BaseLLM):
                     getattr(usage, "completion_tokens", None),
                     getattr(usage, "total_tokens", None),
                 )
+            logger.info(
+                "LLM response (model=%s): %s",
+                self.model,
+                content,
+            )
             try:
                 usage_payload = self._usage_to_dict(usage)
                 self._log_token_usage(
@@ -304,9 +310,9 @@ class OpenAILLM(BaseLLM):
     def extract_keywords(self, text: str, max_keywords: int = 8) -> List[str]:
         """
         Extract keywords from text using LLM.
-        
-        This method uses the LLM to identify key concepts that can be used
-        for the AveFact retrieval strategy.
+
+        This helper is kept as a generic keyword extraction utility for
+        any component that needs concise concept tokens.
         
         Args:
             text: Input text to analyze
@@ -414,10 +420,13 @@ class MockLLM(BaseLLM):
         # Check for predefined responses
         for pattern, response in self.responses.items():
             if pattern.lower() in user_content.lower():
+                logger.info("LLM response (mock): %s", response)
                 return response
-        
+
         # Default response
-        return f"Mock response {self.call_count} for: {user_content[:50]}..."
+        response = f"Mock response {self.call_count} for: {user_content[:50]}..."
+        logger.info("LLM response (mock): %s", response)
+        return response
     
     def extract_keywords(self, text: str, max_keywords: int = 8) -> List[str]:
         """Extract mock keywords."""

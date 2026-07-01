@@ -1,0 +1,310 @@
+"""Memory retrieval skill shared by agents and episode runners."""
+
+from __future__ import annotations
+
+import copy
+import re
+from functools import lru_cache
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+from memrl.service.memory_service import MemoryService
+from memrl.providers.base import BaseLLM
+import logging
+
+
+_SKILL_DOC_PATH = Path(__file__).resolve().parent / "memory_retrieval_skill" / "SKILL.md"
+logger = logging.getLogger(__name__)
+
+
+@lru_cache(maxsize=1)
+def _load_skill_contract_text() -> str:
+    """Load the retrieval skill contract from disk, with a short fallback."""
+    try:
+        return _SKILL_DOC_PATH.read_text(encoding="utf-8").strip()
+    except OSError:
+        return (
+            "Memory retrieval skill contract unavailable.\n"
+            "Treat retrieved memories as advisory context only and still answer in "
+            "the normal Thought/Action format."
+        )
+
+
+@dataclass
+class MemoryRetrievalResult:
+    """Structured output of a memory retrieval skill call."""
+
+    query_text: str
+    context_text: str
+    selected_memories: List[Dict[str, Any]] = field(default_factory=list)
+    topk_queries: List[Tuple[str, float]] = field(default_factory=list)
+    task_description: str = ""
+    observation: str = ""
+    task_type: str = "unknown"
+    episode_id: str = "unknown"
+    history_text: str = ""
+    active_strategic_node_id: Optional[str] = None
+    current_step: Optional[int] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert the result into a plain dictionary for logging or JSON."""
+        payload = asdict(self)
+        payload["selected_ids"] = [
+            str(item.get("memory_id") or item.get("id") or "")
+            for item in self.selected_memories
+            if isinstance(item, dict)
+        ]
+        payload["selected_count"] = len(self.selected_memories)
+        return payload
+
+    def to_tool_message(self, skill_name: str = "memory_retrieval") -> Dict[str, str]:
+        """Render the result as a tool message for the agent conversation."""
+        content = self.context_text.strip() or "No archived memories."
+        return {
+            "role": "tool",
+            "name": skill_name,
+            "content": f"Memory retrieval result:\n{content}",
+        }
+
+
+class MemoryRetrievalSkill:
+    """Build a retrieval query and materialize a prompt-ready memory context."""
+
+    def __init__(
+        self,
+        *,
+        memory_service: MemoryService,
+        llm_provider: Optional[BaseLLM] = None,
+        retrieve_k: int = 1,
+        rl_config: Optional[Any] = None,
+    ) -> None:
+        self.memory_service = memory_service
+        self.llm_provider = llm_provider
+        self.retrieve_k = max(1, int(retrieve_k))
+        self.rl_config = rl_config
+        self._skill_contract_text = _load_skill_contract_text()
+
+    def prompt_contract(self) -> str:
+        """Return the contract text injected into the agent prompt."""
+        return self._skill_contract_text
+
+    def retrieve(
+        self,
+        *,
+        task_description: str,
+        observation: str,
+        history_messages: Sequence[Dict[str, str]],
+        task_type: str,
+        episode_id: str,
+        active_strategic_node_id: Optional[str] = None,
+        current_step: Optional[int] = None,
+        query_override: Optional[str] = None,
+    ) -> MemoryRetrievalResult:
+        """Run retrieval and return both context text and structured metadata."""
+        query_text = self.build_query(
+            task_description=task_description,
+            observation=observation,
+            history_messages=history_messages,
+            query_hint=query_override,
+        )
+        logger.info(
+            "Memory retrieval start: task_type=%s episode_id=%s step=%s scaffold=%s query=%s",
+            task_type,
+            episode_id,
+            current_step,
+            active_strategic_node_id or "none",
+            self._compact_text(query_text),
+        )
+        history_text = self._history_messages_to_text(history_messages)
+        retrieved_memories, topk_queries = self._retrieve(
+            query_text=query_text,
+            task_type=task_type,
+            active_strategic_node_id=active_strategic_node_id,
+            current_step=current_step,
+        )
+        context_text = self.format_selected_memories(retrieved_memories)
+        logger.info(
+            "Memory retrieval done: selected=%s topk=%s context=%s",
+            [str(item.get("memory_id") or item.get("id") or "") for item in retrieved_memories if isinstance(item, dict)],
+            topk_queries,
+            self._compact_text(context_text),
+        )
+        return MemoryRetrievalResult(
+            query_text=query_text,
+            context_text=context_text,
+            selected_memories=copy.deepcopy(retrieved_memories),
+            topk_queries=list(topk_queries or []),
+            task_description=task_description,
+            observation=observation,
+            task_type=task_type,
+            episode_id=episode_id,
+            history_text=history_text,
+            active_strategic_node_id=active_strategic_node_id,
+            current_step=current_step,
+        )
+
+    def build_query(
+        self,
+        *,
+        task_description: str,
+        observation: str,
+        history_messages: Sequence[Dict[str, str]],
+        query_hint: Optional[str] = None,
+    ) -> str:
+        """Create the retrieval query text used for memory search."""
+        history_text = self._history_messages_to_text(history_messages)
+        title = self._generate_query_title(
+            task_description=task_description,
+            observation=observation,
+            history_text=history_text,
+            query_hint=query_hint,
+        )
+        parts = [
+            f"Title: {title}",
+            f"Task: {task_description.strip()}",
+            f"Observation: {observation.strip()}",
+        ]
+        if query_hint is not None and str(query_hint).strip():
+            parts.append(f"Focus: {str(query_hint).strip()}")
+        if history_text:
+            parts.append(f"History: {history_text}")
+        return "\n\n".join(part for part in parts if part.strip())
+
+    def format_selected_memories(self, selected: Sequence[Dict[str, Any]]) -> str:
+        """Format retrieved memories into an agent prompt block."""
+        if not selected:
+            return "No archived memories."
+
+        parts: List[str] = []
+        for idx, item in enumerate(selected, 1):
+            if not isinstance(item, dict):
+                continue
+            mem_id = str(item.get("memory_id") or item.get("id") or f"memory-{idx}")
+            content = str(item.get("content") or "").strip()
+            score = float(item.get("score", 0.0) or 0.0)
+            if not content:
+                continue
+            parts.append(f"{idx}. [{mem_id}] (score={score:.3f}) {content}")
+
+        return "\n".join(parts) if parts else "No archived memories."
+
+    def _retrieve(
+        self,
+        *,
+        query_text: str,
+        task_type: str,
+        active_strategic_node_id: Optional[str],
+        current_step: Optional[int],
+    ) -> Tuple[List[Dict[str, Any]], List[Tuple[str, float]]]:
+        try:
+            tau = float(
+                getattr(self.rl_config, "sim_threshold", getattr(self.rl_config, "tau", 0.0))
+            )
+        except Exception:
+            tau = 0.0
+
+        try:
+            result, topk_queries = self.memory_service.retrieve_query(
+                query_text,
+                k=self.retrieve_k,
+                threshold=tau,
+                task_type_dominant=task_type,
+                active_strategic_node_id=active_strategic_node_id,
+                current_step=current_step,
+            )
+        except Exception:
+            return [], []
+
+        selected = (result or {}).get("selected", [])
+        if not isinstance(selected, list):
+            selected = []
+        return selected, list(topk_queries or [])
+
+    def _generate_query_title(
+        self,
+        *,
+        task_description: str,
+        observation: str,
+        history_text: str,
+        query_hint: Optional[str],
+    ) -> str:
+        """Use the LLM to turn the current state into a short retrieval title."""
+        if self.llm_provider is None:
+            return self._fallback_title(task_description=task_description, query_hint=query_hint)
+
+        prompt = (
+            "Write a short memory-retrieval title for the current task.\n"
+            "Return only the title, no punctuation, no bullets, no explanation.\n"
+            "Keep it to 2 to 6 words.\n\n"
+            f"Task description: {task_description.strip()}\n"
+            f"Current observation: {observation.strip()}\n"
+            f"Recent history: {history_text.strip() or 'none'}\n"
+        )
+        if query_hint is not None and str(query_hint).strip():
+            prompt += f"Search hint: {str(query_hint).strip()}\n"
+
+        try:
+            response = self.llm_provider.generate(
+                [
+                    {
+                        "role": "system",
+                        "content": (
+                            "You produce concise retrieval titles for episodic memory search."
+                        ),
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.0,
+                max_tokens=24,
+            )
+        except Exception:
+            response = ""
+
+        title = self._sanitize_title(response)
+        if title:
+            return title
+        return self._fallback_title(task_description=task_description, query_hint=query_hint)
+
+    @staticmethod
+    def _sanitize_title(text: str) -> str:
+        value = str(text or "").strip()
+        if not value:
+            return ""
+        value = value.splitlines()[0].strip()
+        value = re.sub(r"^[\-*•\d\.\)\(]+", "", value).strip()
+        value = re.sub(r'^[\"\']+|[\"\']+$', "", value).strip()
+        value = re.sub(r"\s+", " ", value)
+        return value[:80].strip()
+
+    @staticmethod
+    def _fallback_title(*, task_description: str, query_hint: Optional[str]) -> str:
+        candidate = str(query_hint or task_description or "").strip()
+        if not candidate:
+            return "memory search"
+        candidate = re.sub(r"\s+", " ", candidate)
+        words = candidate.split()
+        return " ".join(words[:6]) if words else "memory search"
+
+    @staticmethod
+    def _history_messages_to_text(history_messages: Sequence[Dict[str, str]]) -> str:
+        lines: List[str] = []
+        for message in history_messages[-10:]:
+            role = str(message.get("role", "user")).strip()
+            content = str(message.get("content", "")).strip()
+            if content:
+                lines.append(f"{role}: {content}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _compact_text(text: Any, *, limit: int = 240) -> str:
+        value = str(text or "").strip()
+        if len(value) <= limit:
+            return value
+        return value[: limit - 3] + "..."
+
+
+__all__ = [
+    "MemoryRetrievalResult",
+    "MemoryRetrievalSkill",
+]

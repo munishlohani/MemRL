@@ -1,2199 +1,1197 @@
-"""
-Core MemoryService implementation for the Memp procedural memory system.
+"""Research-native memory service for the updated MemRL design."""
 
-This module provides the central MemoryService class that integrates with MemOS
-to implement the Build/Retrieve/Update memory management strategies.
-"""
+from __future__ import annotations
 
-import logging
-import random
-import time
+import json
+import os
 import math
-import statistics
-from datetime import datetime, timezone
+import logging
+from collections import Counter
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
+from uuid import uuid4
 
-from collections import defaultdict
-
-from typing import List, Dict, Any, Tuple, Optional
-
-
-# Hotfix for memos.utils missing `timed` decorator in some versions
-# We patch it early before importing other memos submodules.
 try:
-    import memos.utils as _memos_utils  # type: ignore
-
-    if not hasattr(_memos_utils, "timed"):
-        import functools
-
-        def _timed(
-            func=None,
-            *,
-            name: str | None = None,
-            logger: logging.Logger | None = None,
-            level: int = logging.INFO,
-        ):
-            """Simple timing decorator compatible with memos' expected API.
-
-            Usage:
-              @_timed
-              def f(...): ...
-
-              or
-
-              @_timed(name="custom")
-              def g(...): ...
-            """
-            if func is None:
-                # Called as @_timed(...)
-                return lambda real_func: _timed(
-                    real_func, name=name, logger=logger, level=level
-                )
-
-            log = logger or logging.getLogger("memos.timed")
-
-            @functools.wraps(func)
-            def wrapper(*args, **kwargs):
-                start = time.perf_counter()
-                try:
-                    return func(*args, **kwargs)
-                finally:
-                    duration_ms = (time.perf_counter() - start) * 1000.0
-                    try:
-                        log.log(
-                            level,
-                            f"[timed]{' ' + name if name else ''} {func.__qualname__} took {duration_ms:.2f} ms",
-                        )
-                    except Exception:
-                        # Best-effort logging; never break the call path
-                        pass
-
-            return wrapper
-
-        _memos_utils.timed = _timed  # type: ignore[attr-defined]
-except Exception:
-    # If anything goes wrong, fail open without blocking imports
-    pass
-
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from tqdm import tqdm
-
-from memos.configs.mem_os import MOSConfig
-from memos.configs.mem_cube import GeneralMemCubeConfig
-from memos.mem_os.main import MOS
-from memos.mem_cube.general import GeneralMemCube
-from memos.memories.textual.item import TextualMemoryItem, TextualMemoryMetadata
-
-from .strategies import (
-    BuildStrategy,
-    RetrieveStrategy,
-    UpdateStrategy,
-    StrategyConfiguration,
+    import numpy as np
+except Exception:  # pragma: no cover - optional dependency fallback
+    np = None
+from sqlalchemy import (
+    Boolean,
+    Column,
+    Float,
+    Integer,
+    JSON,
+    LargeBinary,
+    MetaData,
+    String,
+    Table,
+    Text,
+    create_engine,
+    delete,
+    inspect,
+    select,
+    text,
 )
-from .keyer import AveFactKeyer, SimpleKeyer
-from .procedural_memory import ProceduralMemory
-from .builders import get_builder
-from .retrievers import get_retriever
-from .updater import get_updater
-from ..utils.task_id import extract_task_id
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
-# Configure logger
+from ..memory.graph import SkillGraph
+from ..memory.skill_node import SkillNode
+from ..memory.skill_representation import SkillRepresentation
+from ..memory.episodic_bank import EpisodicMemoryBank, EpisodicRecord
+from ..utils.q_utils import (
+    compute_shrinkage_weighted_mean_from_samples,
+    get_expected_option_value,
+)
+from .sleep_consolidation import (
+    SleepConsolidationAction,
+    SleepConsolidationResult,
+    SleepConsolidationService,
+    StrategicScaffoldContext,
+)
+from .retrievers import SkillSimilarityRetriever
+from ..utils.event_logging import log_event
+
+if TYPE_CHECKING:
+    from sqlalchemy.engine import Engine
+    from ..configs.config import MemoryConfig
+    from ..providers.base import BaseEmbedder
+else:
+    Engine = Any  # type: ignore[assignment]
+    MemoryConfig = Any  # type: ignore[assignment]
+    BaseEmbedder = Any  # type: ignore[assignment]
+
+
 logger = logging.getLogger(__name__)
-from ..providers.base import BaseLLM, BaseEmbedder
-
-from .value_driven import RLConfig, ValueAwareSelector, QValueUpdater, MemoryCurator
-
-
-def _now_iso() -> str:
-    return datetime.now().isoformat()
-
-
-def get_embedding_with_retry(embed_func, text, max_retries=5, base_delay=2.0):
-    """
-    Retry for embedding queries
-    """
-    for attempt in range(1, max_retries + 1):
-        try:
-            result = embed_func(text)
-            return result
-
-        except Exception as e:
-            logger.warning(
-                f"[Retry {attempt}/{max_retries}] Embedding API 调用失败: {e}"
-            )
-            if attempt == max_retries:
-                logger.error("达到最大重试次数，仍未成功。")
-                raise
-
-            sleep_time = base_delay * (2 ** (attempt - 1))
-            time.sleep(sleep_time)
-
-
-def _meta_to_dict(meta: Any) -> Dict[str, Any]:
-    """Convert TextualMemoryMetadata or dict-like to a plain dict safely."""
-    if meta is None:
-        return {}
-    try:
-        if hasattr(meta, "model_extra"):
-            return dict(meta.model_dump())
-    except Exception:
-        pass
-    try:
-        if isinstance(meta, dict):
-            return dict(meta)
-    except Exception:
-        pass
-    # best effort fallback
-    try:
-        return dict(getattr(meta, "__dict__", {}))
-    except Exception:
-        return {}
-
-
-def _parse_datetime(value: Any) -> datetime | None:
-    """Best-effort parse of various datetime string formats."""
-    if value is None or value == "":
-        return None
-    if isinstance(value, datetime):
-        return value
-    if isinstance(value, (int, float)):
-        try:
-            return datetime.fromtimestamp(value)
-        except Exception:
-            return None
-    if isinstance(value, str):
-        text = value.strip()
-        if not text:
-            return None
-        # Try python's ISO parser first
-        try:
-            return datetime.fromisoformat(text)
-        except Exception:
-            pass
-        # Fallback patterns
-        patterns = [
-            "%Y-%m-%d %H:%M:%S",
-            "%Y/%m/%d %H:%M:%S",
-            "%Y-%m-%dT%H:%M:%S.%fZ",
-            "%Y-%m-%dT%H:%M:%S.%f",
-            "%Y-%m-%dT%H:%M:%S",
-        ]
-        for fmt in patterns:
-            try:
-                return datetime.strptime(text, fmt)
-            except Exception:
-                continue
-    return None
-
-
-def _resolve_snapshot_dirs(
-    snapshot_root: str, meta: Optional[Dict[str, Any]]
-) -> tuple[str, str, int]:
-    """Resolve snapshot cube/qdrant directories from optional snapshot_meta.json.
-
-    IMPORTANT: meta["qdrant_dir"] may be None if qdrant copy failed during save.
-    Treat None/empty as "missing" and fall back to <snapshot_root>/qdrant.
-
-    Paths from meta are accepted only when they still exist. This keeps resume
-    stable when checkpoints are moved across machines/directories.
-    """
-    import os
-
-    default_cube_dir = os.path.join(snapshot_root, "cube")
-    default_qdrant_dir = os.path.join(snapshot_root, "qdrant")
-    cube_dir = default_cube_dir
-    qdrant_dir = default_qdrant_dir
-    checkpoint_id = 0
-
-    if isinstance(meta, dict):
-        try:
-            cube_candidate = meta.get("cube_dir")
-            if isinstance(cube_candidate, str) and cube_candidate and os.path.isdir(cube_candidate):
-                cube_dir = cube_candidate
-        except Exception:
-            pass
-        try:
-            qdrant_candidate = meta.get("qdrant_dir")
-            if isinstance(qdrant_candidate, str) and qdrant_candidate and os.path.isdir(qdrant_candidate):
-                qdrant_dir = qdrant_candidate
-        except Exception:
-            pass
-        try:
-            checkpoint_id = int(meta.get("checkpoint_id", checkpoint_id))
-        except Exception:
-            checkpoint_id = 0
-
-    return cube_dir, qdrant_dir, checkpoint_id
-
-
-def _coerce_success(value: Any) -> Optional[bool]:
-    """Parse a best-effort boolean success flag.
-
-    Returns:
-        True / False if value can be reliably interpreted, otherwise None.
-    """
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        if value == 0:
-            return False
-        if value == 1:
-            return True
-        return None
-    if isinstance(value, str):
-        s = value.strip().lower()
-        if not s:
-            return None
-        if s in {"true", "t", "yes", "y", "1"}:
-            return True
-        if s in {"false", "f", "no", "n", "0"}:
-            return False
-        # Treat "unknown"/"n/a" and other strings as unknown
-        return None
-    return None
 
 
 class MemoryService:
-    """
-    Core memory service implementing the Memp procedural memory algorithms.
-
-    This service orchestrates the three-phase memory management:
-    1. Build: Construct procedural memories from task trajectories
-    2. Retrieve: Find relevant memories for new tasks
-    3. Update: Learn from new experiences and adjust existing memories
-
-    The service integrates with MemOS for storage and retrieval operations.
-    """
+    """Small service wrapper around the skill graph and content index."""
 
     def __init__(
         self,
-        mos_config_path: str,
-        llm_provider: BaseLLM,
-        embedding_provider: BaseEmbedder,
-        strategy_config: Optional[StrategyConfiguration] = None,
-        user_id: str = "memp_user",
-        num_workers: int = 32,
-        **kwargs,
-    ):
-        """
-        Initialize the memory service.
-
-        Args:
-            mos_config_path: Path to MemOS configuration file
-            llm_provider: LLM provider for text generation and keyword extraction
-            embedding_provider: Embedding provider for vector operations
-            strategy_config: Strategy configuration (defaults to main combination)
-            user_id: User ID for multi-tenant memory management
-            **kwargs: Additional configuration parameters
-        """
-        # Set strategy configuration
-        self.strategy_config = (
-            strategy_config or StrategyConfiguration.main_combination()
-        )
-        self.user_id = user_id
-        self.num_workers = num_workers
-        import threading
-
-        self.db_max_concurrency: int = int(kwargs.get("db_max_concurrency", 4))
-        self._db_gate = threading.BoundedSemaphore(self.db_max_concurrency)
-        # Simple in-memory cache for loaded memories to reduce DB roundtrips
-        self._mem_cache: dict[str, Any] = {}
-        self._mem_cache_max_size: int = int(kwargs.get("mem_cache_max_size", 10000))
-        # Lightweight Q-value cache: {mem_id: q_value} for fast Q-value updates
-        self._q_cache: dict[str, float] = {}
-        self._q_cache_max_size: int = int(kwargs.get("q_cache_max_size", 1000000))
-        # Store providers
-        self.llm_provider = llm_provider
-        self.embedding_provider = embedding_provider
-
-        # Similarity normalization constants (default from corpus stats; override via kwargs if needed)
-        self.sim_norm_mean: float = float(kwargs.get("sim_norm_mean", 0.1856827586889267))
-        self.sim_norm_std: float = float(kwargs.get("sim_norm_std", 0.09407906234264374)) or 1.0
-        # Optional: disable z-score normalization in hybrid scoring.
-        # This is intentionally plumbed via kwargs so only selected runners (e.g., LLB)
-        # change behavior without affecting other benchmarks by default.
-        self.use_z_score_normalization: bool = bool(kwargs.get("use_z_score_normalization", True))
-        # Optional: LLB-only Phase-B behavior to reduce repeated same-task memories.
-        self.dedup_by_task_id: bool = bool(kwargs.get("dedup_by_task_id", False))
-
-        # Initialize MemOS
-        try:
-            self.mos_config = MOSConfig.from_json_file(mos_config_path)
-            self.mos = MOS(self.mos_config)
-
-            # Create user if doesn't exist
-            self.mos.create_user(user_id=self.user_id)
-
-            import os
-
-            base_root = os.path.abspath("./results/mem_cubes")
-            os.makedirs(base_root, exist_ok=True)
-            # timestamped cube dir for historical isolation
-            ts_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-            self._base_root = base_root
-            self._cube_timestamp = ts_str
-            cube_dir = os.path.join(base_root, self.user_id, ts_str)
-            self._cube_dir = cube_dir
-
-            os.makedirs(cube_dir, exist_ok=True)
-            extractor_llm_cfg = {
-                "backend": self.mos_config.chat_model.backend,
-                "config": self.mos_config.chat_model.config.model_dump(),
-            }
-            try:
-                embedder_conf_obj = self.mos_config.mem_reader.config.embedder.config
-                embedder_model_name = embedder_conf_obj.model_name_or_path
-                embedder_provider = getattr(embedder_conf_obj, "provider", "openai")
-                embedder_base_url = getattr(embedder_conf_obj, "base_url", None)
-                embedder_api_key = getattr(embedder_conf_obj, "api_key", None)
-            except Exception:
-                embedder_conf_obj = None
-                embedder_model_name = (
-                    getattr(self.embedding_provider, "model", None)
-                    or "text-embedding-3-large"
-                )
-                embedder_provider = "openai"
-                embedder_base_url = None
-                embedder_api_key = None
-
-            embedder_cfg = {
-                "backend": "universal_api",
-                "config": {
-                    "provider": embedder_provider,
-                    "model_name_or_path": embedder_model_name,
-                    "api_key": embedder_api_key
-                    or self.mos_config.chat_model.config.api_key,
-                    "base_url": embedder_base_url
-                    or self.mos_config.chat_model.config.api_base,
-                },
-            }
-
-            qdrant_dir = os.path.abspath(
-                os.path.join(base_root, "..", "qdrant", self.user_id, ts_str)
-            )
-            os.makedirs(qdrant_dir, exist_ok=True)
-            self._qdrant_dir = qdrant_dir
-            vector_db_cfg = {
-                "backend": "qdrant",
-                "config": {
-                    "collection_name": f"memp_{self.user_id}_{ts_str}",
-                    "vector_dimension": 3072,
-                    "distance_metric": "cosine",
-                    "path": qdrant_dir,
-                },
-            }
-            cube_cfg = GeneralMemCubeConfig(
-                user_id=self.user_id,
-                text_mem={
-                    "backend": "general_text",
-                    "config": {
-                        "extractor_llm": extractor_llm_cfg,
-                        "embedder": embedder_cfg,
-                        "vector_db": vector_db_cfg,
-                    },
-                },
-                act_mem={"backend": "uninitialized", "config": {}},
-                para_mem={"backend": "uninitialized", "config": {}},
-            )
-            # Use a stable mem_cube_id and prefer reusing an existing cube from disk
-            if os.listdir(cube_dir):
-                try:
-                    cube = GeneralMemCube.init_from_dir(cube_dir)
-                    print("reuse existing cube")
-                except Exception:
-                    cube = GeneralMemCube(cube_cfg)
-                    cube.dump(cube_dir)
-            else:
-                cube = GeneralMemCube(cube_cfg)
-                cube.dump(cube_dir)
-
-            stable_id = f"cube_{self.user_id}_{ts_str}"
-            self.mos.register_mem_cube(
-                cube, mem_cube_id=stable_id, user_id=self.user_id
-            )
-            self.default_cube_id = stable_id  # remember for add() calls
-            # no delete_all on init; timestamp ensures isolation
-
-        except Exception as e:
-            raise RuntimeError(f"Failed to initialize MemOS: {e}")
-
-        # Configuration parameters (must be set before _init_key_generators)
-        self.max_keywords = kwargs.get("max_keywords", 8)
-        self.memory_confidence = kwargs.get("memory_confidence", 100.0)
-        self.add_similarity_threshold = kwargs.get("add_similarity_threshold", 0.90)
-        # Value-driven config and components (optional)
-        self.enable_value_driven: bool = bool(kwargs.get("enable_value_driven", True))
-        self.rl_config: Optional[RLConfig] = kwargs.get("rl_config", None)
-        if self.enable_value_driven and self.rl_config is None:
-            self.rl_config = RLConfig()
-
-        # Initialize key generators for different retrieval strategies
-        self._init_key_generators()
-
-        if self.enable_value_driven and self.rl_config is not None:
-            try:
-                self.dict_memory = {}
-                self.query_embeddings = {}
-                self._value_selector = ValueAwareSelector(self.rl_config)
-                self._q_updater = QValueUpdater(
-                    self.mos,
-                    self.user_id,
-                    self.rl_config,
-                    default_cube_id=self.default_cube_id,
-                )
-                self._curator = MemoryCurator(
-                    self.mos,
-                    self.user_id,
-                    self.rl_config,
-                    default_cube_id=self.default_cube_id,
-                    q_updater=self._q_updater,
-                )
-                self.weight_sim = self.rl_config.weight_sim
-                self.weight_q = self.rl_config.weight_q
-            except Exception:
-                # Fail gracefully; callers can still use baseline flows
-                self.enable_value_driven = False
-
-    def _init_key_generators(self) -> None:
-        """Initialize key generators for retrieval strategies."""
-        self.avefact_keyer = AveFactKeyer(
-            self.llm_provider, self.embedding_provider, max_keywords=self.max_keywords
-        )
-        self.simple_keyer = SimpleKeyer(self.embedding_provider)
-
-    def _sync_cube_bound_components(
-        self,
+        memory_config: MemoryConfig,
         *,
-        old_cube_id: str | None = None,
-        reason: str = "",
+        embedding_provider: Optional[BaseEmbedder] = None,
+        graph: Optional[SkillGraph] = None,
+        db_path: Optional[str] = None,
     ) -> None:
-        """Keep cube-bound subcomponents aligned with the active cube.
+        self.memory_config = memory_config
+        self.embedding_provider = embedding_provider
+        self.graph = graph or SkillGraph(
+            lambda_base=memory_config.lambda_base,
+            lambda_shrink=getattr(memory_config, "lambda_shrink", 10.0),
+            epsilon=memory_config.epsilon_decay,
+        )
+        resolved_db_path = db_path or getattr(
+            memory_config,
+            "skill_db_path",
+            "results/memrl/skill_memory.sqlite",
+        )
+        self.db_path = str(resolved_db_path)
+        db_dir = os.path.dirname(os.path.abspath(self.db_path))
+        if db_dir:
+            os.makedirs(db_dir, exist_ok=True)
 
-        Some value-driven components cache/bind a `default_cube_id` at init time.
-        When `MemoryService.default_cube_id` changes (e.g., resume from snapshot),
-        we must re-bind those components to avoid `Memory with ID ... not found`
-        from cross-cube get/update calls.
+        self._engine = None
+        self._metadata = None
+        self.skill_representation_table = None
+        self.skill_graph_state_table = None
+
+        self._engine = create_engine(
+            f"sqlite+pysqlite:///{Path(self.db_path).as_posix()}",
+            future=True,
+            connect_args={"check_same_thread": False},
+        )
+        self._metadata = MetaData()
+        self.skill_representation_table = Table(
+            "skill_representation",
+            self._metadata,
+            Column("node_id", String, primary_key=True),
+            Column("content", Text, nullable=False),
+            Column("embedding", LargeBinary, nullable=False),
+        )
+        self.skill_graph_state_table = Table(
+            "skill_graph_state",
+            self._metadata,
+            Column("node_id", String, primary_key=True),
+            Column("depth", Integer, nullable=False),
+            Column("parent_id", String, nullable=True),
+            Column("task_type_dominant", String, nullable=False),
+            Column("t_create", Integer, nullable=False),
+            Column("last_accessed_step", Integer, nullable=False),
+            Column("decay_rate", Float, nullable=False),
+            Column("consolidated", Boolean, nullable=False, default=False),
+            Column("Q", JSON, nullable=False),
+            Column("n", JSON, nullable=False),
+            Column("Q_omega", JSON, nullable=False),
+            Column("n_omega", JSON, nullable=False),
+            Column("secondary_parents", JSON, nullable=False),
+            Column("evidence_ids", JSON, nullable=False),
+            Column("evidence_seen", Integer, nullable=False, default=0),
+        )
+        self.episodic_memory_table = Table(
+            "episodic_memory",
+            self._metadata,
+            Column("id", String, primary_key=True),
+            Column("task_type", String, nullable=False),
+            Column("task_description", Text, nullable=False),
+            Column("episode_id", String, nullable=False),
+            Column("step_index", Integer, nullable=False),
+            Column("observation", Text, nullable=False),
+            Column("action", Text, nullable=False),
+            Column("reward", Float, nullable=False),
+            Column("history", Text, nullable=False),
+            Column("retrieved_memories", Text, nullable=False),
+            Column("source_memory_id", String, nullable=True),
+        )
+        self._metadata.create_all(self._engine)
+        self._migrate_add_evidence_seen_column()
+
+        if self.graph.nodes:
+            self._sync_graph_state_to_db()
+        else:
+            self._load_graph_state()
+        self.retriever = SkillSimilarityRetriever()
+
+        # Raw per-step experience store, linked from SkillNode.evidence_ids
+        # (spec §1, §5.4). Nodes only ever surface their LLM-generated
+        # summary at retrieval; this bank keeps the underlying trace.
+        self.episodic_bank = EpisodicMemoryBank()
+        self._load_episodic_bank()
+
+        # Empirical episode-length statistics per task type, used by the
+        # finite-horizon Q^Omega initialization for spawned scaffolds
+        # (spec §3.5, W3). Running mean to keep memory O(#task types).
+        self._episode_length_sum: Dict[str, float] = {}
+        self._episode_length_count: Dict[str, int] = {}
+
+    def record_episode_length(self, task_type: str, length: int) -> None:
+        """Feed an observed episode length into the per-task-type running mean.
+
+        Used by the finite-horizon Q^Omega initialization. Call once per
+        finished episode. No-op when ``length`` is not a positive int.
         """
-        new_cube_id = getattr(self, "default_cube_id", None)
-        updated: list[str] = []
-
-        q_updater = getattr(self, "_q_updater", None)
-        if q_updater is not None:
-            try:
-                setattr(q_updater, "default_cube_id", new_cube_id)
-                updated.append("_q_updater")
-            except Exception:
-                logger.warning(
-                    "[CubeSwitch] Failed to sync _q_updater.default_cube_id",
-                    exc_info=True,
-                )
-
-        curator = getattr(self, "_curator", None)
-        if curator is not None:
-            try:
-                setattr(curator, "default_cube_id", new_cube_id)
-                updated.append("_curator")
-            except Exception:
-                logger.warning(
-                    "[CubeSwitch] Failed to sync _curator.default_cube_id",
-                    exc_info=True,
-                )
-            try:
-                curator_q = getattr(curator, "q_updater", None)
-                if curator_q is not None:
-                    setattr(curator_q, "default_cube_id", new_cube_id)
-                    updated.append("_curator.q_updater")
-            except Exception:
-                logger.warning(
-                    "[CubeSwitch] Failed to sync _curator.q_updater.default_cube_id",
-                    exc_info=True,
-                )
-
-        # One log line per cube switch to aid debugging without spamming logs.
-        logger.info(
-            "[CubeSwitch] reason=%s old=%s new=%s synced=%s",
-            reason or "(unspecified)",
-            old_cube_id,
-            new_cube_id,
-            ",".join(updated) if updated else "(none)",
+        try:
+            length_f = float(int(length))
+        except (TypeError, ValueError):
+            return
+        if length_f <= 0.0 or not task_type:
+            return
+        self._episode_length_sum[task_type] = (
+            self._episode_length_sum.get(task_type, 0.0) + length_f
+        )
+        self._episode_length_count[task_type] = (
+            self._episode_length_count.get(task_type, 0) + 1
         )
 
-    def build_memory(
-        self,
-        task_description: str,
-        trajectory: str,
-        metadata: Optional[Dict[str, Any]] = None,
-    ) -> str:
-        """
-        Build procedural memory from task trajectory using the configured build strategy.
+    def mean_episode_length(self, task_type: Optional[str]) -> Optional[float]:
+        """Return the tracked mean episode length for a task type, or None."""
+        if not task_type:
+            return None
+        count = self._episode_length_count.get(task_type, 0)
+        if count <= 0:
+            return None
+        return self._episode_length_sum.get(task_type, 0.0) / float(count)
 
-        Args:
-            task_description: Natural language description of the task
-            trajectory: Detailed step-by-step trajectory of task execution
-            metadata: Optional additional metadata
+    @staticmethod
+    def _serialize_embedding(embedding: List[float]) -> bytes:
+        values = [float(value) for value in embedding]
+        if np is None:
+            return json.dumps(values).encode("utf-8")
+        array = np.asarray(values, dtype=np.float32)
+        return array.tobytes()
 
-        Returns:
-            Memory ID of the created memory
-
-        Raises:
-            RuntimeError: If memory building fails
-        """
+    @staticmethod
+    def _deserialize_embedding(blob: Any) -> List[float]:
+        if blob is None:
+            return []
+        if isinstance(blob, memoryview):
+            blob = blob.tobytes()
+        if isinstance(blob, (bytes, bytearray)):
+            if np is not None and len(blob) % np.dtype(np.float32).itemsize == 0:
+                return np.frombuffer(blob, dtype=np.float32).astype(float).tolist()
+            try:
+                text = bytes(blob).decode("utf-8")
+                data = json.loads(text)
+                return [float(value) for value in data]
+            except Exception:
+                return []
+        if isinstance(blob, str):
+            try:
+                data = json.loads(blob)
+                return [float(value) for value in data]
+            except Exception:
+                return []
         try:
-            # Extract source benchmark from metadata
-            source_benchmark = (metadata or {}).get("source_benchmark", "unknown")
-            raw_success = (metadata or {}).get("success", None)
-            success = _coerce_success(raw_success)
+            data = json.loads(str(blob))
+            return [float(value) for value in data]
+        except Exception:
+            return []
 
-            # Use Builder pattern to generate memory content
-            builder = get_builder(self.strategy_config.build, self.llm_provider)
-            memory_content = builder.build(task_description, trajectory)
+    @staticmethod
+    def _serialize_json(value: Any) -> Any:
+        return value
 
-            # Create procedural memory based on build strategy
-            if self.strategy_config.build == BuildStrategy.TRAJECTORY:
-                procedural_memory = ProceduralMemory.create_trajectory_memory(
-                    task_description=task_description,
-                    trajectory=memory_content,  # Use builder output
-                    build_strategy=self.strategy_config.build,
-                    retrieve_strategy=self.strategy_config.retrieve,
-                    update_strategy=self.strategy_config.update,
-                    source_benchmark=source_benchmark,
-                    confidence_score=self.memory_confidence,
-                )
-
-            elif self.strategy_config.build == BuildStrategy.SCRIPT:
-                procedural_memory = ProceduralMemory.create_script_memory(
-                    task_description=task_description,
-                    script=memory_content,  # Use builder output
-                    trajectory=trajectory,  # Keep original trajectory for reference
-                    build_strategy=self.strategy_config.build,
-                    retrieve_strategy=self.strategy_config.retrieve,
-                    update_strategy=self.strategy_config.update,
-                    source_benchmark=source_benchmark,
-                    confidence_score=self.memory_confidence,
-                )
-
-            else:  # BuildStrategy.PROCEDURALIZATION
-                # For proceduralization, the builder returns combined content
-                # Extract script from the combined content for metadata
-                lines = memory_content.split("\n")
-                script_start = None
-                trajectory_start = None
-
-                for i, line in enumerate(lines):
-                    if line.strip() == "SCRIPT:":
-                        script_start = i + 1
-                    elif line.strip() == "TRAJECTORY:":
-                        trajectory_start = i + 1
-                        break
-
-                if script_start is not None and trajectory_start is not None:
-                    script = "\n".join(
-                        lines[script_start : trajectory_start - 2]
-                    ).strip()
-                else:
-                    # Fallback: generate script separately if parsing fails
-                    script = self.llm_provider.generate_script(trajectory)
-
-                procedural_memory = ProceduralMemory.create_procedural_memory(
-                    task_description=task_description,
-                    script=script,
-                    trajectory=trajectory,
-                    build_strategy=self.strategy_config.build,
-                    retrieve_strategy=self.strategy_config.retrieve,
-                    update_strategy=self.strategy_config.update,
-                    source_benchmark=source_benchmark,
-                    confidence_score=self.memory_confidence,
-                )
-
-            # Generate retrieval keys if needed
-            if self.strategy_config.retrieve == RetrieveStrategy.AVEFACT:
-                keywords = self.llm_provider.extract_keywords(
-                    task_description, self.max_keywords
-                )
-                avefact_vector = self.avefact_keyer.generate_key(task_description)
-                procedural_memory.memp_metadata.avefact_keywords = keywords
-                procedural_memory.memp_metadata.avefact_vector = avefact_vector
-            elif self.strategy_config.retrieve == RetrieveStrategy.QUERY:
-                query_vector = self.simple_keyer.generate_key(task_description)
-                procedural_memory.memp_metadata.query_vector = query_vector
-
-            # Write using text_mem.add with retrieval key = task_description (embedding),
-            # and full content stored in metadata.full_content
-            full_content = (
-                f"Task: {task_description}\n\n{procedural_memory.memory_content}"
-            )
-
-            # Get textual memory from the default cube
-            mem_cube_id = getattr(self, "default_cube_id", None)
-            if mem_cube_id is None or mem_cube_id not in self.mos.mem_cubes:
-                raise RuntimeError(
-                    "MemCube is not registered for the user or default_cube_id is missing"
-                )
-            text_mem = self.mos.mem_cubes[mem_cube_id].text_mem
-            if text_mem is None:
-                raise RuntimeError("Textual memory is not initialized in the MemCube")
-
-            # Build metadata and item
-            base_meta = {
-                "type": "procedure",
-                "source": "conversation",
-                "source_benchmark": source_benchmark,
-                "success": success,
-                "strategy_build": self.strategy_config.build.value,
-                "strategy_retrieve": self.strategy_config.retrieve.value,
-                "strategy_update": self.strategy_config.update.value,
-                "confidence": self.memory_confidence,
-                "full_content": full_content,
-            }
-            # Initialize value fields when enabled
-            if (
-                getattr(self, "enable_value_driven", False)
-                and getattr(self, "rl_config", None) is not None
-            ):
-                # User-selected behavior: unknown success defaults to q_init_pos.
-                is_success = True if success is None else bool(success)
-                base_meta |= {
-                    "q_value": (
-                        float(self.rl_config.q_init_pos)
-                        if is_success
-                        else float(self.rl_config.q_init_neg)
-                    ),
-                    "q_visits": 0,
-                    "q_updated_at": datetime.now().isoformat(),
-                    "last_used_at": datetime.now().isoformat(),
-                    "reward_ma": 0.0,
-                }
-            item = TextualMemoryItem(
-                memory=task_description,  # only task as retrieval key
-                metadata=TextualMemoryMetadata(**base_meta),
-            )
-
-            text_mem.add([item])
-            return str(item.id)
-
-        except Exception as e:
-            raise RuntimeError(f"Failed to build memory: {e}")
-
-    def retrieve_value_aware(
-        self, task_description: str, k: Optional[int] = None, threshold: float = 0.0
-    ) -> Dict[str, Any]:
-        """
-        Value-aware retrieval with ε-greedy re-ranking and unknown detection.
-
-        Returns a dict with keys: action (memory_id or None), selected, candidates, simmax.
-        """
-        # Fallback to baseline retrieve if disabled
+    @staticmethod
+    def _deserialize_json(blob: Any, default: Any) -> Any:
+        if blob is None:
+            return default
+        if isinstance(blob, (list, dict)):
+            return blob
+        if isinstance(blob, bytes):
+            text = blob.decode("utf-8")
+        else:
+            text = str(blob)
         try:
-            candidates = self.retrieve(task_description, k=k, threshold=threshold)
-            if (
-                not getattr(self, "enable_value_driven", False)
-                or getattr(self, "_value_selector", None) is None
-            ):
-                # No value layer; return top-1 greedy by similarity as selected (if any)
-                if not candidates:
-                    return {
-                        "action": None,
-                        "selected": None,
-                        "candidates": [],
-                        "simmax": 0.0,
-                    }
-                best = max(candidates, key=lambda x: float(x.get("similarity", 0.0)))
-                return {
-                    "action": best.get("memory_id"),
-                    "selected": best,
-                    "candidates": candidates,
-                    "simmax": float(best.get("similarity", 0.0)),
-                }
-            # Use value-aware selection
-            return self._value_selector.select(candidates, self.rl_config.topk)
-        except Exception as e:
-            raise RuntimeError(f"Value-aware retrieval failed: {e}")
+            return json.loads(text)
+        except Exception:
+            return default
 
-    def retrieve(
-        self,
-        task_description: str,
-        k: int = 1,
-        threshold: float = 0.0,
-        max_retries: int = 10,
-        retry_delay: float = 1.0,
-    ) -> List[Dict[str, Any]]:
-        """
-        Retrieve relevant memories for a task using the configured retrieval strategy.
+    def _upsert_representation(self, representation: SkillRepresentation) -> None:
+        stmt = sqlite_insert(self.skill_representation_table).values(
+            node_id=representation.id,
+            content=representation.content,
+            embedding=self._serialize_embedding(representation.embedding),
+        )
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["node_id"],
+            set_={
+                "content": stmt.excluded.content,
+                "embedding": stmt.excluded.embedding,
+            },
+        )
+        with self._engine.begin() as conn:
+            conn.execute(stmt)
 
-        Args:
-            task_description: Natural language description of the task
-            k: Number of memories to retrieve
-            threshold: Minimum similarity threshold (for applicable strategies)
-            max_retries: Maximum number of retry attempts
-            retry_delay: Base delay (in seconds) between retries (exponential backoff)
+    def _upsert_graph_state(self, node: SkillNode) -> None:
+        stmt = sqlite_insert(self.skill_graph_state_table).values(
+            node_id=node.id,
+            depth=node.depth,
+            parent_id=node.parent_id,
+            task_type_dominant=node.task_type_dominant,
+            t_create=node.t_create,
+            last_accessed_step=node.last_accessed_step,
+            decay_rate=node.decay_rate,
+            consolidated=bool(node.consolidated),
+            Q=self._serialize_json(node.Q),
+            n=self._serialize_json(node.n),
+            Q_omega=self._serialize_json(node.Q_omega),
+            n_omega=self._serialize_json(node.n_omega),
+            secondary_parents=self._serialize_json(node.secondary_parents),
+            evidence_ids=self._serialize_json(node.evidence_ids),
+            evidence_seen=int(node.evidence_seen),
+        )
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["node_id"],
+            set_={
+                "depth": stmt.excluded.depth,
+                "parent_id": stmt.excluded.parent_id,
+                "task_type_dominant": stmt.excluded.task_type_dominant,
+                "t_create": stmt.excluded.t_create,
+                "last_accessed_step": stmt.excluded.last_accessed_step,
+                "decay_rate": stmt.excluded.decay_rate,
+                "consolidated": stmt.excluded.consolidated,
+                "Q": stmt.excluded.Q,
+                "n": stmt.excluded.n,
+                "Q_omega": stmt.excluded.Q_omega,
+                "n_omega": stmt.excluded.n_omega,
+                "secondary_parents": stmt.excluded.secondary_parents,
+                "evidence_ids": stmt.excluded.evidence_ids,
+                "evidence_seen": stmt.excluded.evidence_seen,
+            },
+        )
+        with self._engine.begin() as conn:
+            conn.execute(stmt)
 
-        Returns:
-            List of retrieved memory dictionaries
+    def persist_node_state(self, node_or_id: SkillNode | str) -> None:
+        """Persist the current in-memory node state back to SQLite."""
+        node = node_or_id if isinstance(node_or_id, SkillNode) else self.graph.get(node_or_id)
+        self._upsert_graph_state(node)
 
-        Raises:
-            RuntimeError: If memory retrieval fails after retries
-        """
-        retriever = get_retriever(
-            self.strategy_config.retrieve,
-            mos=self.mos,
-            user_id=self.user_id,
-            llm=self.llm_provider,
-            keyer=self.avefact_keyer,
-            max_keywords=self.max_keywords,
-            embedder=self.embedding_provider,
+    def _fetch_representation(self, node_id: str) -> SkillRepresentation:
+        stmt = select(
+            self.skill_representation_table.c.node_id,
+            self.skill_representation_table.c.content,
+            self.skill_representation_table.c.embedding,
+        ).where(self.skill_representation_table.c.node_id == node_id)
+        with self._engine.begin() as conn:
+            row = conn.execute(stmt).mappings().first()
+        if row is None:
+            raise KeyError(node_id)
+        return SkillRepresentation(
+            id=row["node_id"],
+            content=row["content"],
+            embedding=self._deserialize_embedding(row["embedding"]),
         )
 
-        last_error = None
-        for attempt in range(1, max_retries + 1):
-            try:
-                return retriever.retrieve(task_description, k, threshold)
-            except Exception as e:
-                last_error = e
-                if attempt < max_retries:
-                    sleep_time = retry_delay * (2 ** (attempt - 1)) + random.uniform(
-                        0, 0.5
-                    )
-                    logger.warning(
-                        f"Retrieve attempt {attempt} failed: {e}. "
-                        f"Retrying in {sleep_time:.2f}s..."
-                    )
-                    time.sleep(sleep_time)
-                else:
-                    logger.error(
-                        f"Retrieve failed after {max_retries} attempts. Last error: {e}"
-                    )
-                    raise RuntimeError(
-                        f"Failed to retrieve memories after {max_retries} attempts: {last_error}"
-                    )
+    def _fetch_graph_state(self, node_id: str) -> SkillNode:
+        stmt = select(self.skill_graph_state_table).where(
+            self.skill_graph_state_table.c.node_id == node_id
+        )
+        with self._engine.begin() as conn:
+            row = conn.execute(stmt).mappings().first()
+        if row is None:
+            raise KeyError(node_id)
+        return SkillNode(
+            id=row["node_id"],
+            task_type_dominant=row["task_type_dominant"],
+            t_create=int(row["t_create"]),
+            depth=int(row["depth"]),
+            parent_id=row["parent_id"],
+            secondary_parents=list(
+                self._deserialize_json(row["secondary_parents"], [])
+            ),
+            last_accessed_step=int(row["last_accessed_step"]),
+            Q=dict(self._deserialize_json(row["Q"], {})),
+            n=dict(self._deserialize_json(row["n"], {})),
+            Q_omega=dict(self._deserialize_json(row["Q_omega"], {})),
+            n_omega=dict(self._deserialize_json(row["n_omega"], {})),
+            decay_rate=float(row["decay_rate"]),
+            evidence_ids=list(self._deserialize_json(row["evidence_ids"], [])),
+            evidence_seen=int(row["evidence_seen"] or 0),
+            consolidated=bool(row["consolidated"]),
+        )
 
-    def update_value(
-        self,
-        memory_id: Optional[str],
-        reward: float,
-        *,
-        next_max_q: Optional[float] = None
-    ) -> Optional[float]:
-        """
-        Update Q-value for the selected memory. If memory_id is None (null action),
-        this is a no-op here (curation can be applied by caller if needed).
-
-        Returns the new Q if updated, else None.
-        """
-        if not getattr(self, 'enable_value_driven', False) or getattr(self, '_q_updater', None) is None:
-            return None
-        if memory_id is None:
-            return None
-        try:
-            return self._q_updater.update(memory_id, reward, next_max_q=next_max_q)
-        except Exception as e:
-            raise RuntimeError(f"Failed to update Q-value: {e}")
-
-
-    def update_values(self, successes: list[float], retrieved_ids_list: list[list[str]]) -> dict[str, Optional[float]]:
-        """
-        Concurrently update Q-values for all retrieved memory_ids.
-
-        Args:
-            successes: list of rewards (one per trajectory)
-            retrieved_ids_list: list of lists of memory_ids (aligned with successes)
-
-        Returns:
-            dict mapping memory_id -> new Q value (or None if failed).
-        """
-        if (
-            not getattr(self, "enable_value_driven", False)
-            or getattr(self, "_q_updater", None) is None
-        ):
-            return {}
-
-        # Build update tasks: (memory_id, reward, next_max_q)
-        updates = []
-        for success, mem_ids in zip(successes, retrieved_ids_list):
-            # Map success to 1 (True) or -1 (False/0)
-            reward = (
-                self.rl_config.success_reward
-                if success
-                else self.rl_config.failure_reward
-            )
-            for mem_id in mem_ids:
-                updates.append((mem_id, reward, None))
-
-        results = {}
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            future_to_mem = {
-                executor.submit(
-                    self._q_updater.update, mem_id, reward, next_max_q
-                ): mem_id
-                for mem_id, reward, next_max_q in updates
-            }
-            for future in as_completed(future_to_mem):
-                mem_id = future_to_mem[future]
-                try:
-                    new_q = future.result()
-                    results[mem_id] = new_q
-
-                    if new_q is not None:
-                        # Check cache size limit (FIFO eviction)
-                        if len(self._q_cache) >= self._q_cache_max_size:
-                            num_to_remove = max(1, self._q_cache_max_size // 10)
-                            for _ in range(num_to_remove):
-                                self._q_cache.pop(next(iter(self._q_cache)), None)
-
-                        self._q_cache[mem_id] = new_q
-
-                except Exception as e:
-                    results[mem_id] = None
-                    logger.info(f"Failed to update Q-value for {mem_id}: {e}")
-        return results
-
-    def _add_to_mem_cache(self, mem_id: str, mem_obj: Any) -> None:
-        """Add memory object to cache with FIFO eviction policy."""
-        if mem_obj is None:
+    def _load_graph_state(self) -> None:
+        stmt = select(self.skill_graph_state_table.c.node_id).order_by(
+            self.skill_graph_state_table.c.depth.asc(),
+            self.skill_graph_state_table.c.t_create.asc(),
+            self.skill_graph_state_table.c.node_id.asc(),
+        )
+        with self._engine.begin() as conn:
+            rows = conn.execute(stmt).mappings().all()
+        if not rows:
             return
 
-        # Check capacity and evict if needed
-        if len(self._mem_cache) >= self._mem_cache_max_size:
-            # Remove oldest 10% entries (FIFO)
-            num_to_remove = max(1, self._mem_cache_max_size // 10)
-            for _ in range(num_to_remove):
-                self._mem_cache.pop(next(iter(self._mem_cache)), None)
-            logger.debug(
-                f"[MemCache] FIFO evicted {num_to_remove} entries, size: {len(self._mem_cache)}/{self._mem_cache_max_size}"
+        pending = [row["node_id"] for row in rows]
+        inserted = set(self.graph.nodes)
+
+        while pending:
+            progressed = False
+            remaining: List[str] = []
+            for node_id in pending:
+                node = self._fetch_graph_state(node_id)
+                parent_id = node.parent_id
+                if parent_id not in (None, self.graph.root_id) and parent_id not in inserted:
+                    remaining.append(node_id)
+                    continue
+                if node_id not in inserted:
+                    self.graph.insert(node, parent_id=parent_id)
+                    inserted.add(node_id)
+                progressed = True
+            if not progressed:
+                raise RuntimeError("Unable to reconstruct skill graph from SQLite state")
+            pending = remaining
+
+    def _migrate_add_evidence_seen_column(self) -> None:
+        """Additive migration for DBs written before `evidence_seen` existed.
+
+        `MetaData.create_all` only creates missing tables, not missing
+        columns on existing ones, so a `skill_graph_state` table from before
+        this column was introduced would otherwise fail on load.
+        """
+        inspector = inspect(self._engine)
+        existing_columns = {
+            column["name"] for column in inspector.get_columns("skill_graph_state")
+        }
+        if "evidence_seen" in existing_columns:
+            return
+        with self._engine.begin() as conn:
+            conn.execute(
+                text("ALTER TABLE skill_graph_state ADD COLUMN evidence_seen INTEGER DEFAULT 0")
             )
 
-        self._mem_cache[mem_id] = mem_obj
+    def _sync_graph_state_to_db(self) -> None:
+        for node in self.graph.nodes.values():
+            self._upsert_graph_state(node)
 
-    def update_memory(
+    def _load_episodic_bank(self) -> None:
+        stmt = select(self.episodic_memory_table)
+        with self._engine.begin() as conn:
+            rows = conn.execute(stmt).mappings().all()
+        for row in rows:
+            self.episodic_bank.add(
+                EpisodicRecord(
+                    id=row["id"],
+                    task_type=row["task_type"],
+                    task_description=row["task_description"],
+                    episode_id=row["episode_id"],
+                    step_index=int(row["step_index"]),
+                    observation=row["observation"],
+                    action=row["action"],
+                    reward=float(row["reward"]),
+                    history=row["history"],
+                    retrieved_memories=row["retrieved_memories"],
+                    source_memory_id=row["source_memory_id"],
+                )
+            )
+
+    def record_evidence(self, record: EpisodicRecord) -> None:
+        """Persist a raw experience into the episodic bank, keyed by `record.id`.
+
+        `record.id` is the same id a `SkillNode.evidence_ids` entry points
+        to, so nodes can be traced back to the raw trace that formed them
+        (spec §1, §5.4) without ever surfacing it at retrieval time.
+        """
+        self.episodic_bank.add(record)
+        stmt = sqlite_insert(self.episodic_memory_table).values(
+            id=record.id,
+            task_type=record.task_type,
+            task_description=record.task_description,
+            episode_id=record.episode_id,
+            step_index=record.step_index,
+            observation=record.observation,
+            action=record.action,
+            reward=float(record.reward),
+            history=record.history,
+            retrieved_memories=record.retrieved_memories,
+            source_memory_id=record.source_memory_id,
+        )
+        stmt = stmt.on_conflict_do_nothing(index_elements=["id"])
+        with self._engine.begin() as conn:
+            conn.execute(stmt)
+
+    def get_evidence(self, record_id: str) -> Optional[EpisodicRecord]:
+        return self.episodic_bank.get(record_id)
+
+    def get_evidence_many(self, record_ids: List[str]) -> List[EpisodicRecord]:
+        return self.episodic_bank.get_many(record_ids)
+
+    def add_evidence_to_node(self, node: SkillNode, evidence_id: str) -> None:
+        """Reservoir-sample `evidence_id` into `node.evidence_ids`, capped at `r_evidence`."""
+        cap = int(getattr(self.memory_config, "r_evidence", 50) or 0)
+        node.add_evidence(evidence_id, cap=cap)
+
+    def _fetch_representations(
         self,
-        task_description: str,
-        trajectory: str,
-        success: bool,
-        retrieved_memory_ids: Optional[List[str]] = None,
-        metadata: Optional[Dict[str, Any]] = None,
-    ) -> Optional[str]:
-        """
-        Update memory based on new task experience using the configured update strategy.
-
-        Args:
-            task_description: Natural language description of the task
-            trajectory: Detailed step-by-step trajectory of task execution
-            success: Whether the task was completed successfully
-            retrieved_memory_ids: IDs of memories that were retrieved for this task
-            metadata: Optional additional metadata
-
-        Returns:
-            Memory ID if new memory was created or updated, None otherwise
-
-        Raises:
-            RuntimeError: If memory update fails
-        """
-
-        updater = get_updater(
-            self.strategy_config.update,
-            mos=self.mos,
-            num_workers=self.num_workers,
-            user_id=self.user_id,
-            strategies=self.strategy_config,
-            llm=self.llm_provider,
-            default_cube_id=getattr(self, "default_cube_id", None),
-            memory_confidence=self.memory_confidence,
-            adjustment_mode=getattr(self, "adjustment_mode", "append"),
-            adjustment_confidence_factor=0.8,
-        )
-        return updater.update(
-            task_description=task_description,
-            trajectory=trajectory,
-            success=success,
-            retrieved_memory_ids=retrieved_memory_ids,
-            metadata=metadata,
-        )
-
-    # ----------------------- Timestamped cube helpers -----------------------
-    def list_available_cube_timestamps(self) -> List[str]:
-        """列出当前 user 下的所有时间戳 cube 目录（按时间排序）。"""
-        import os
-
-        user_dir = os.path.join(
-            getattr(self, "_base_root", "./results/mem_cubes"), self.user_id
-        )
-        if not os.path.isdir(user_dir):
+        *,
+        node_ids: Optional[List[str]] = None,
+        depth: Optional[int] = None,
+        task_type_dominant: Optional[str] = None,
+        limit: Optional[int] = None,
+    ) -> List[SkillRepresentation]:
+        if node_ids is None:
+            stmt = select(self.skill_graph_state_table.c.node_id)
+            if depth is not None:
+                stmt = stmt.where(self.skill_graph_state_table.c.depth == depth)
+            if task_type_dominant is not None:
+                stmt = stmt.where(
+                    self.skill_graph_state_table.c.task_type_dominant == task_type_dominant
+                )
+            stmt = stmt.order_by(
+                self.skill_graph_state_table.c.depth.asc(),
+                self.skill_graph_state_table.c.t_create.asc(),
+                self.skill_graph_state_table.c.node_id.asc(),
+            )
+            if limit is not None:
+                stmt = stmt.limit(int(limit))
+            with self._engine.begin() as conn:
+                rows = conn.execute(stmt).mappings().all()
+            node_ids = [row["node_id"] for row in rows]
+        if not node_ids:
             return []
-        ts_list = [
-            d for d in os.listdir(user_dir) if os.path.isdir(os.path.join(user_dir, d))
-        ]
-        return sorted(ts_list)
 
-    def get_current_cube_id(self) -> Optional[str]:
-        """返回当前默认使用的 cube_id。"""
-        return getattr(self, "default_cube_id", None)
-
-    def switch_to_cube_timestamp(self, timestamp: str) -> None:
-        """
-        切换到指定时间戳的历史 cube（只更改当前实例默认 cube，不清理/删除任何数据）。
-
-        Args:
-            timestamp: 形如 YYYYmmdd_HHMMSS 的时间戳目录名
-        """
-        import os
-
-        cube_dir = os.path.join(
-            getattr(self, "_base_root", "./results/mem_cubes"), self.user_id, timestamp
-        )
-        if not os.path.isdir(cube_dir):
-            raise ValueError(f"Cube directory not found for timestamp: {timestamp}")
-
-        try:
-            cube = GeneralMemCube.init_from_dir(cube_dir)
-        except Exception as e:
-            raise RuntimeError(f"Failed to load cube from '{cube_dir}': {e}")
-
-        mem_cube_id = f"cube_{self.user_id}_{timestamp}"
-        old_cube_id = getattr(self, "default_cube_id", None)
-        self.mos.register_mem_cube(cube, mem_cube_id=mem_cube_id, user_id=self.user_id)
-        self.default_cube_id = mem_cube_id
-        self._cube_timestamp = timestamp
-        self._cube_dir = cube_dir
-        self._qdrant_dir = os.path.abspath(
-            os.path.join(
-                getattr(self, "_base_root", "./results/mem_cubes"),
-                "..",
-                "qdrant",
-                self.user_id,
-                timestamp,
+        stmt = select(
+            self.skill_representation_table.c.node_id,
+            self.skill_representation_table.c.content,
+            self.skill_representation_table.c.embedding,
+        ).where(self.skill_representation_table.c.node_id.in_(node_ids))
+        with self._engine.begin() as conn:
+            rows = conn.execute(stmt).mappings().all()
+        by_id = {
+            row["node_id"]: SkillRepresentation(
+                id=row["node_id"],
+                content=row["content"],
+                embedding=self._deserialize_embedding(row["embedding"]),
             )
-        )
-        self._sync_cube_bound_components(
-            old_cube_id=old_cube_id, reason=f"switch_to_cube_timestamp:{timestamp}"
-        )
-
-    def _prepare_memory_item(
-        self,
-        task_description: str,
-        trajectory: str,
-        metadata: Optional[Dict[str, Any]] = None,
-    ) -> TextualMemoryItem:
-        """
-        [NEW HELPER METHOD]
-        This is the "thinking" part of build_memory. It performs all CPU/IO-bound
-        operations (LLM calls, embedding) to create a TextualMemoryItem, but does NOT
-        write it to the database. This method is safe to run in parallel.
-
-        Args:
-            task_description: Natural language description of the task.
-            trajectory: Detailed step-by-step trajectory of task execution.
-            metadata: Optional additional metadata.
-
-        Returns:
-            A fully prepared TextualMemoryItem ready for insertion.
-        """
-        # This code is a direct copy of the logic inside `build_memory`, but stops before `text_mem.add`
-
-        # Extract source benchmark from metadata
-        source_benchmark = (metadata or {}).get("source_benchmark", "unknown")
-        raw_success = (metadata or {}).get("success", None)
-        success = _coerce_success(raw_success)
-        # Use Builder pattern to generate memory content
-        builder = get_builder(self.strategy_config.build, self.llm_provider)
-        memory_content = builder.build(task_description, trajectory)
-
-        # Create procedural memory based on build strategy
-        if self.strategy_config.build == BuildStrategy.TRAJECTORY:
-            procedural_memory = ProceduralMemory.create_trajectory_memory(
-                task_description=task_description,
-                trajectory=memory_content,  # Use builder output
-                build_strategy=self.strategy_config.build,
-                retrieve_strategy=self.strategy_config.retrieve,
-                update_strategy=self.strategy_config.update,
-                source_benchmark=source_benchmark,
-                confidence_score=self.memory_confidence,
-            )
-
-        elif self.strategy_config.build == BuildStrategy.SCRIPT:
-            procedural_memory = ProceduralMemory.create_script_memory(
-                task_description=task_description,
-                script=memory_content,  # Use builder output
-                trajectory=trajectory,  # Keep original trajectory for reference
-                build_strategy=self.strategy_config.build,
-                retrieve_strategy=self.strategy_config.retrieve,
-                update_strategy=self.strategy_config.update,
-                source_benchmark=source_benchmark,
-                confidence_score=self.memory_confidence,
-            )
-
-        else:  # BuildStrategy.PROCEDURALIZATION
-            # For proceduralization, the builder returns combined content
-            # Extract script from the combined content for metadata
-            lines = memory_content.split("\n")
-            script_start = None
-            trajectory_start = None
-
-            for i, line in enumerate(lines):
-                if line.strip() == "SCRIPT:":
-                    script_start = i + 1
-                elif line.strip() == "TRAJECTORY:":
-                    trajectory_start = i + 1
-                    break
-
-            if script_start is not None and trajectory_start is not None:
-                script = "\n".join(lines[script_start : trajectory_start - 2]).strip()
-            else:
-                # Fallback: generate script separately if parsing fails
-                script = self.llm_provider.generate_script(trajectory)
-
-            procedural_memory = ProceduralMemory.create_procedural_memory(
-                task_description=task_description,
-                script=script,
-                trajectory=trajectory,
-                build_strategy=self.strategy_config.build,
-                retrieve_strategy=self.strategy_config.retrieve,
-                update_strategy=self.strategy_config.update,
-                source_benchmark=source_benchmark,
-                confidence_score=self.memory_confidence,
-            )
-
-        # Generate retrieval keys if needed
-        if self.strategy_config.retrieve == RetrieveStrategy.AVEFACT:
-            keywords = self.llm_provider.extract_keywords(
-                task_description, self.max_keywords
-            )
-            avefact_vector = self.avefact_keyer.generate_key(task_description)
-            procedural_memory.memp_metadata.avefact_keywords = keywords
-            procedural_memory.memp_metadata.avefact_vector = avefact_vector
-        elif self.strategy_config.retrieve == RetrieveStrategy.QUERY:
-            query_vector = self.simple_keyer.generate_key(task_description)
-            procedural_memory.memp_metadata.query_vector = query_vector
-
-        # Write using text_mem.add with retrieval key = task_description (embedding),
-        # and full content stored in metadata.full_content
-        full_content = f"Task: {task_description}\n\n{procedural_memory.memory_content}"
-
-        base_meta = {
-            "type": "procedure",
-            "source": "conversation",
-            "source_benchmark": source_benchmark,
-            "success": success,
-            "strategy_build": self.strategy_config.build.value,
-            "strategy_retrieve": self.strategy_config.retrieve.value,
-            "strategy_update": self.strategy_config.update.value,
-            "confidence": self.memory_confidence,
-            "full_content": full_content,
+            for row in rows
         }
-        if (
-            getattr(self, "enable_value_driven", False)
-            and getattr(self, "rl_config", None) is not None
-        ):
-            # User-selected behavior: unknown success defaults to q_init_pos.
-            is_success = True if success is None else bool(success)
-            base_meta |= {
-                "q_value": (
-                    float(self.rl_config.q_init_pos)
-                    if is_success
-                    else float(self.rl_config.q_init_neg)
-                ),
-                "q_visits": 0,
-                "q_updated_at": datetime.now().isoformat(),
-                "last_used_at": datetime.now().isoformat(),
-                "reward_ma": 0.0,
-            }
-        item = TextualMemoryItem(
-            memory=task_description,
-            metadata=TextualMemoryMetadata(**base_meta),
-        )
-        return item
+        return [by_id[node_id] for node_id in node_ids if node_id in by_id]
 
-    def build_memories(
+    @property
+    def epsilon(self) -> float:
+        return float(self.memory_config.epsilon_decay)
+
+    def add_node(
         self,
-        task_descriptions: List[str],
-        trajectories: List[str],
-        metadatas: Optional[List[Dict]] = None,
+        node: SkillNode,
+        representation: SkillRepresentation,
+        parent_id: Optional[str] = None,
+    ) -> SkillNode:
+        """Insert a node into the graph and its SQLite representation store."""
+        if node.id != representation.id:
+            raise ValueError("SkillNode id must match representation id")
+        log_event(
+            logger,
+            "memory_node.create",
+            node_id=node.id,
+            depth=node.depth,
+            parent_id=parent_id or self.graph.root_id,
+            task_type=node.task_type_dominant,
+            t_create=node.t_create,
+            consolidated=bool(getattr(node, "consolidated", False)),
+        )
+        self.graph.insert(node, parent_id=parent_id)
+        self._upsert_representation(representation)
+        self._upsert_graph_state(node)
+        return node
+
+    def add_node_from_text(
+        self,
+        *,
+        id: str,
+        content: str,
+        task_type_dominant: str,
+        t_create: int,
+        depth: int,
+        parent_id: Optional[str] = None,
+        embedding: Optional[List[float]] = None,
+        evidence_ids: Optional[List[str]] = None,
+        last_accessed_step: Optional[int] = None,
+    ) -> SkillNode:
+        """Create a node from text and add it to the service."""
+        log_event(
+            logger,
+            "skill_creation.start",
+            node_id=id,
+            depth=depth,
+            task_type=task_type_dominant,
+            parent_id=parent_id or self.graph.root_id,
+            t_create=t_create,
+            evidence_ids=evidence_ids or [],
+            content=content,
+        )
+        if embedding is None:
+            if self.embedding_provider is None:
+                raise ValueError(
+                    "embedding_provider is required when embedding is omitted"
+                )
+            embedding = self.embedding_provider.embed_single(content)
+
+        if depth == 1:
+            node = SkillNode.create_strategic(
+                id=id,
+                task_type_dominant=task_type_dominant,
+                t_create=t_create,
+                parent_id=parent_id,
+            )
+        elif depth == 2:
+            node = SkillNode.create_tactical(
+                id=id,
+                task_type_dominant=task_type_dominant,
+                t_create=t_create,
+                parent_id=parent_id,
+            )
+        else:
+            raise ValueError("depth must be 1 or 2")
+
+        # Reservoir-sample the seed evidence ids into the node's cap (§5.4)
+        # rather than assigning the list directly, so a large initial batch
+        # (e.g. a merged consolidation cluster) is capped correctly too.
+        for evidence_id in evidence_ids or []:
+            self.add_evidence_to_node(node, evidence_id)
+
+        if last_accessed_step is not None:
+            node.last_accessed_step = int(last_accessed_step)
+
+        representation = SkillRepresentation(
+            id=id,
+            content=content,
+            embedding=embedding,
+        )
+        return self.add_node(node, representation, parent_id=parent_id)
+
+#O(n^2) time complexity. Need to work on this
+
+    def prune_tactical_nodes(
+        self,
+        *,
+        current_step: Optional[int] = None,
+        theta_prune: Optional[float] = None,
     ) -> List[str]:
-        """
-        Builds memories in a batch from lists of data.
-        Returns a list of the new memory IDs.
-        """
-        logger.info(f"Starting parallel build for {len(task_descriptions)} memories...")
+        """Prune tactical nodes whose decay-based retention falls below threshold."""
+        resolved_threshold = theta_prune
+        if resolved_threshold is None:
+            resolved_threshold = getattr(self.memory_config, "theta_prune", None)
+        if resolved_threshold is None:
+            return []
 
-        items_to_add = []
-        metadatas = metadatas or [{} for _ in task_descriptions]
-
-        # --- Phase 1: Parallel "Thinking" ---
-        with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
-            # Use zip to iterate through all lists in parallel
-            tasks = [
-                executor.submit(self._prepare_memory_item, td, traj, meta)
-                for td, traj, meta in zip(task_descriptions, trajectories, metadatas)
-            ]
-
-            for future in tqdm(tasks, desc="Building memories (Parallel Processing)"):
-                try:
-                    items_to_add.append(future.result())
-                except Exception as e:
-                    logger.error(f"Failed to prepare a memory item in parallel: {e}")
-
-        if not items_to_add:
-            logger.warning(
-                "No memory items were successfully prepared. Aborting build."
-            )
-            return {}
-
-        # --- Phase 2: Serial "Writing" ---
-        # Now, add all the prepared items to the database in a single, safe, serial operation.
-        logger.info(
-            f"Writing {len(items_to_add)} prepared memory items to the database..."
+        threshold = float(resolved_threshold)
+        resolved_step = int(
+            current_step
+            if current_step is not None
+            else getattr(self.graph, "current_step", 0) or 0
         )
-        mem_cube_id = getattr(self, "default_cube_id", None)
-        if mem_cube_id is None or mem_cube_id not in self.mos.mem_cubes:
-            raise RuntimeError("MemCube is not registered for the user.")
 
-        text_mem = self.mos.mem_cubes[mem_cube_id].text_mem
-        if text_mem is None:
-            raise RuntimeError("Textual memory is not initialized in the MemCube.")
+        removed_ids: List[str] = []
+        tactical_nodes = [
+            node for node in list(self.graph.nodes.values()) if node.is_tactical
+        ]
+        for node in tactical_nodes:
+            delta_t = max(0, resolved_step - int(node.last_accessed_step))
+            retention = math.exp(-float(node.decay_rate) * float(delta_t))
+            if retention < threshold:
+                node_removed_ids = self.graph.remove(node.id)
+                removed_ids.extend(node_removed_ids)
+                with self._engine.begin() as conn:
+                    for rid in node_removed_ids:
+                        conn.execute(
+                            delete(self.skill_representation_table).where(
+                                self.skill_representation_table.c.node_id == rid
+                            )
+                        )
+                        conn.execute(
+                            delete(self.skill_graph_state_table).where(
+                                self.skill_graph_state_table.c.node_id == rid
+                            )
+                        )
 
-        # The actual database write operation
-        for item in tqdm(items_to_add):
-            text_mem.add([item])
+        return removed_ids
 
-        # Create the results map
-        results: Dict[str, str] = {
-            str(item.memory): str(item.id) for item in items_to_add
+    def get_node(self, node_id: str) -> SkillNode:
+        return self.graph.get(node_id)
+
+    def get_representation(self, node_id: str) -> SkillRepresentation:
+        return self._fetch_representation(node_id)
+
+    def list_nodes(self, depth: Optional[int] = None) -> List[SkillNode]:
+        nodes = list(self.graph.nodes.values())
+        if depth is None:
+            return nodes
+        return [node for node in nodes if node.depth == depth]
+
+    def list_representations(
+        self,
+        depth: Optional[int] = None,
+        *,
+        task_type_dominant: Optional[str] = None,
+    ) -> List[SkillRepresentation]:
+        return self._fetch_representations(
+            depth=depth,
+            task_type_dominant=task_type_dominant,
+        )
+
+    def search_nodes(
+        self,
+        query_embedding: List[float],
+        *,
+        top_k: int = 5,
+        depth: Optional[int] = None,
+        task_type_dominant: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Similarity search over stored skill nodes."""
+        return self.retriever.search(
+            self._fetch_representations(
+                depth=depth,
+                task_type_dominant=task_type_dominant,
+            ),
+            query_embedding,
+            top_k=top_k,
+            depth=None,
+        )
+
+    def search(
+        self,
+        query_embedding: List[float],
+        *,
+        top_k: int = 5,
+        depth: Optional[int] = None,
+        task_type_dominant: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Alias for embedding-based similarity search."""
+        return self.search_nodes(
+            query_embedding,
+            top_k=top_k,
+            depth=depth,
+            task_type_dominant=task_type_dominant,
+        )
+
+    def search_by_text(
+        self,
+        query_text: str,
+        *,
+        top_k: int = 5,
+        depth: Optional[int] = None,
+        task_type_dominant: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Convenience wrapper that embeds text before similarity search."""
+        if self.embedding_provider is None:
+            raise ValueError("embedding_provider is required for text search")
+        query_embedding = self.embedding_provider.embed_single(query_text)
+        return self.search_nodes(
+            query_embedding,
+            top_k=top_k,
+            depth=depth,
+            task_type_dominant=task_type_dominant,
+        )
+
+    def find_best_parent(
+        self,
+        query_embedding: List[float],
+        *,
+        target_depth: int,
+        task_type_dominant: Optional[str] = None,
+    ) -> Optional[SkillNode]:
+        """Find the best parent candidate for a query embedding."""
+        best = self.retriever.best_node(
+            self._fetch_representations(
+                depth=target_depth,
+                task_type_dominant=task_type_dominant,
+            ),
+            query_embedding,
+            depth=None,
+        )
+        if best is None:
+            return None
+        return self.graph.get(best.id)
+
+    def sleep_consolidation_count(self) -> int:
+        """Return the active count used to decide whether sleep consolidation fires."""
+        return self.graph.unabsorbed_tactical_count()
+
+    def should_sleep_consolidate(self) -> bool:
+        """Check whether the current graph should trigger sleep consolidation."""
+        threshold = getattr(self.memory_config, "n_sleep", None)
+        if threshold is None:
+            return False
+        return self.sleep_consolidation_count() >= int(threshold)
+
+    def sleep_consolidate(
+        self,
+        consolidation_service: SleepConsolidationService,
+        *,
+        theta_consolidate: Optional[float] = None,
+    ) -> List[SleepConsolidationResult]:
+        """Run sleep consolidation and wire consolidation outcomes into the graph.
+
+        This performs the graph mutation phase only: cluster eligible tactical nodes,
+        ask the LLM for a structured spawn/absorb/discard action, and materialize a
+        strategic scaffold node for clusters judged to spawn one. Tactical nodes
+        processed in any branch are marked consolidated.
+        """
+        resolved_threshold = theta_consolidate
+        if resolved_threshold is None:
+            resolved_threshold = getattr(self.memory_config, "theta_consolidate", None)
+        threshold = float(resolved_threshold) if resolved_threshold is not None else 0.0
+
+        log_event(
+            logger,
+            "sleep_consolidation.start",
+            threshold=threshold,
+            current_step=self.graph.current_step,
+            tactical_count=sum(1 for node in self.graph.nodes.values() if node.is_tactical),
+        )
+
+        eligible_nodes = [
+            node
+            for node in self.graph.nodes.values()
+            if node.is_tactical
+            and not node.consolidated
+            and node.q_salience(self.graph.lambda_shrink) > threshold
+        ]
+        eligible_nodes.sort(key=lambda node: (int(node.t_create), node.id))
+        if not eligible_nodes:
+            log_event(
+                logger,
+                "sleep_consolidation.skip",
+                reason="no_eligible_nodes",
+                threshold=threshold,
+                current_step=self.graph.current_step,
+            )
+            return []
+
+        eligible_representations = {
+            node.id: self._fetch_representation(node.id) for node in eligible_nodes
         }
-        logger.info("Batch memory build complete.")
+
+        eligible_embeddings = [
+            eligible_representations[node.id].embedding for node in eligible_nodes
+        ]
+        clusters = consolidation_service.cluster_embeddings(eligible_embeddings)
+        existing_scaffolds = self._strategic_scaffold_contexts()
+
+        results: List[SleepConsolidationResult] = []
+        for indices in clusters:
+            cluster_nodes = [eligible_nodes[idx] for idx in indices]
+            if not cluster_nodes:
+                continue
+
+            cluster_texts = [
+                eligible_representations[node.id].content for node in cluster_nodes
+            ]
+            decision, prompt, raw_response = consolidation_service.decide_cluster(
+                cluster_texts,
+                existing_scaffolds=existing_scaffolds,
+            )
+            result = SleepConsolidationResult(
+                cluster_indices=list(indices),
+                cluster_texts=cluster_texts,
+                action=decision.action,
+                summary=decision.summary,
+                target_scaffold_id=decision.target_scaffold_id,
+                prompt=prompt,
+                raw_response=raw_response,
+            )
+            results.append(result)
+            log_event(
+                logger,
+                "sleep_consolidation.cluster_decision",
+                cluster_indices=list(indices),
+                cluster_node_ids=[node.id for node in cluster_nodes],
+                action=decision.action.value,
+                summary=decision.summary,
+                target_scaffold_id=decision.target_scaffold_id,
+            )
+
+            if decision.action == SleepConsolidationAction.SPAWN:
+                if decision.summary is None:
+                    raise ValueError("Spawn decisions must include a scaffold summary")
+                scaffold_node = self._spawn_strategic_scaffold(
+                    cluster_nodes=cluster_nodes,
+                    cluster_embeddings=[
+                        eligible_representations[node.id].embedding
+                        for node in cluster_nodes
+                    ],
+                    scaffold_content=decision.summary,
+                )
+                for node in cluster_nodes:
+                    self.graph.reparent(node, scaffold_node.id)
+                    node.consolidated = True
+                    self._upsert_graph_state(node)
+                log_event(
+                    logger,
+                    "sleep_consolidation.spawn",
+                    scaffold_id=scaffold_node.id,
+                    cluster_node_ids=[node.id for node in cluster_nodes],
+                    summary=decision.summary,
+                )
+            elif decision.action == SleepConsolidationAction.ABSORB:
+                if decision.target_scaffold_id is None:
+                    raise ValueError("Absorb decisions must include a target scaffold id")
+                target_scaffold = self._resolve_strategic_scaffold(
+                    decision.target_scaffold_id
+                )
+                for node in cluster_nodes:
+                    self.graph.reparent(node, target_scaffold.id)
+                    node.consolidated = True
+                    self._upsert_graph_state(node)
+                log_event(
+                    logger,
+                    "sleep_consolidation.absorb",
+                    target_scaffold_id=target_scaffold.id,
+                    cluster_node_ids=[node.id for node in cluster_nodes],
+                )
+            elif decision.action == SleepConsolidationAction.DISCARD:
+                for node in cluster_nodes:
+                    node.consolidated = True
+                    self._upsert_graph_state(node)
+                log_event(
+                    logger,
+                    "sleep_consolidation.discard",
+                    cluster_node_ids=[node.id for node in cluster_nodes],
+                )
+            else:
+                raise ValueError(
+                    f"Unsupported sleep-consolidation action: {decision.action!r}"
+                )
+
+        log_event(
+            logger,
+            "sleep_consolidation.done",
+            num_results=len(results),
+            actions=[result.action.value for result in results],
+        )
         return results
 
-    def update_memories(
-        self,
-        task_descriptions: List[str],
-        trajectories: List[str],
-        successes: List[bool],
-        retrieved_ids_list: List[List[str]],
-        metadatas: Optional[List[Dict]] = None,
-    ) -> List[Optional[str]]:
-        """
-        Updates memories in a batch by delegating to the parallel-capable
-        updater's `update_batch` method.
-        """
-        logger.info("Delegating batch update to the configured updater...")
-
-        # 1. Get the appropriate updater instance
-        updater = get_updater(
-            self.strategy_config.update,
-            mos=self.mos,
-            num_workers=self.num_workers,
-            user_id=self.user_id,
-            strategies=self.strategy_config,
-            llm=self.llm_provider,
-            default_cube_id=getattr(self, "default_cube_id", None),
-            memory_confidence=self.memory_confidence,
-            adjustment_mode=getattr(self, "adjustment_mode", "append"),
-            adjustment_confidence_factor=0.8,
+    def _strategic_scaffold_contexts(self) -> List[StrategicScaffoldContext]:
+        scaffolds = sorted(
+            self.graph.nodes_at_depth(1),
+            key=lambda node: (int(node.t_create), node.id),
         )
-
-        # 2. Call its parallel-capable batch method
-        return updater.update_batch(
-            task_descriptions=task_descriptions,
-            trajectories=trajectories,
-            successes=successes,
-            retrieved_ids_list=retrieved_ids_list,
-            metadatas=metadatas,
-        )
-
-    def add_memory(
-        self,
-        task_description: str,
-        trajectory: str,
-        success: bool,
-        retrieved_memory_query: Optional[List[Tuple[str, float]]] = None,
-        retrieved_memory_ids: Optional[List[str]] = None,
-        metadata: Optional[Dict[str, Any]] = None,
-    ) -> Optional[str]:
-        """
-        Add a single memory entry into the system.
-
-        This is a thin wrapper around `add_memories()` to avoid maintaining two
-        divergent implementations. It preserves the historical single-item API
-        while reusing the batch-safe update/write path.
-        """
-        try:
-            results = self.add_memories(
-                task_descriptions=[task_description],
-                trajectories=[trajectory],
-                successes=[bool(success)],
-                retrieved_memory_queries=[retrieved_memory_query],
-                retrieved_memory_ids_list=[retrieved_memory_ids],
-                metadatas=[metadata],
+        return [
+            StrategicScaffoldContext(
+                node_id=node.id,
+                summary=self._fetch_representation(node.id).content,
             )
-            if not results:
-                return None
-            first = results[0]
-            if isinstance(first, (list, tuple)) and len(first) >= 2:
-                return first[1]
-            return None
-        except Exception as e:
-            import traceback
+            for node in scaffolds
+        ]
 
-            print(f"[add_memory] Error: {e}\n{traceback.format_exc()}")
-            return None
+    def _resolve_strategic_scaffold(self, scaffold_id: str) -> SkillNode:
+        node = self.graph.get(scaffold_id)
+        if not node.is_strategic:
+            raise ValueError(f"Target node is not a strategic scaffold: {scaffold_id}")
+        return node
 
+    def _spawn_strategic_scaffold(
+        self,
+        *,
+        cluster_nodes: List[SkillNode],
+        cluster_embeddings: List[List[float]],
+        scaffold_content: str,
+    ) -> SkillNode:
+        scaffold_id = uuid4().hex
+        task_type_dominant = self._majority_task_type(cluster_nodes)
+        scaffold_embedding = self._scaffold_embedding(
+            scaffold_content=scaffold_content,
+            cluster_embeddings=cluster_embeddings,
+        )
+        scaffold_q_omega = self._spawned_scaffold_q_omega(cluster_nodes)
+        scaffold_evidence_ids = self._merged_evidence_ids(cluster_nodes)
 
-    def _normalize_similarity(self, sim: float) -> float:
-        """Z-norm similarity using precomputed mean/std."""
-        if not getattr(self, "use_z_score_normalization", True):
-            return float(sim)
-        std = self.sim_norm_std if self.sim_norm_std and self.sim_norm_std > 1e-9 else 1.0
-        return (sim - self.sim_norm_mean) / std
-    
-    def _normalize_q(self, q: float, mean: float, std: float) -> float:
-        """Z-norm q using provided mean/std (per-call stats)."""
-        if not getattr(self, "use_z_score_normalization", True):
-            return float(q)
-        std = std if std and std > 1e-9 else 1.0
-        z = (q - mean) / std
-        return max(min(z, 3.0), -3.0)
+        scaffold_node = SkillNode.create_strategic(
+            id=scaffold_id,
+            task_type_dominant=task_type_dominant,
+            t_create=int(self.graph.current_step),
+            parent_id=self.graph.root_id,
+        )
+        scaffold_node.Q_omega = scaffold_q_omega
+        # Reservoir-sample the merged cluster evidence into the cap (§5.4) —
+        # a cluster can easily contribute more raw evidence than r_evidence.
+        for evidence_id in scaffold_evidence_ids:
+            self.add_evidence_to_node(scaffold_node, evidence_id)
+
+        representation = SkillRepresentation(
+            id=scaffold_id,
+            content=scaffold_content,
+            embedding=scaffold_embedding,
+        )
+        self.add_node(scaffold_node, representation, parent_id=self.graph.root_id)
+        return scaffold_node
+
+    def _scaffold_embedding(
+        self,
+        *,
+        scaffold_content: str,
+        cluster_embeddings: List[List[float]],
+    ) -> List[float]:
+        if self.embedding_provider is not None:
+            return self.embedding_provider.embed_single(scaffold_content)
+        return self._mean_embedding(cluster_embeddings)
+
+    @staticmethod
+    def _mean_embedding(cluster_embeddings: List[List[float]]) -> List[float]:
+        if not cluster_embeddings:
+            return []
+        dim = min(len(row) for row in cluster_embeddings)
+        if dim <= 0:
+            return []
+        totals = [0.0] * dim
+        for row in cluster_embeddings:
+            for idx in range(dim):
+                totals[idx] += float(row[idx])
+        count = float(len(cluster_embeddings))
+        return [value / count for value in totals]
+
+    def _spawned_scaffold_q_omega(self, cluster_nodes: List[SkillNode]) -> Dict[str, float]:
+        gamma_omega = float(getattr(self.memory_config, "gamma_omega", 0.95))
+        lambda_shrink = float(
+            getattr(self.memory_config, "lambda_shrink", self.graph.lambda_shrink)
+        )
+        horizon_mode = str(
+            getattr(self.memory_config, "q_omega_init_horizon", "infinite")
+        ).lower()
+        min_horizon = max(1, int(getattr(self.memory_config, "q_omega_init_min_horizon", 1)))
+        infinite_scale = 1.0 / max(1e-12, 1.0 - gamma_omega)
+
+        def _scale_for(task_type: str) -> float:
+            # Finite-horizon geometric sum S(T) = (1 - gamma^T) / (1 - gamma).
+            # Always <= 1/(1-gamma), so empirical init never exceeds the
+            # infinite-horizon upper bound (spec §3.5 approximation note).
+            if horizon_mode != "empirical":
+                return infinite_scale
+            mean_len = self.mean_episode_length(task_type)
+            if mean_len is None:
+                return infinite_scale
+            horizon = max(min_horizon, int(round(mean_len)))
+            return (1.0 - gamma_omega ** float(horizon)) / max(1e-12, 1.0 - gamma_omega)
+
+        q_omega: Dict[str, float] = {}
+        task_types = sorted({task_type for node in cluster_nodes for task_type in node.Q})
+        for task_type in task_types:
+            samples = [
+                (float(node.Q[task_type]), int(node.n.get(task_type, 0) or 0))
+                for node in cluster_nodes
+                if task_type in node.Q and int(node.n.get(task_type, 0) or 0) > 0
+            ]
+            if not samples:
+                continue
+            q_omega[task_type] = _scale_for(task_type) * compute_shrinkage_weighted_mean_from_samples(
+                samples,
+                lambda_shrink=lambda_shrink,
+            )
+        return q_omega
+
+    @staticmethod
+    def _majority_task_type(cluster_nodes: List[SkillNode]) -> str:
+        counts = Counter(node.task_type_dominant for node in cluster_nodes if node.task_type_dominant)
+        if not counts:
+            return "unknown"
+        return max(counts.items(), key=lambda item: (item[1], item[0]))[0]
+
+    @staticmethod
+    def _merged_evidence_ids(cluster_nodes: List[SkillNode]) -> List[str]:
+        merged: List[str] = []
+        seen = set()
+        for node in cluster_nodes:
+            for evidence_id in node.evidence_ids:
+                if evidence_id in seen:
+                    continue
+                seen.add(evidence_id)
+                merged.append(evidence_id)
+        return merged
+
+    def close(self) -> None:
+        """Close the SQLite connection."""
+        self._engine.dispose()
+
+    def remove_node(self, node_id: str) -> None:
+        """Remove a node and its subtree from the graph and SQLite table."""
+        removed_ids = self.graph.remove(node_id)
+        with self._engine.begin() as conn:
+            for rid in removed_ids:
+                conn.execute(
+                    delete(self.skill_representation_table).where(
+                        self.skill_representation_table.c.node_id == rid
+                    )
+                )
+                conn.execute(
+                    delete(self.skill_graph_state_table).where(
+                        self.skill_graph_state_table.c.node_id == rid
+                    )
+                )
+
+    def refresh_content_db(self) -> None:
+        """Synchronize both SQLite tables with the graph."""
+        valid_ids = list(self.graph.nodes)
+        with self._engine.begin() as conn:
+            if not valid_ids:
+                conn.execute(delete(self.skill_representation_table))
+                conn.execute(delete(self.skill_graph_state_table))
+                return
+
+            conn.execute(
+                delete(self.skill_representation_table).where(
+                    ~self.skill_representation_table.c.node_id.in_(valid_ids)
+                )
+            )
+            conn.execute(
+                delete(self.skill_graph_state_table).where(
+                    ~self.skill_graph_state_table.c.node_id.in_(valid_ids)
+                )
+            )
 
     def retrieve_query(
         self,
-        task_description: str,
-        k: int = 5,
-        threshold: float = 0.0,
-    ) -> Dict[str, Any]:
-        """
-        Unified retrieval using similarity-Q hybrid weighting.
-        No two-stage retrieval; directly scores candidates by sim and Q mixture.
-
-        Returns:
-            {
-                "actions": [...],
-                "selected": [...],
-                "candidates": [...],
-                "simmax": float
-            }
-        """
-
-        try:
-            # -------- Basic checks --------
-            if not hasattr(self, "dict_memory") or not self.dict_memory:
-                return {"actions": [], "selected": [], "candidates": [], "simmax": 0.0}
-
-            if not getattr(self, "embedding_provider", None):
-                raise RuntimeError("embedding_provider is required for local retrieval")
-
-            embed = getattr(self.embedding_provider, "embed", None)
-            if not callable(embed):
-                raise RuntimeError("embedding_provider.embed() not callable")
-
-            # -------- Compute query embedding --------
-            queries = list(self.dict_memory.keys())
-            if not queries:
-                return {"actions": [], "selected": [], "candidates": [], "simmax": 0.0}
-
-            query_vec = get_embedding_with_retry(embed, [task_description])[0]
-            query_norm = math.sqrt(sum(x * x for x in query_vec)) or 1e-8
-
-            query_embeddings = getattr(self, "query_embeddings", {})
-            missing_queries = [q for q in queries if q not in query_embeddings]
-
-            if missing_queries:
-                logger.info(
-                    f"Missing embeddings for {len(missing_queries)} queries, fetching..."
-                )
-                new_vecs = get_embedding_with_retry(embed, missing_queries)
-                for q, v in zip(missing_queries, new_vecs):
-                    query_embeddings[q] = v
-                self.query_embeddings.update(query_embeddings)
-
-            # -------- Compute similarity for all queries --------
-            sim_list = []
-            for q in queries:
-                qv = query_embeddings[q]
-                q_norm = math.sqrt(sum(x * x for x in qv)) or 1e-8
-                sim = sum(a * b for a, b in zip(query_vec, qv)) / (query_norm * q_norm)
-                if sim >= threshold:
-                    sim_list.append((q, sim))
-            sim_list.sort(key=lambda x: x[1], reverse=True)
-
-            if k is not None:
-                sim_list = sim_list[:k]
-            if not sim_list:
-                return {"actions": [], "selected": [], "candidates": [], "simmax": 0.0}
-
-            # -------- Fetch memory objects, build candidate list --------
-            candidates = []
-            for q, sim in sim_list:
-                mem_ids = self.dict_memory.get(q, [])
-                for mid in mem_ids:
-                    try:
-                        mem_obj = self._mem_cache.get(mid)
-                        if mem_obj is None:
-                            with self._db_gate:
-                                mem_obj = self.mos.get(
-                                    mem_cube_id=self.default_cube_id,
-                                    memory_id=mid,
-                                    user_id=self.user_id,
-                                )
-                            if mem_obj is not None:
-                                self._add_to_mem_cache(mid, mem_obj)
-
-                        if mem_obj is not None:
-                            md = getattr(mem_obj, "metadata", {})
-                            content = None
-                            try:
-                                if hasattr(md, "model_extra"):
-                                    content = md.model_extra.get("full_content")
-                                elif isinstance(md, dict):
-                                    content = md.get("full_content")
-                            except Exception:
-                                content = None
-
-                            candidates.append(
-                                {
-                                    "memory_id": mid,
-                                    "content": content,
-                                    "similarity": float(sim),
-                                    "metadata": md,
-                                    "memory_item": mem_obj,
-                                }
-                            )
-                    except Exception:
-                        logger.info(f"Failed to load memory {mid}", exc_info=True)
-
-            if not candidates:
-                return {"actions": [], "selected": [], "candidates": [], "simmax": 0.0}
-
-            # -------- Compute Q value for each candidate --------
-            enriched = []
-            simmax = 0.0
-            q_values = []
-            for c in candidates:
-                sim = c["similarity"]
-                simmax = max(simmax, sim)
-
-                # Check _q_cache first for latest Q-value
-                mem_id = c.get("memory_id")
-                md = _meta_to_dict(c.get("metadata"))
-                # Stable "task" identifier for de-dup (LLB-only usage).
-                # NOTE: task_id can legally be 0, so avoid truthiness-based fallbacks.
-                task_id = extract_task_id(md)
-
-                if mem_id and mem_id in self._q_cache:
-                    q = self._q_cache[mem_id]
-                else:
-                    # Fall back to metadata
-                    has_meta_q = isinstance(md, dict) and ("q_value" in md)
-                    q = md.get("q_value", self.rl_config.q_init_pos)
-                    logger.info(
-                        f"[Q-Cache Miss] Using metadata Q-value for {mem_id}: {q}"
-                    )
-                    try:
-                        q = float(q)
-                    except Exception:
-                        q = self.rl_config.q_init_pos
-
-                    # Populate Q-cache from metadata when available
-                    if mem_id and has_meta_q:
-                        try:
-                            self._q_cache[mem_id] = q
-                            # Simple cap eviction to avoid unbounded growth
-                            if len(self._q_cache) > self._q_cache_max_size:
-                                num_to_remove = max(1, self._q_cache_max_size // 10)
-                                for _ in range(num_to_remove):
-                                    self._q_cache.pop(next(iter(self._q_cache)), None)
-                        except Exception:
-                            pass
-
-                # recency boost
-                if self.rl_config.recency_boost > 0 and md.get("last_used_at"):
-                    ts = md["last_used_at"]
-                    if isinstance(ts, str) and len(ts) >= 10:
-                        q += self.rl_config.recency_boost
-
-                # Optional Q floor (LLB may set this via experiment.llb_q_floor).
-                q_floor = getattr(self.rl_config, "q_floor", None)
-                if q_floor is not None:
-                    try:
-                        q = max(float(q_floor), float(q))
-                    except Exception:
-                        pass
-
-                c_local = dict(c)
-                c_local["q_estimate"] = q
-                c_local["task_id"] = (str(task_id) if task_id is not None else None)
-                q_values.append(q)
-                enriched.append(c_local)
-
-            # -------- Optional Q threshold --------
-            q_min = getattr(self.rl_config, "q_min_threshold", None)
-            if q_min is not None:
-                enriched = [c for c in enriched if c["q_estimate"] >= q_min]
-
-            if not enriched:
-                return {
-                    "actions": [],
-                    "selected": [],
-                    "candidates": [],
-                    "simmax": simmax,
-                }
-
-            # -------- Hybrid scoring (similarity + Q) --------
-            # You can adjust weights here
-            w_sim = self.weight_sim
-            w_q = self.weight_q
-
-            # derive q normalization stats from current candidates
-            if q_values:
-                mean_q = float(statistics.fmean(q_values))
-                std_q = float(statistics.pstdev(q_values)) if len(q_values) > 1 else 1.0
-            else:
-                mean_q, std_q = 0.0, 1.0
-
-            for c in enriched:
-                sim = c["similarity"]
-                q = c["q_estimate"]
-
-                sim_z = self._normalize_similarity(sim)
-                q_z = self._normalize_q(q, mean_q, std_q)
-
-                # two options:
-                # 1. additive with normalized scores:
-                c["similarity_z"] = sim_z
-                c["q_z"] = q_z
-                c["score"] = sim_z * w_sim + q_z * w_q
-                # 2. multiplicative (if needed):
-                # c["score"] = sim * q
-
-            # -------- Sort by hybrid score --------
-            enriched_sorted = sorted(enriched, key=lambda x: x["score"], reverse=True)
-
-            # -------- epsilon-greedy sampling --------
-            topk = min(self.rl_config.topk, len(enriched_sorted))
-            if not getattr(self, "dedup_by_task_id", False):
-                if random.random() < self.rl_config.epsilon:
-                    selected = random.sample(enriched_sorted, topk)
-                else:
-                    selected = enriched_sorted[:topk]
-            else:
-                # LLB-only: de-dup by task_id while keeping epsilon-greedy behavior.
-                # - greedy: iterate score-desc
-                # - epsilon: shuffle before taking unique tasks
-                pool = list(enriched_sorted)
-                if random.random() < self.rl_config.epsilon:
-                    random.shuffle(pool)
-
-                selected = []
-                seen_tasks: set[str] = set()
-                for cand in pool:
-                    tid = cand.get("task_id")
-                    # If task_id missing, treat as unique by memory_id to avoid collapsing unrelated entries.
-                    key = str(tid) if tid else f"__missing_task_id__:{cand.get('memory_id')}"
-                    if key in seen_tasks:
-                        continue
-                    seen_tasks.add(key)
-                    selected.append(cand)
-                    if len(selected) >= topk:
-                        break
-
-            return {
-                "actions": [s["memory_id"] for s in selected],
-                "selected": selected,
-                "candidates": enriched_sorted,
-                "simmax": simmax,
-            }, sim_list
-
-        except Exception as e:
-            logger.info(
-                f"Local retrieve failed, task_desc: {task_description}", exc_info=True
-            )
-            raise RuntimeError(f"Local retrieve failed: {e}")
-
-    def add_memories(
-        self,
-        task_descriptions: List[str],
-        trajectories: List[str],
-        successes: List[bool],
-        retrieved_memory_queries: Optional[List[List[Tuple[str, float]]]] = None,
-        retrieved_memory_ids_list: Optional[List[Optional[List[str]]]] = None,
-        metadatas: Optional[List[Optional[Dict[str, Any]]]] = None,
-    ) -> Dict[str, Optional[str]]:
-        """
-        Batch version of `add_memory`.
-
-        For each (task_description, trajectory, success), determine if a similar query already exists.
-        If yes, attach the trajectory to that query; otherwise, create a new query entry.
-        Stores query embeddings for new queries to avoid recomputation during retrieval.
-
-        Args:
-            task_descriptions: List of task descriptions.
-            trajectories: List of trajectories corresponding to each task.
-            successes: List of success flags.
-            retrieved_memory_queries: Optional list of lists, each containing (query, score) pairs.
-            retrieved_memory_ids_list: Optional list of retrieved memory ID lists for each task.
-            metadatas: Optional list of metadata dicts.
-
-        Returns:
-            Dict mapping task_description → memory_id (or None if failed).
-        """
-        try:
-            if not hasattr(self, "dict_memory"):
-                self.dict_memory = {}
-            if not hasattr(self, "query_embeddings"):
-                self.query_embeddings = {}
-
-            similarity_threshold = getattr(self, "add_similarity_threshold", 0.8)
-            n = len(task_descriptions)
-
-            if retrieved_memory_queries is None:
-                retrieved_memory_queries = [None] * n
-            if retrieved_memory_ids_list is None:
-                retrieved_memory_ids_list = [None] * n
-            if metadatas is None:
-                metadatas = [None] * n
-            td_list = []
-            traj_list = []
-            succ_list = []
-            retrieved_ids_payload = []
-            metadata_list = []
-
-            for i in range(n):
-                td = task_descriptions[i]
-                traj = trajectories[i]
-                succ = successes[i]
-                retrieved_ids = retrieved_memory_ids_list[i]
-                meta = dict(metadatas[i] or {})
-
-                # 记录本次检索到的记忆，以便成功样本也能追溯引用链路
-                if retrieved_ids:
-                    meta["related_memory_ids"] = [
-                        str(rid) for rid in retrieved_ids if rid
-                    ]
-
-                # Attach RL-style meta defaults.
-                #
-                # IMPORTANT: do NOT blindly override upstream metadata (runner may
-                # provide q_value based on success/failure). Only fill missing
-                # fields, and when q_value is missing/invalid, initialize from
-                # q_init_pos/q_init_neg according to the success flag.
-                meta.setdefault("success", bool(succ))
-
-                rl_cfg = getattr(self, "rl_config", None)
-                try:
-                    q_init_pos = float(getattr(rl_cfg, "q_init_pos", 0.0))
-                except Exception:
-                    q_init_pos = 0.0
-                try:
-                    q_init_neg = float(getattr(rl_cfg, "q_init_neg", 0.0))
-                except Exception:
-                    q_init_neg = 0.0
-
-                default_q = q_init_pos if bool(succ) else q_init_neg
-                if "q_value" not in meta or meta.get("q_value") is None:
-                    meta["q_value"] = default_q
-                else:
-                    # If provided but not castable, fall back to the default.
-                    try:
-                        meta["q_value"] = float(meta["q_value"])
-                    except Exception:
-                        meta["q_value"] = default_q
-
-                meta.setdefault("q_visits", 0)
-                meta.setdefault("q_updated_at", datetime.now().isoformat())
-                meta.setdefault("last_used_at", datetime.now().isoformat())
-                meta.setdefault("reward_ma", 0.0)
-
-                # append to parallel lists
-                td_list.append(td[:4096])  # Truncate to avoid excessive length)
-                traj_list.append(traj)
-                succ_list.append(succ)
-                retrieved_ids_payload.append(retrieved_ids)
-                metadata_list.append(meta)
-
-            results = self.update_memories(
-                task_descriptions=td_list,
-                trajectories=traj_list,
-                successes=succ_list,
-                retrieved_ids_list=retrieved_ids_payload,
-                metadatas=metadata_list,
-            )
-
-            for i, task_description in enumerate(task_descriptions):
-                if i < len(results):
-                    recorded_task, mem_id = results[i]
-                    if recorded_task != task_description:
-                        logger.warning(
-                            f"Task description mismatch at index {i}: expected '{task_description}', got '{recorded_task}'"
-                        )
-                    mem_id = mem_id
-                else:
-                    logger.warning(f"No result found for task {task_description}")
-                    mem_id = None
-
-                retrieved_qs = retrieved_memory_queries[i]
-                matched_query = None
-                best_score = -1.0
-                if retrieved_qs:
-                    for query, score in retrieved_qs:
-                        if score >= similarity_threshold and score > best_score:
-                            matched_query, best_score = query, score
-
-                if matched_query:
-                    if matched_query not in self.dict_memory:
-                        self.dict_memory[matched_query] = []
-                    self.dict_memory[matched_query].append(mem_id)
-                else:
-                    self.dict_memory[task_description] = [mem_id]
-
-                    if getattr(self, "embedding_provider", None):
-                        embed = getattr(self.embedding_provider, "embed", None)
-                        if callable(embed):
-                            try:
-                                vec = embed([task_description])[0]
-                                self.query_embeddings[task_description] = vec
-                                logger.info(
-                                    f"Cached embedding for new query: {task_description[:40]}..."
-                                )
-                            except Exception:
-                                logger.info(
-                                    f"Failed to embed query '{task_description}'",
-                                    exc_info=True,
-                                )
-
-            return results
-
-        except Exception as e:
-            import traceback
-
-            print(f"[add_memories] Error: {e}\n{traceback.format_exc()}")
-            return {}
-
-    def save_checkpoint_snapshot(self, target_ck_dir: str, ckpt_id: str) -> dict:
-        """
-        保存当前 MemoryService 所指向的 MemCube 与向量库的独立快照到指定 ck 目录。
-        目录结构：
-        <ck_dir>/snapshot/
-            - cube/                # GeneralMemCube.dump 导出的 config.json + textual_memory.json
-            - qdrant/             # 直接拷贝当前 qdrant 本地目录（便于快速加载）
-            - snapshot_meta.json  # 元信息（含校验/统计）
-        返回：包含关键信息的字典，用于上层记录。
-        """
-        import os, json, shutil, hashlib
-
-        os.makedirs(target_ck_dir, exist_ok=True)
-        snapshot_root = os.path.join(target_ck_dir, f"snapshot/{ckpt_id}")
-        cube_dst = os.path.join(snapshot_root, "cube")
-        qdrant_dst = os.path.join(snapshot_root, "qdrant")
-        os.makedirs(snapshot_root, exist_ok=True)
-        # 清理旧目录以保证原子性
-        if os.path.isdir(cube_dst):
-            shutil.rmtree(cube_dst)
-        if os.path.isdir(qdrant_dst):
-            shutil.rmtree(qdrant_dst)
-        # 1) dump cube 到全新目录（包含 textual_memory.json：完整向量与payload）
-        cube_id = getattr(self, "default_cube_id", None)
-        cube = self.mos.mem_cubes.get(cube_id) if cube_id else None
-        if cube is None:
-            raise RuntimeError("No active mem cube to snapshot.")
-        cube.dump(cube_dst)
-        # 2) 拷贝 qdrant 文件目录（便于直接加载；如失败不影响最小可复现）
-        qdrant_src = getattr(self, "_qdrant_dir", None)
-        qdrant_copied = False
-        if qdrant_src and os.path.isdir(qdrant_src):
-            try:
-                shutil.copytree(qdrant_src, qdrant_dst)
-                qdrant_copied = True
-            except Exception:
-                # Snapshot can still be loadable (qdrant can be rebuilt from cube dump),
-                # but we must not write qdrant_dir=None to meta (it breaks loaders).
-                logger.warning(
-                    "Failed to copy qdrant dir from %s to %s; will keep empty qdrant dir and continue.",
-                    qdrant_src,
-                    qdrant_dst,
-                    exc_info=True,
-                )
-                try:
-                    os.makedirs(qdrant_dst, exist_ok=True)
-                except Exception:
-                    pass
-        # 3) 统计与校验
-        textual_path = os.path.join(cube_dst, "textual_memory.json")
-        md5 = None
-        if os.path.isfile(textual_path):
-            h = hashlib.md5()
-            with open(textual_path, "rb") as f:
-                for chunk in iter(lambda: f.read(8192), b""):
-                    h.update(chunk)
-            md5 = h.hexdigest()
-        total_count = 0
-        try:
-            res_all = self.mos.get_all(user_id=self.user_id)
-            text_sections = (
-                res_all.get("text_mem", []) if isinstance(res_all, dict) else []
-            )
-            for sec in text_sections:
-                mems = sec.get("memories", [])
-                total_count += len(mems) if isinstance(mems, list) else 0
-        except Exception:
-            total_count = 0
-        meta = {
-            "user_id": self.user_id,
-            "mem_cube_id": cube_id,
-            "cube_timestamp": getattr(self, "_cube_timestamp", None),
-            "checkpoint_id": ckpt_id,
-            "cube_dir": cube_dst,
-            # Always write a string path so load_checkpoint_snapshot can safely use it.
-            # If qdrant files weren't copied, loader may rebuild the local DB.
-            "qdrant_dir": qdrant_dst,
-            "textual_memory_md5": md5,
-            "visible_memories": total_count,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        }
-        with open(
-            os.path.join(snapshot_root, "snapshot_meta.json"), "w", encoding="utf-8"
-        ) as f:
-            json.dump(meta, f, ensure_ascii=False, indent=2)
-        try:
-            self._persist_local_caches(snapshot_root)
-        except Exception:
-            logger.warning(
-                "Failed to persist local caches during snapshot save", exc_info=True
-            )
-        return meta
-
-    def load_checkpoint_snapshot(
-        self, snapshot_root: str, *, mem_cube_id: str | None = None
-    ) -> int:
-        """
-        从 <ck_dir>/snapshot/ 加载快照并切换当前默认 cube，用于独立评测。
-        - 如果 snapshot_root 不包含 epoch number，自动查找最大的 epoch 并加载
-        - 优先读取 snapshot_meta.json；若缺失则按约定目录推断 cube/qdrant 路径。
-        - 使用 GeneralMemCube.init_from_dir + default_config 覆盖 vector_db.path 指向快照内 qdrant。
-
-        Returns:
-            int: The checkpoint_id (section/epoch number) from the loaded snapshot
-        """
-        import os, json, re, shutil, sqlite3
-        from memos.configs.mem_cube import GeneralMemCubeConfig
-
-        # 如果 snapshot_root 不是具体的 epoch 目录，则自动查找最大的 epoch
-        if os.path.isdir(snapshot_root) and not os.path.isfile(
-            os.path.join(snapshot_root, "snapshot_meta.json")
-        ):
-            # 检查是否有子目录是数字（epoch number）
-            try:
-                epoch_dirs = []
-                for item in os.listdir(snapshot_root):
-                    item_path = os.path.join(snapshot_root, item)
-                    if os.path.isdir(item_path) and item.isdigit():
-                        epoch_dirs.append(int(item))
-
-                if epoch_dirs:
-                    max_epoch = max(epoch_dirs)
-                    snapshot_root = os.path.join(snapshot_root, str(max_epoch))
-                    logger.info(
-                        f"Auto-selected latest checkpoint: epoch {max_epoch} from {snapshot_root}"
-                    )
-            except Exception as e:
-                logger.warning(f"Failed to auto-detect epoch directory: {e}")
-
-        # 解析路径
-        meta_path = os.path.join(snapshot_root, "snapshot_meta.json")
-        cube_dir = os.path.join(snapshot_root, "cube")
-        qdrant_dir = os.path.join(snapshot_root, "qdrant")
-        checkpoint_id = 0  # Default to 0 if not found
-
-        if os.path.isfile(meta_path):
-            try:
-                with open(meta_path, "r", encoding="utf-8") as f:
-                    meta = json.load(f)
-                cube_dir, qdrant_dir, checkpoint_id = _resolve_snapshot_dirs(
-                    snapshot_root, meta
-                )
-            except Exception:
-                pass
-        if not os.path.isdir(cube_dir):
-            raise ValueError(f"Snapshot cube directory not found: {cube_dir}")
-        # 构造 default_config 以覆盖向量库路径与基础 provider 配置
-        chat = self.mos_config.chat_model
-        openai_cfg = chat.config.model_dump()
-        embedder = self.mos_config.mem_reader.config.embedder.config
-        default_cfg = GeneralMemCubeConfig(
-            user_id=self.user_id,
-            text_mem={
-                "backend": "general_text",
-                "config": {
-                    "extractor_llm": {"backend": chat.backend, "config": openai_cfg},
-                    "embedder": {
-                        "backend": "universal_api",
-                        "config": {
-                            "provider": getattr(embedder, "provider", None),
-                            "model_name_or_path": getattr(
-                                embedder, "model_name_or_path", None
-                            ),
-                            "api_key": getattr(embedder, "api_key", None)
-                            or openai_cfg.get("api_key"),
-                            "base_url": getattr(embedder, "base_url", None)
-                            or openai_cfg.get("api_base"),
-                        },
-                    },
-                    "vector_db": {
-                        "backend": "qdrant",
-                        "config": {
-                            "collection_name": f"memp_{self.user_id}_snapshot",
-                            "vector_dimension": 3072,
-                            "distance_metric": "cosine",
-                            "path": qdrant_dir,
-                        },
-                    },
-                },
-            },
-            act_mem={"backend": "uninitialized", "config": {}},
-            para_mem={"backend": "uninitialized", "config": {}},
-        )
-        # 载入并注册
-        # Ensure qdrant directory exists; QdrantLocal will create internal sqlite files.
-        if not isinstance(qdrant_dir, str) or not qdrant_dir:
-            qdrant_dir = os.path.join(snapshot_root, "qdrant")
-        try:
-            os.makedirs(qdrant_dir, exist_ok=True)
-        except Exception:
-            logger.warning("Failed to ensure qdrant_dir exists: %r", qdrant_dir, exc_info=True)
-
-        def _is_sqlite_malformed(err: Exception) -> bool:
-            msg = str(err).lower()
-            return (
-                isinstance(err, sqlite3.DatabaseError)
-                or "database disk image is malformed" in msg
-                or "sqlite" in msg and "malformed" in msg
-            )
-
-        try:
-            cube = GeneralMemCube.init_from_dir(cube_dir, default_config=default_cfg)
-        except Exception as e:
-            # Common failure mode: qdrant_client local persistence uses SQLite.
-            # If the sqlite file inside qdrant_dir is corrupted (often due to
-            # interrupted writes or non-atomic snapshot copy), we can rebuild it
-            # by recreating qdrant_dir and reloading from cube dump.
-            if _is_sqlite_malformed(e):
-                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                backup_dir = f"{qdrant_dir}.corrupt_{ts}"
-                logger.warning(
-                    "Detected corrupted Qdrant local DB at %s; backing up to %s and rebuilding.",
-                    qdrant_dir,
-                    backup_dir,
-                    exc_info=True,
-                )
-                try:
-                    if os.path.isdir(qdrant_dir):
-                        shutil.move(qdrant_dir, backup_dir)
-                except Exception:
-                    logger.warning(
-                        "Failed to move corrupted qdrant dir; will try deleting in-place.",
-                        exc_info=True,
-                    )
-                    try:
-                        if os.path.isdir(qdrant_dir):
-                            shutil.rmtree(qdrant_dir)
-                    except Exception:
-                        pass
-                os.makedirs(qdrant_dir, exist_ok=True)
-                cube = GeneralMemCube.init_from_dir(cube_dir, default_config=default_cfg)
-            else:
-                raise
-        target_id = mem_cube_id or f"cube_{self.user_id}_snapshot"
-        old_cube_id = getattr(self, "default_cube_id", None)
-        # register_mem_cube 如果目标 ID 已存在会直接跳过，因此需要在加载快照时显式替换掉旧的 cube
-        existing_cubes = getattr(self.mos, "mem_cubes", {})
-        if target_id in existing_cubes:
-            try:
-                self.mos.unregister_mem_cube(target_id, user_id=self.user_id)
-            except Exception:
-                logger.warning(
-                    "Failed to unregister existing cube %s, force overriding in memory.",
-                    target_id,
-                    exc_info=True,
-                )
-                existing_cubes.pop(target_id, None)
-        self.mos.register_mem_cube(cube, mem_cube_id=target_id, user_id=self.user_id)
-        self.default_cube_id = target_id
-        self._cube_dir = cube_dir
-        self._qdrant_dir = qdrant_dir
-        self._sync_cube_bound_components(
-            old_cube_id=old_cube_id, reason="load_checkpoint_snapshot"
-        )
-        cache_dir = os.path.join(snapshot_root, "local_cache")
-        restored_cache = False
-        if os.path.isdir(cache_dir):
-            try:
-                restored_cache = self._restore_local_caches(cache_dir)
-            except Exception:
-                logger.warning(
-                    "Failed to restore local caches from %s", cache_dir, exc_info=True
-                )
-        if not restored_cache or not getattr(self, "dict_memory", None):
-            res_all = self.mos.get_all(mem_cube_id=target_id, user_id=self.user_id)
-            text_sections = (
-                res_all.get("text_mem", []) if isinstance(res_all, dict) else []
-            )
-            # cutoff_dt = datetime.fromisoformat("2025-11-28 05:39:34")
-            logger.info("Rebuilding local memory")
-            rebuilt = self._rebuild_local_memory_index(text_sections)
-            logger.info("Local memory index rebuilt with %s entries", rebuilt)
-        else:
-            logger.info(
-                "Local caches restored from snapshot cache directory %s", cache_dir
-            )
-
-        logger.info(f"Checkpoint loaded from section/epoch {checkpoint_id}")
-        return checkpoint_id
-
-    def _rebuild_local_memory_index(
-        self,
-        text_sections: List[Dict[str, Any]],
+        query_text: str,
         *,
-        cutoff_before: datetime | None = None,
-    ) -> int:
-        """Reconstruct dict_memory/cache from MOS get_all() output."""
-        if not hasattr(self, "dict_memory") or not isinstance(self.dict_memory, dict):
-            self.dict_memory = {}
-        else:
-            self.dict_memory.clear()
+        k: int = 5,
+        depth: Optional[int] = None,
+        threshold: float = 0.0,
+        current_step: Optional[int] = None,
+        task_type_dominant: Optional[str] = None,
+        active_strategic_node_id: Optional[str] = None,
+    ) -> Tuple[Dict[str, Any], List[Tuple[str, float]]]:
+        """Retrieve memories using the current graph state and legacy tuple output.
 
-        if not hasattr(self, "_mem_cache") or not isinstance(self._mem_cache, dict):
-            self._mem_cache = {}
-        else:
-            self._mem_cache.clear()
+        Strategic retrieval selects the active d=1 scaffold first. Tactical retrieval
+        is then scoped to that scaffold's direct children. If no strategic scaffold
+        exists yet, fall back to a flat tactical scan for bootstrap behavior only.
+        """
+        if self.embedding_provider is None:
+            raise ValueError("embedding_provider is required for text retrieval")
 
-        # Clear Q-cache as well
-        if not hasattr(self, "_q_cache") or not isinstance(self._q_cache, dict):
-            self._q_cache = {}
-        else:
-            self._q_cache.clear()
-
-        if not hasattr(self, "query_embeddings") or not isinstance(
-            self.query_embeddings, dict
-        ):
-            self.query_embeddings = {}
-        else:
-            self.query_embeddings.clear()
-
-        added = 0
-        for sec in text_sections or []:
-            mems = sec.get("memories", [])
-            if not isinstance(mems, list):
-                continue
-            for mem in mems:
-                mem_id = getattr(mem, "id", None)
-                query = getattr(mem, "memory", None)
-                if mem_id is None and isinstance(mem, dict):
-                    mem_id = mem.get("id")
-                if query is None and isinstance(mem, dict):
-                    query = mem.get("memory")
-                if not mem_id or not query:
-                    continue
-
-                md = getattr(mem, "metadata", None)
-                if md is None and isinstance(mem, dict):
-                    md = mem.get("metadata")
-                md_dict = _meta_to_dict(md)
-
-                mem_time_value = md_dict.get("memory_time")
-                mem_dt = _parse_datetime(mem_time_value)
-                if cutoff_before:
-                    if mem_dt is None:
-                        # If we cannot determine the timestamp, skip to keep filtering explicit.
-                        continue
-                    if mem_dt >= cutoff_before:
-                        continue
-
-                bucket = self.dict_memory.setdefault(query, [])
-                bucket.append(mem_id)
-                self._add_to_mem_cache(mem_id, mem)
-                added += 1
-        query_embeddings = getattr(self, "query_embeddings", {})
-        queries = list(self.dict_memory.keys())
-        missing_queries = [q for q in queries if q not in query_embeddings]
-        embed = getattr(self.embedding_provider, "embed", None)
-        if missing_queries and callable(embed):
-            batch_size = getattr(self, "embedding_batch_size", 256)
-            for start in tqdm(
-                range(0, len(missing_queries), batch_size),
-                desc="Rebuilding query embeddings",
-            ):
-                batch_queries = missing_queries[start : start + batch_size]
-                batch_vecs = get_embedding_with_retry(embed, batch_queries)
-                for q, v in zip(batch_queries, batch_vecs):
-                    query_embeddings[q] = v
-            self.query_embeddings.update(query_embeddings)
-
-        return added
-
-    def _persist_local_caches(self, snapshot_root: str) -> None:
-        """Persist local cache dictionaries alongside the cube snapshot."""
-        import json
-        import os
-
-        cache_dir = os.path.join(snapshot_root, "local_cache")
-        os.makedirs(cache_dir, exist_ok=True)
-
-        def _write_json(path: str, payload: dict) -> None:
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(payload, f, ensure_ascii=False)
-
-        dict_mem = getattr(self, "dict_memory", {}) or {}
-        dict_payload: Dict[str, List[str]] = {}
-        if isinstance(dict_mem, dict):
-            for query, mem_ids in dict_mem.items():
-                if not isinstance(mem_ids, list):
-                    continue
-                cleaned_ids = [str(mid) for mid in mem_ids if mid]
-                if cleaned_ids:
-                    dict_payload[str(query)] = cleaned_ids
-        _write_json(os.path.join(cache_dir, "dict_memory.json"), dict_payload)
-
-        query_embeddings = getattr(self, "query_embeddings", {}) or {}
-        emb_payload: Dict[str, List[float]] = {}
-        if isinstance(query_embeddings, dict):
-            for query, vec in query_embeddings.items():
-                if vec is None:
-                    continue
-                if hasattr(vec, "tolist"):
-                    vec = vec.tolist()
-                try:
-                    emb_payload[str(query)] = [float(x) for x in vec]
-                except Exception:
-                    continue
-        _write_json(os.path.join(cache_dir, "query_embeddings.json"), emb_payload)
-
-        mem_cache = getattr(self, "_mem_cache", {}) or {}
-        mem_payload: Dict[str, Any] = {}
-        if isinstance(mem_cache, dict):
-            for mem_id, item in mem_cache.items():
-                serialized = None
-                if hasattr(item, "model_dump"):
-                    try:
-                        serialized = item.model_dump(mode="json")
-                    except Exception:
-                        serialized = item.model_dump()
-                elif isinstance(item, dict):
-                    serialized = item
-                else:
-                    serialized = getattr(item, "__dict__", None)
-                if serialized:
-                    mem_payload[str(mem_id)] = serialized
-        _write_json(os.path.join(cache_dir, "mem_cache.json"), mem_payload)
-
-        # Persist _q_cache (lightweight Q-value cache)
-        q_cache = getattr(self, "_q_cache", {}) or {}
-        q_cache_payload: Dict[str, float] = {}
-        if isinstance(q_cache, dict):
-            for mem_id, q_value in q_cache.items():
-                try:
-                    q_cache_payload[str(mem_id)] = float(q_value)
-                except Exception:
-                    continue
-        _write_json(os.path.join(cache_dir, "q_cache.json"), q_cache_payload)
-
-        logger.info(
-            "Persisted local caches to %s (dict=%d, embeddings=%d, mem_cache=%d, q_cache=%d)",
-            cache_dir,
-            len(dict_payload),
-            len(emb_payload),
-            len(mem_payload),
-            len(q_cache_payload),
+        query_embedding = self.embedding_provider.embed_single(query_text)
+        nodes = list(self.graph.nodes.values())
+        representations = self._fetch_representations(
+            depth=1 if depth == 1 else 2,
         )
 
-    def _restore_local_caches(self, cache_dir: str) -> bool:
-        """Restore dict_memory/_mem_cache/_q_cache/query_embeddings if cache files exist."""
-        import json
-        import os
+        if depth == 1:
+            return self.retriever.strategic_retrieve(
+                query_text=query_text,
+                nodes=nodes,
+                representations=representations,
+                top_k=k,
+                task_type_dominant=task_type_dominant,
+            )
 
-        restored_any = False
-        dict_path = os.path.join(cache_dir, "dict_memory.json")
-        if os.path.isfile(dict_path):
-            try:
-                with open(dict_path, "r", encoding="utf-8") as f:
-                    raw = json.load(f)
-                if isinstance(raw, dict):
-                    self.dict_memory = {
-                        str(k): [str(x) for x in (v or []) if x] for k, v in raw.items()
-                    }
-                    restored_any = True
-            except Exception:
-                logger.warning(
-                    "Failed to restore dict_memory cache from %s",
-                    dict_path,
-                    exc_info=True,
-                )
+        if depth not in (None, 2):
+            raise ValueError("retrieve_query only supports depth=1 or depth=2")
 
-        emb_path = os.path.join(cache_dir, "query_embeddings.json")
-        if os.path.isfile(emb_path):
-            try:
-                with open(emb_path, "r", encoding="utf-8") as f:
-                    raw = json.load(f)
-                if isinstance(raw, dict):
-                    self.query_embeddings = {}
-                    for k, vec in raw.items():
-                        if isinstance(vec, list):
-                            try:
-                                self.query_embeddings[str(k)] = [float(x) for x in vec]
-                            except Exception:
-                                continue
-                    restored_any = True
-            except Exception:
-                logger.warning(
-                    "Failed to restore query embeddings cache from %s",
-                    emb_path,
-                    exc_info=True,
-                )
+        active_scaffold = self._select_active_strategic_scaffold(
+            task_type_dominant=task_type_dominant,
+            forced_scaffold_id=active_strategic_node_id,
+        )
 
-        mem_path = os.path.join(cache_dir, "mem_cache.json")
-        if os.path.isfile(mem_path):
-            try:
-                with open(mem_path, "r", encoding="utf-8") as f:
-                    raw = json.load(f)
-                new_cache: Dict[str, TextualMemoryItem] = {}
-                if isinstance(raw, dict):
-                    for mid, payload in raw.items():
-                        if not isinstance(payload, dict):
-                            continue
-                        try:
-                            new_cache[str(mid)] = TextualMemoryItem(**payload)
-                        except Exception:
-                            try:
-                                new_cache[str(mid)] = TextualMemoryItem.model_validate(
-                                    payload
-                                )
-                            except Exception:
-                                logger.debug(
-                                    "Failed to rehydrate memory %s from cache",
-                                    mid,
-                                    exc_info=True,
-                                )
-                    self._mem_cache = new_cache
-                    restored_any = True
-            except Exception:
-                logger.warning(
-                    "Failed to restore _mem_cache from %s", mem_path, exc_info=True
-                )
+        if active_scaffold is None:
+            tactical_nodes = [
+                node
+                for node in nodes
+                if getattr(node, "depth", None) == 2
+            ]
+            resolved_step = int(
+                current_step
+                if current_step is not None
+                else getattr(self.graph, "current_step", 0) or 0
+            )
+            return self.retriever.tactical_retrieve(
+                query_text=query_text,
+                query_embedding=query_embedding,
+                nodes=tactical_nodes,
+                representations=representations,
+                top_k=k,
+                threshold=threshold,
+                current_step=resolved_step,
+                lambda_shrink=float(getattr(self.graph, "lambda_shrink", 10.0) or 10.0),
+                cluster_scoped=False,
+            )
 
-        # Restore _q_cache (lightweight Q-value cache)
-        q_cache_path = os.path.join(cache_dir, "q_cache.json")
-        if os.path.isfile(q_cache_path):
-            try:
-                with open(q_cache_path, "r", encoding="utf-8") as f:
-                    raw = json.load(f)
-                if isinstance(raw, dict):
-                    self._q_cache = {}
-                    for mem_id, q_value in raw.items():
-                        try:
-                            self._q_cache[str(mem_id)] = float(q_value)
-                        except Exception:
-                            continue
-                    restored_any = True
-                    logger.info(
-                        f"Restored _q_cache ({len(self._q_cache)} entries) from {q_cache_path}"
-                    )
-            except Exception:
-                logger.warning(
-                    "Failed to restore _q_cache from %s", q_cache_path, exc_info=True
-                )
+        tactical_node_ids = self.graph.child_ids(active_scaffold.id)
+        tactical_nodes = [
+            node
+            for node in nodes
+            if getattr(node, "id", None) in tactical_node_ids
+        ]
 
-        return restored_any
+        resolved_step = int(current_step if current_step is not None else getattr(self.graph, "current_step", 0) or 0)
+        tactical_result, topk_queries = self.retriever.tactical_retrieve(
+            query_text=query_text,
+            query_embedding=query_embedding,
+            nodes=tactical_nodes,
+            representations=representations,
+            top_k=k,
+            threshold=threshold,
+            current_step=resolved_step,
+            lambda_shrink=float(getattr(self.graph, "lambda_shrink", 10.0) or 10.0),
+            cluster_scoped=True,
+        )
+        tactical_result["active_strategic_node_id"] = active_scaffold.id
+        tactical_result["active_strategic_score"] = float(
+            get_expected_option_value(active_scaffold, task_type_dominant)
+        )
+        return tactical_result, topk_queries
+
+    def _select_active_strategic_scaffold(
+        self,
+        *,
+        task_type_dominant: Optional[str],
+        forced_scaffold_id: Optional[str] = None,
+    ) -> Optional[SkillNode]:
+        if forced_scaffold_id is not None:
+            return self.graph.get(forced_scaffold_id)
+
+        strategic_nodes = self.graph.nodes_at_depth(1)
+        if not strategic_nodes:
+            return None
+
+        def _score(node: SkillNode) -> float:
+            return float(get_expected_option_value(node, task_type_dominant))
+
+        return max(
+            strategic_nodes,
+            key=lambda node: (
+                _score(node),
+                int(node.t_create),
+                node.id,
+            ),
+        )

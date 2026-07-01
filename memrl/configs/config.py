@@ -5,8 +5,7 @@ This module defines Pydantic models for configuration management,
 supporting both YAML and JSON configuration files.
 """
 
-import os
-from typing import Optional, Dict, Any, List
+from typing import List, Optional
 from pathlib import Path
 from pydantic import BaseModel, Field, field_validator, ConfigDict
 import yaml
@@ -58,19 +57,27 @@ class EmbeddingConfig(BaseModel):
 
 
 class MemoryConfig(BaseModel):
-    """Configuration for the memory system and Phase 1 architecture hyperparameters."""
+    """Configuration for the memory system and runner compatibility knobs."""
     
     # Strategy configuration
     build_strategy: str = Field(default="proceduralization", 
                                description="Build strategy: trajectory, script, proceduralization")
     retrieve_strategy: str = Field(default="query",
-                                  description="Retrieve strategy: random, query, avefact") 
+                                  description="Retrieve strategy: random, query") 
     update_strategy: str = Field(default="adjustment",
                                 description="Update strategy: vanilla, validation, adjustment")
+    cluster_strategy: str = Field(
+        default="kmeans",
+        description="Sleep-consolidation clustering strategy: kmeans, hdbscan",
+    )
     
     # Memory parameters
-    k_retrieve: int = Field(default=1, gt=-1, description="Number of memories to retrieve")
-    max_keywords: int = Field(default=8, gt=0, description="Maximum keywords for AveFact")
+    k_retrieve: int = Field(default=5, gt=-1, description="Number of memories to retrieve")
+    max_keywords: int = Field(
+        default=8,
+        gt=0,
+        description="Maximum keywords for optional keyword extraction helpers",
+    )
     confidence_threshold: float = Field(default=0.0, ge=0, le=1, 
                                        description="Minimum similarity threshold")
     memory_confidence: float = Field(default=100.0, ge=0, le=100,
@@ -80,42 +87,14 @@ class MemoryConfig(BaseModel):
     memory_budget_tokens: int = Field(default=0,
                                       description="Token budget (character-level) for injected memory context. 0 means unlimited (no truncation).")
 
-    # Phase 1 architecture hyperparameters from Project.md
-    theta_delta: Optional[float] = Field(
-        default=None,
-        description="Gate 1 TD-error admission threshold for tactical skill formation.",
-    )
-    n_skill: Optional[int] = Field(
-        default=None,
-        description="Gate 2 minimum activation count for tactical node creation.",
-    )
-    theta_u: Optional[float] = Field(
-        default=None,
-        description="Gate 2 minimum mean utility threshold for tactical node creation.",
-    )
-    n_min: Optional[int] = Field(
-        default=None,
-        description="Gate 3 minimum cross-task evidence count for float-up.",
-    )
-    theta_cv: Optional[float] = Field(
-        default=None,
-        description="Gate 4 maximum coefficient of variation for float-up.",
-    )
-    theta_1: float = Field(
-        default=0.75,
-        description="Transferability cutoff for tactical float-up from d=3 to d=2.",
-    )
+    # Phase 1 hyperparameters from Project.md.
     lambda_shrink: float = Field(
         default=10.0,
         description="Bayesian shrinkage pseudocount used in weighted-mean utility.",
     )
-    lambda_slow: Optional[float] = Field(
+    lambda_base: Optional[float] = Field(
         default=None,
-        description="Base decay rate for tactical nodes at d=2.",
-    )
-    lambda_fast: Optional[float] = Field(
-        default=None,
-        description="Base decay rate for tactical nodes at d=3; defaults to 5 * lambda_slow.",
+        description="Base decay rate for tactical nodes.",
     )
     epsilon_decay: float = Field(
         default=0.01,
@@ -133,21 +112,60 @@ class MemoryConfig(BaseModel):
         default=0.1,
         description="Tactical single-step Q-learning rate.",
     )
+    theta_adv: float = Field(
+        default=0.0,
+        description=(
+            "Stage-1 tactical formation gate threshold (spec §4.1). A step "
+            "is admitted to Stage-2 LLM judgment when its episode advantage "
+            "A_t = G_t - b(t_k) > theta_adv."
+        ),
+    )
     alpha_omega: float = Field(
         default=0.1,
         description="Strategic option-value learning rate.",
     )
     gamma: float = Field(
         default=0.95,
-        description="Discount factor shared by tactical and strategic updates.",
+        description="Tactical discount factor.",
     )
-    epsilon_hyst: float = Field(
-        default=0.1,
-        description="Demotion hysteresis buffer for tactical float-up/demotion.",
+    gamma_omega: float = Field(
+        default=0.95,
+        description="Strategic option-value discount factor.",
     )
-    m_wait: Optional[int] = Field(
-        default=None,
-        description="Grace period in episodes after a tactical promotion.",
+    q_omega_init_horizon: str = Field(
+        default="infinite",
+        description=(
+            "Q^Omega initialization horizon for spawned scaffolds. "
+            "'infinite' (default) uses the 1/(1-gamma_omega) upper bound; "
+            "'empirical' uses the finite-horizon geometric sum "
+            "(1 - gamma_omega^T)/(1 - gamma_omega) with T = tracked mean "
+            "episode length for the task type, falling back to infinite when "
+            "no episode-length statistics are available yet."
+        ),
+    )
+    q_omega_init_min_horizon: int = Field(
+        default=1,
+        ge=1,
+        description="Floor on the empirical horizon T used for finite-horizon Q^Omega init.",
+    )
+    strategic_discount_mode: str = Field(
+        default="separate",
+        description=(
+            "Strategic/tactical discount configuration. 'separate' (default, "
+            "spec §2.6) uses gamma for tactical and gamma_omega for strategic. "
+            "'shared' forces a single discount (gamma) on both tiers — used "
+            "only as the single-gamma ablation control (spec §2.6, W4)."
+        ),
+    )
+    task_type_mode: str = Field(
+        default="explicit",
+        description=(
+            "Task-type resolution mode. 'explicit' uses the task_type supplied "
+            "by the benchmark/env adapter. 'benchmark' derives a coarse "
+            "benchmark-level taxonomy (alfworld->embodied, bcb->coding, "
+            "hle->reasoning, llb->lifelong) when the adapter exposes none. "
+            "'episode' falls back to a per-episode id (task-agnostic)."
+        ),
     )
     r_evidence: int = Field(
         default=50,
@@ -157,35 +175,16 @@ class MemoryConfig(BaseModel):
         default=None,
         description="Sleep-consolidation trigger threshold for unabsorbed d=2 nodes.",
     )
-    theta_absorb: Optional[float] = Field(
+    theta_consolidate: Optional[float] = Field(
         default=None,
-        description="Minimum centroid-to-scaffold similarity for sleep absorption.",
-    )
-    k_bootstrap: Optional[int] = Field(
-        default=None,
-        description="Bootstrap limit before sleep consolidation becomes the normal source of d=1 nodes.",
+        description="Minimum Q-salience required for a tactical node to enter sleep consolidation.",
     )
 
-    @property
-    def effective_lambda_fast(self) -> Optional[float]:
-        """Return lambda_fast, defaulting to 5 * lambda_slow when omitted."""
-        if self.lambda_fast is not None:
-            return self.lambda_fast
-        if self.lambda_slow is None:
-            return None
-        return 5.0 * self.lambda_slow
-
-    @property
-    def effective_k_bootstrap(self) -> Optional[int]:
-        """Return the bootstrap threshold implied by the sleep trigger."""
-        if self.k_bootstrap is not None:
-            return self.k_bootstrap
-        return self.n_sleep
-
-    # MemOS configuration
-    mos_config_path: str = Field(default="configs/mos_config.json",
-                                description="Path to MemOS configuration file")
     user_id: str = Field(default="memp_user", description="User ID for memory management")
+    skill_db_path: str = Field(
+        default="results/memrl/skill_memory.sqlite",
+        description="Path to the persistent SQLite database for skill representation.",
+    )
     sim_norm_mean: float = Field(default=0, description="Mean for similarity normalization")
     sim_norm_std: float = Field(default=0, description="Standard deviation for similarity normalization")
 
@@ -433,33 +432,19 @@ class MempConfig(BaseModel):
     def get_strategy_config(self):
         """Get strategy configuration for MemoryService."""
         from ..service.strategies import StrategyConfiguration
-        
+
         return StrategyConfiguration.from_strings(
             build=self.memory.build_strategy,
             retrieve=self.memory.retrieve_strategy,
             update=self.memory.update_strategy
         )
-    
-    def validate_paths(self) -> None:
-        """
-        Validate that all specified paths exist.
-        
-        Raises:
-            FileNotFoundError: If required paths don't exist
-        """
-        paths_to_check = [
-            (self.memory.mos_config_path, "MemOS config file"),
-            (self.environment.alfworld_config_path, "ALFWorld config file"),
-        ]
-        
-        # Only check TravelPlanner data dir if it's not the default relative path
-        if not self.environment.travelplanner_data_dir.startswith("../"):
-            paths_to_check.append((self.environment.travelplanner_data_dir, "TravelPlanner data directory"))
-        
-        for path, description in paths_to_check:
-            if not Path(path).exists():
-                print(f"Warning: {description} not found at {path}")
-    
+
+    def get_cluster_strategy(self):
+        """Get the sleep-consolidation clustering strategy."""
+        from ..service.strategies import ClusterStrategy
+
+        return ClusterStrategy.from_string(self.memory.cluster_strategy)
+
     def __str__(self) -> str:
         """String representation of the configuration."""
         strategy_str = f"{self.memory.build_strategy}+{self.memory.retrieve_strategy}+{self.memory.update_strategy}"

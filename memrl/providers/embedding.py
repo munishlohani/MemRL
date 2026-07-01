@@ -316,55 +316,41 @@ class LocalEmbedder(BaseEmbedder):
 
 class MockEmbedder(BaseEmbedder):
     """
-    Mock embedder for testing purposes.
-    
-    Returns random or predefined embeddings without making actual API calls.
+    Mock embedding provider for tests and offline smoke checks.
+
+    The vectors are deterministic so retrieval behavior stays stable across runs.
     """
-    
-    def __init__(
-        self,
-        embedding_dim: int = 384,
-        fixed_embeddings: Optional[dict] = None,
-        max_text_len: int = 8196,
-        **kwargs: Any
-    ) -> None:
-        """
-        Initialize mock embedder.
-        
-        Args:
-            embedding_dim: Dimension of generated embeddings
-            fixed_embeddings: Dict mapping texts to fixed embeddings
-            **kwargs: Additional configuration parameters
-        """
-        super().__init__(max_text_len=max_text_len, **kwargs)
-        self.embedding_dim = embedding_dim
-        self.fixed_embeddings = fixed_embeddings or {}
-        np.random.seed(42)  # For reproducible testing
-    
+
+    def __init__(self, dimensions: int = 2, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.dimensions = max(1, int(dimensions))
+
     def embed(self, texts: List[str]) -> List[List[float]]:
-        """Generate mock embeddings."""
+        if not texts:
+            return []
+
         chunked_texts, counts = self._chunk_texts(texts)
-        embeddings = []
-        
+        embeddings: List[List[float]] = []
         for text in chunked_texts:
-            if text in self.fixed_embeddings:
-                embeddings.append(self.fixed_embeddings[text])
-            else:
-                # Generate deterministic "embedding" based on text hash
-                text_hash = hash(text) % (2**31)
-                np.random.seed(text_hash)
-                embedding = np.random.normal(0, 1, self.embedding_dim).tolist()
-                embeddings.append(embedding)
-        
+            text = text or ""
+            char_sum = sum(ord(ch) for ch in text)
+            vector = [float(len(text)), float(char_sum % 997)]
+            if self.dimensions > 2:
+                vector.extend(
+                    float((char_sum + offset) % 997)
+                    for offset in range(self.dimensions - 2)
+                )
+            embeddings.append(vector[: self.dimensions])
+
         return self._merge_chunk_embeddings(embeddings, counts)
 
 
 class AverageEmbedder:
     """
-    Utility class for averaging embeddings (used in AveFact strategy).
-    
-    This is not a full embedder but a helper for the AveFact retrieval strategy
-    which averages keyword embeddings to create query vectors.
+    Utility class for averaging embeddings.
+
+    This is not a full embedder but a small helper for any workflow that
+    needs to merge multiple vectors into a single representation.
     """
     
     @staticmethod
@@ -413,6 +399,7 @@ class AverageEmbedder:
         
         weighted_sum = np.sum(embeddings_array * weights_array, axis=0)
         total_weight = np.sum(weights_array)
+        if total_weight == 0:
+            raise ValueError("Cannot compute weighted average with zero total weight")
         
         return (weighted_sum / total_weight).tolist()
-

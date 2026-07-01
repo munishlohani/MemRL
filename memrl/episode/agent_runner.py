@@ -39,6 +39,11 @@ MAX_SKILL_INVOCATIONS=3
 
 logger=logging.getLogger(__name__)
 
+try:
+    from torch.utils.tensorboard import SummaryWriter  # type: ignore
+except Exception:  # pragma: no cover - optional dependency
+    SummaryWriter = None  # type: ignore[assignment]
+
 class EpisodeRunner(BaseEpisodeRunner):
 
     def __init__(
@@ -61,6 +66,7 @@ class EpisodeRunner(BaseEpisodeRunner):
         ckpt_resume_enabled: bool = False,
         ckpt_resume_path: Optional[str] = None,
         ckpt_resume_epoch: Optional[int] = None,
+        tensorboard_log_dir: Optional[str] = None,
     ):
         self.agent = agent
         self.memory_service = memory_service
@@ -118,6 +124,8 @@ class EpisodeRunner(BaseEpisodeRunner):
         self.ckpt_resume_enabled = bool(ckpt_resume_enabled)
         self.ckpt_resume_path = ckpt_resume_path
         self.ckpt_resume_epoch = ckpt_resume_epoch
+        self.tensorboard_log_dir = tensorboard_log_dir
+        self.tensorboard_writer = self._init_tensorboard_writer(tensorboard_log_dir)
 
         self.current_step = 0
         self.results_log: List[Dict[str, Any]] = []
@@ -452,6 +460,8 @@ class EpisodeRunner(BaseEpisodeRunner):
                 self.env_adapter.close()
             except Exception:
                 logger.exception("Failed to close episode environment adapter")
+            finally:
+                self._close_tensorboard_writer()
 
     def _act_with_retry(
         self,
@@ -731,6 +741,7 @@ class EpisodeRunner(BaseEpisodeRunner):
     def _report_metrics(self, metrics: Dict[str, Any]) -> None:
         payload = dict(metrics)
         self.metrics_history.append(payload)
+        self._report_tensorboard(payload)
 
         try:
             from ray.air import session  # type: ignore
@@ -751,6 +762,45 @@ class EpisodeRunner(BaseEpisodeRunner):
             pass
 
         logger.info("%s metrics: %s", self.metrics_namespace, payload)
+
+    def _init_tensorboard_writer(self, tensorboard_log_dir: Optional[str]) -> Any:
+        if not tensorboard_log_dir:
+            return None
+        tb_path = Path(tensorboard_log_dir)
+        tb_path.mkdir(parents=True, exist_ok=True)
+        if SummaryWriter is None:
+            logger.info(
+                "TensorBoard is not available; skipping writer for %s",
+                tb_path,
+            )
+            return None
+        writer = SummaryWriter(log_dir=str(tb_path))
+        logger.info("TensorBoard logs will be saved to: %s", tb_path)
+        return writer
+
+    def _report_tensorboard(self, metrics: Dict[str, Any]) -> None:
+        writer = getattr(self, "tensorboard_writer", None)
+        if writer is None:
+            return
+        step = int(self.current_step)
+        for key, value in metrics.items():
+            if isinstance(value, bool):
+                writer.add_scalar(key, int(value), step)
+            elif isinstance(value, (int, float)):
+                writer.add_scalar(key, float(value), step)
+
+    def _close_tensorboard_writer(self) -> None:
+        writer = getattr(self, "tensorboard_writer", None)
+        if writer is None:
+            return
+        try:
+            writer.flush()
+        except Exception:
+            logger.debug("TensorBoard writer flush failed", exc_info=True)
+        try:
+            writer.close()
+        except Exception:
+            logger.debug("TensorBoard writer close failed", exc_info=True)
 
     def _update_step_q_values(
         self,

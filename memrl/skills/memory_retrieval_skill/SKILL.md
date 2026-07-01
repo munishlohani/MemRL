@@ -40,6 +40,19 @@ Use this skill when the runner has attached archived memories for the current st
 - Read the memories as examples of prior behavior.
 - Reuse the pattern only when it still fits the current task state.
 
+## Query Examples
+
+- Good: `Skill: memory_retrieval(query="microwave heat failed")`
+  - Short, keyword-like, and focused on the failure mode.
+- Good: `Skill: memory_retrieval(query="open fridge before take")`
+  - Useful when the next action depends on a remembered sequence.
+- Good: `Skill: memory_retrieval(query="desklamp use")`
+  - Narrow enough to pull lamp-specific memories without overexplaining.
+- Bad: `Skill: memory_retrieval(query="microwave heat 'Nothing happens' and why and how to successfully heat an object with microwave")`
+  - Too long and too much like a natural-language essay.
+- Bad: `Skill: memory_retrieval(query="tell me everything about heating objects in kitchens")`
+  - Too broad; it will return noisy memories.
+
 ## Quick Examples
 
 - Skill-assisted turn: the current observation is ambiguous, so archived memories are useful for choosing the next step.

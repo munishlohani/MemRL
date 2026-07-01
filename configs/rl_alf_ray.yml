@@ -22,7 +22,7 @@ trials:
         mode: train
         batch_size: 1
         num_sections: 10
-        max_steps: 25
+        max_steps: 50
       memory:
         k_retrieve: 5
         cluster_strategy: kmeans

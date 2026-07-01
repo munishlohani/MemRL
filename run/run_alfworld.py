@@ -91,6 +91,8 @@ def main():
         run_dir = out_dir / "alfworld" / f"exp_{cfg.experiment.experiment_name}_{run_id}"
         log_dir = run_dir / "local_cache"
         log_dir.mkdir(parents=True, exist_ok=True)
+        tb_dir = run_dir / "tensorboard"
+        tb_dir.mkdir(parents=True, exist_ok=True)
 
         llm_provider = OpenAILLM(
             api_key=cfg.llm.api_key,
@@ -162,7 +164,9 @@ def main():
             batch_size=int(cfg.experiment.batch_size),
             max_steps=int(cfg.experiment.max_steps),
             llm_provider=llm_provider,
+            tensorboard_log_dir=str(tb_dir),
         )
+        logger.info("TensorBoard logs will be saved to %s", tb_dir)
 
         if args.init_only:
             logger.info("EpisodeRunner + AlfWorldEpisodeEnvAdapter initialized; exiting due to --init-only.")

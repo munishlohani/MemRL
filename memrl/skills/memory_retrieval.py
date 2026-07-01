@@ -9,9 +9,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from memrl.service.memory_service import MemoryService
+import logging
 
 
 _SKILL_DOC_PATH = Path(__file__).resolve().parent / "memory_retrieval_skill" / "SKILL.md"
+logger = logging.getLogger(__name__)
 
 
 @lru_cache(maxsize=1)
@@ -108,6 +110,14 @@ class MemoryRetrievalSkill:
                     f"Skill query: {str(query_override).strip()}",
                 ]
             )
+        logger.info(
+            "Memory retrieval start: task_type=%s episode_id=%s step=%s scaffold=%s query=%s",
+            task_type,
+            episode_id,
+            current_step,
+            active_strategic_node_id or "none",
+            self._compact_text(query_text),
+        )
         history_text = self._history_messages_to_text(history_messages)
         retrieved_memories, topk_queries = self._retrieve(
             query_text=query_text,
@@ -116,6 +126,12 @@ class MemoryRetrievalSkill:
             current_step=current_step,
         )
         context_text = self.format_selected_memories(retrieved_memories)
+        logger.info(
+            "Memory retrieval done: selected=%s topk=%s context=%s",
+            [str(item.get("memory_id") or item.get("id") or "") for item in retrieved_memories if isinstance(item, dict)],
+            topk_queries,
+            self._compact_text(context_text),
+        )
         return MemoryRetrievalResult(
             query_text=query_text,
             context_text=context_text,
@@ -206,6 +222,13 @@ class MemoryRetrievalSkill:
             if content:
                 lines.append(f"{role}: {content}")
         return "\n".join(lines)
+
+    @staticmethod
+    def _compact_text(text: Any, *, limit: int = 240) -> str:
+        value = str(text or "").strip()
+        if len(value) <= limit:
+            return value
+        return value[: limit - 3] + "..."
 
 
 __all__ = [

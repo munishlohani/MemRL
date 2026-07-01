@@ -125,6 +125,8 @@ def _write_resolved_config(
 def _build_runner(cfg: MempConfig, *, config_path: Path, run_root: Path) -> EpisodeRunner:
     log_dir = run_root / "local_cache"
     log_dir.mkdir(parents=True, exist_ok=True)
+    tb_dir = run_root / "tensorboard"
+    tb_dir.mkdir(parents=True, exist_ok=True)
 
     llm_provider = OpenAILLM(
         api_key=cfg.llm.api_key,
@@ -183,6 +185,7 @@ def _build_runner(cfg: MempConfig, *, config_path: Path, run_root: Path) -> Epis
         memory_service.db_path,
         run_root,
     )
+    logging.getLogger(__name__).info("TensorBoard logs will be saved to %s", tb_dir)
 
     return EpisodeRunner(
         agent=agent,
@@ -197,6 +200,7 @@ def _build_runner(cfg: MempConfig, *, config_path: Path, run_root: Path) -> Epis
         batch_size=int(cfg.experiment.batch_size),
         max_steps=int(cfg.experiment.max_steps),
         llm_provider=llm_provider,
+        tensorboard_log_dir=str(tb_dir),
     )
 
 

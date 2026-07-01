@@ -14,6 +14,7 @@ from memrl.agent import prompts as agent_prompts
 from memrl.agent.base import AgentDecision, BaseAgent, EnvActionDecision, SkillInvocationDecision
 from memrl.agent.history import EpisodeHistory
 from memrl.configs.config import MempConfig
+from memrl.memory.episodic_bank import EpisodicRecord
 from memrl.service.memory_service import MemoryService
 from typing import Any, Dict, List, Optional
 from memrl.service.sleep_consolidation.checkpoint import SleepConsolidationCheckpoint
@@ -26,7 +27,8 @@ from memrl.skills.memory_retrieval import MemoryRetrievalResult, MemoryRetrieval
 from memrl.providers.base import BaseLLM
 from memrl.utils.q_utils import (
     apply_q_update,
-    compute_td_error,
+    compute_advantage,
+    compute_mc_return_to_go,
     get_q_omega_salience,
     get_q_salience,
 )
@@ -159,6 +161,7 @@ class EpisodeRunner(BaseEpisodeRunner):
         episode_numbers = [self._next_episode_number() for _ in range(batch_size)]
         episode_candidate_buffers: List[List[Dict[str, Any]]] = [[] for _ in range(batch_size)]
         reward_histories = [[] for _ in range(batch_size)]
+        active_tactical_visits: List[List[Optional[str]]] = [[] for _ in range(batch_size)]
         episode_infos = [dict(info) for info in infos]
         done_flags = [False for _ in range(batch_size)]
         step_counts = [0 for _ in range(batch_size)]
@@ -315,18 +318,12 @@ class EpisodeRunner(BaseEpisodeRunner):
                     q_update_info = dict(step_infos[slot_idx] if slot_idx < len(step_infos) else {})
                     if active_memory_id is not None and "memory_id" not in q_update_info:
                         q_update_info["memory_id"] = active_memory_id
-                    formation_current_value = self._current_tactical_value(
-                        task_type=task_types[slot_idx],
-                        info=q_update_info,
-                    )
-
-                    source_memory_id, td_error = self._update_step_q_values(
-                        task_type=task_types[slot_idx],
-                        reward=reward,
-                        info=q_update_info,
-                        done=done,
-                        active_strategic_node_id=active_strategic_node_ids[slot_idx],
-                    )
+                    # Tactical Q is no longer updated inline (bootstrap TD is
+                    # gone). The retrieved node id is only recorded here so
+                    # the end-of-episode MC return-to-go update knows which
+                    # tactical node was active at this step (spec §3.2, §3.7).
+                    source_memory_id = self._resolve_tactical_node_id(q_update_info)
+                    active_tactical_visits[slot_idx].append(source_memory_id)
                     slot_context = slot_contexts[slot_idx]
                     retrieval_state = slot_context.get("retrieval_state", {})
                     retrieval_context = "No archived memories."
@@ -357,7 +354,7 @@ class EpisodeRunner(BaseEpisodeRunner):
                             "observation": str(slot_context.get("current_observation", "")),
                             "action": actions[slot_idx],
                             "reward": reward,
-                            "td_error": td_error,
+                            "advantage": None,
                             "history": self._history_messages_to_text(
                                 slot_context.get("history_messages", [])
                             ),
@@ -367,7 +364,6 @@ class EpisodeRunner(BaseEpisodeRunner):
                                 "active_strategic_node_id"
                             ),
                             "retrieved_ids": retrieved_ids,
-                            "current_value": formation_current_value,
                         }
                     )
 
@@ -390,6 +386,20 @@ class EpisodeRunner(BaseEpisodeRunner):
                         }
                     )
 
+            # Stage-1 gate (§4.1) must read the tactical baseline b(t_k)
+            # before this episode's own return updates it, so it runs before
+            # _update_episode_tactical_q (which performs that update).
+            self._queue_episode_tactical_candidates(
+                reward_histories=reward_histories,
+                candidate_buffers=episode_candidate_buffers,
+            )
+
+            self._update_episode_tactical_q(
+                task_types=task_types,
+                reward_histories=reward_histories,
+                active_tactical_visits=active_tactical_visits,
+            )
+
             self._update_episode_q_omega(
                 task_types=task_types,
                 reward_histories=reward_histories,
@@ -397,11 +407,6 @@ class EpisodeRunner(BaseEpisodeRunner):
                 done_flags=done_flags,
                 step_infos=episode_infos,
                 active_strategic_node_ids=active_strategic_node_ids,
-            )
-            self._queue_episode_tactical_candidates(
-                reward_histories=reward_histories,
-                success_flags=success_flags,
-                candidate_buffers=episode_candidate_buffers,
             )
 
             formation_summary = self._commit_pending_formations()
@@ -757,123 +762,91 @@ class EpisodeRunner(BaseEpisodeRunner):
         except Exception:
             logger.debug("TensorBoard writer close failed", exc_info=True)
 
-    def _update_step_q_values(
+    def _update_episode_tactical_q(
         self,
         *,
-        task_type: str,
-        reward: float,
-        info: Dict[str, Any],
-        done: bool,
-        active_strategic_node_id: Optional[str],
-    ) -> tuple[Optional[str], Optional[float]]:
-        node_id = self._resolve_tactical_node_id(info)
-        if node_id is None:
-            return None, None
+        task_types: List[str],
+        reward_histories: List[List[float]],
+        active_tactical_visits: List[List[Optional[str]]],
+    ) -> None:
+        """Monte Carlo return-to-go tactical Q update, committed at episode end (spec §3.2).
 
-        node = self.memory_service.graph.nodes.get(node_id)
-        if node is None or not getattr(node, "is_tactical", False):
-            return None, None
-
-        current_value = float((node.Q or {}).get(task_type, 0.0))
-        next_value = 0.0 if done else self._estimate_next_tactical_value(
-            task_type=task_type,
-            active_strategic_node_id=active_strategic_node_id,
-        )
-        gamma = float(getattr(self.memory_config, "gamma", 0.95))
-        alpha = float(getattr(self.memory_config, "alpha", 0.1))
-        td_error = compute_td_error(
-            reward,
-            gamma=gamma,
-            next_value=next_value,
-            current_value=current_value,
-        )
-        updated_value = apply_q_update(
-            current_value,
-            td_error,
-            alpha=alpha,
-        )
-        node.Q[task_type] = updated_value
-        node.n[task_type] = int(node.n.get(task_type, 0) or 0) + 1
-        node.last_accessed_step = self.current_step
-        if hasattr(self.memory_service.graph, "refresh_decay_rate"):
-            self.memory_service.graph.refresh_decay_rate(node)
-        else:
-            node.recompute_decay_rate(
-                lambda_base=float(getattr(self.memory_config, "lambda_base", 0.0) or 0.0),
-                epsilon=float(getattr(self.memory_config, "epsilon_decay", 0.01)),
-                lambda_shrink=float(getattr(self.memory_config, "lambda_shrink", 10.0)),
-            )
-
-        self._report_metrics(
-            {
-                "episode/td_error": td_error,
-                "episode/tactical_q": float(updated_value),
-                "episode/tactical_salience": float(get_q_salience(node, lambda_shrink=float(getattr(self.memory_config, "lambda_shrink", 10.0)))),
-            }
-        )
-        log_event(
-            logger,
-            "tactical_q.update",
-            node_id=node_id,
-            task_type=task_type,
-            reward=reward,
-            done=done,
-            current_value=current_value,
-            next_value=next_value,
-            td_error=td_error,
-            updated_value=updated_value,
-            visit_count=node.n.get(task_type, 0),
-        )
-        self.memory_service.persist_node_state(node)
-
-        return node_id, td_error
-
-    def _estimate_next_tactical_value(
-        self,
-        *,
-        task_type: str,
-        active_strategic_node_id: Optional[str],
-    ) -> float:
+        No bootstrap. For every step of the buffered trajectory, G_t is the
+        discounted return-to-go and the update target is the advantage
+        A_t = G_t - b(t_k), where b(t_k) is the per-task-type baseline read
+        before it is updated with this episode's discounted return (§3.1, §4.1).
+        """
         graph = getattr(self.memory_service, "graph", None)
         if graph is None:
-            return 0.0
+            return
 
-        if active_strategic_node_id is not None:
-            candidate_ids = self._graph_child_ids(graph, active_strategic_node_id)
-            candidate_nodes = [
-                graph.nodes[node_id]
-                for node_id in candidate_ids
-                if node_id in graph.nodes
-                and getattr(graph.nodes[node_id], "is_tactical", False)
-            ]
-        else:
-            candidate_nodes = [
-                node
-                for node in graph.nodes.values()
-                if getattr(node, "is_tactical", False)
-            ]
+        gamma = float(getattr(self.memory_config, "gamma", 0.95))
+        alpha = float(getattr(self.memory_config, "alpha", 0.1))
+        lambda_shrink = float(getattr(self.memory_config, "lambda_shrink", 10.0))
 
-        if not candidate_nodes:
-            return 0.0
+        for slot_idx, rewards in enumerate(reward_histories):
+            visits = active_tactical_visits[slot_idx] if slot_idx < len(active_tactical_visits) else []
+            step_count = min(len(rewards), len(visits))
+            if step_count <= 0:
+                continue
 
-        return max(
-            float((node.Q or {}).get(task_type, 0.0) or 0.0)
-            for node in candidate_nodes
-        )
+            task_type = task_types[slot_idx]
+            returns_to_go = compute_mc_return_to_go(rewards[:step_count], gamma=gamma)
+            baseline = graph.get_tactical_baseline(task_type)
 
-    @staticmethod
-    def _graph_child_ids(graph: Any, parent_id: str) -> set[str]:
-        if hasattr(graph, "child_ids"):
-            try:
-                return set(graph.child_ids(parent_id))
-            except Exception:
-                logger.debug("Failed to query graph child ids", exc_info=True)
+            for step_idx in range(step_count):
+                node_id = visits[step_idx]
+                if node_id is None:
+                    continue
+                node = graph.nodes.get(node_id)
+                if node is None or not getattr(node, "is_tactical", False):
+                    continue
 
-        return {
-            getattr(node, "id", "")
-            for node in getattr(graph, "nodes", {}).values()
-            if getattr(node, "parent_id", None) == parent_id
-        }
+                current_value = float((node.Q or {}).get(task_type, 0.0))
+                advantage = compute_advantage(returns_to_go[step_idx], baseline)
+                updated_value = apply_q_update(
+                    current_value,
+                    advantage - current_value,
+                    alpha=alpha,
+                )
+                node.Q[task_type] = updated_value
+                node.n[task_type] = int(node.n.get(task_type, 0) or 0) + 1
+                node.refresh_task_type_dominant()
+                node.last_accessed_step = self.current_step
+                if hasattr(graph, "refresh_decay_rate"):
+                    graph.refresh_decay_rate(node)
+                else:
+                    node.recompute_decay_rate(
+                        lambda_base=float(getattr(self.memory_config, "lambda_base", 0.0) or 0.0),
+                        epsilon=float(getattr(self.memory_config, "epsilon_decay", 0.01)),
+                        lambda_shrink=lambda_shrink,
+                    )
+
+                log_event(
+                    logger,
+                    "tactical_q.update",
+                    node_id=node_id,
+                    task_type=task_type,
+                    return_to_go=returns_to_go[step_idx],
+                    baseline=baseline,
+                    advantage=advantage,
+                    current_value=current_value,
+                    updated_value=updated_value,
+                    visit_count=node.n.get(task_type, 0),
+                )
+                self.memory_service.persist_node_state(node)
+
+                self._report_metrics(
+                    {
+                        "episode/tactical_advantage": advantage,
+                        "episode/tactical_q": float(updated_value),
+                        "episode/tactical_salience": float(
+                            get_q_salience(node, lambda_shrink=lambda_shrink)
+                        ),
+                    }
+                )
+
+            graph.update_tactical_baseline(task_type, returns_to_go[0])
 
     def _update_episode_q_omega(
         self,
@@ -911,27 +884,28 @@ class EpisodeRunner(BaseEpisodeRunner):
 
             for task_type in {task_types[slot_idx]}:
                 current_value = float((node.Q_omega or {}).get(task_type, 0.0))
-                td_error = compute_td_error(
-                    episode_return,
-                    gamma=1.0,
-                    next_value=0.0,
-                    current_value=current_value,
-                )
+                # Strategic advantage vs the per-task-type baseline b^Omega(t_k),
+                # read before this episode's return updates it (spec §3.8).
+                baseline = self.memory_service.graph.get_strategic_baseline(task_type)
+                advantage = compute_advantage(episode_return, baseline)
                 updated_value = apply_q_update(
                     current_value,
-                    td_error,
+                    advantage - current_value,
                     alpha=alpha_omega,
                 )
                 node.Q_omega[task_type] = updated_value
                 node.n_omega[task_type] = int(node.n_omega.get(task_type, 0) or 0) + 1
+                node.refresh_task_type_dominant()
+                self.memory_service.graph.update_strategic_baseline(task_type, episode_return)
                 log_event(
                     logger,
                     "strategic_q.update",
                     node_id=node.id,
                     task_type=task_type,
                     episode_return=episode_return,
+                    baseline=baseline,
+                    advantage=advantage,
                     current_value=current_value,
-                    td_error=td_error,
                     updated_value=updated_value,
                     visit_count=node.n_omega.get(task_type, 0),
                 )
@@ -1105,18 +1079,6 @@ class EpisodeRunner(BaseEpisodeRunner):
                 return value.strip()
         return None
 
-    def _current_tactical_value(self, *, task_type: str, info: Dict[str, Any]) -> float:
-        node_id = self._resolve_tactical_node_id(info)
-        if node_id is None:
-            return 0.0
-        graph = getattr(self.memory_service, "graph", None)
-        if graph is None:
-            return 0.0
-        node = graph.nodes.get(node_id)
-        if node is None or not getattr(node, "is_tactical", False):
-            return 0.0
-        return float((node.Q or {}).get(task_type, 0.0) or 0.0)
-
     def _resolve_active_tactical_id(self, slot_context: Dict[str, Any]) -> Optional[str]:
         """Return the tactical node id the agent retrieved for this slot, if any.
 
@@ -1157,16 +1119,19 @@ class EpisodeRunner(BaseEpisodeRunner):
     def _should_queue_tactical_candidate(
         self,
         *,
-        td_error: Optional[float],
+        advantage: Optional[float],
     ) -> bool:
-        if td_error is None:
+        """Stage-1 advantage pre-filter (spec §4.1): A_t = G_t - b(t_k) > theta_adv."""
+        if advantage is None:
             return False
-        if td_error < 0.0:
+        theta_adv = float(getattr(self.memory_config, "theta_adv", 0.0) or 0.0)
+        if advantage <= theta_adv:
             log_event(
                 logger,
                 "tactical_formation.rejected",
-                reason="negative_td",
-                td_error=td_error,
+                reason="advantage_below_theta_adv",
+                advantage=advantage,
+                theta_adv=theta_adv,
             )
             return False
         return True
@@ -1199,7 +1164,7 @@ class EpisodeRunner(BaseEpisodeRunner):
             TacticalFormationCandidate(**candidate)
             for candidate in candidates_raw
             if self._should_queue_tactical_candidate(
-                td_error=float(candidate.get("td_error", 0.0) or 0.0),
+                advantage=float(candidate.get("advantage", 0.0) or 0.0),
             )
         ]
         log_event(
@@ -1255,6 +1220,27 @@ class EpisodeRunner(BaseEpisodeRunner):
             if candidate.source_memory_id:
                 evidence_ids.append(candidate.source_memory_id)
 
+            # Persist the raw trace this skill was formed from into the
+            # episodic bank, addressed by the same id evidence_ids points
+            # to (spec §1, §5.4). The node only ever surfaces its LLM
+            # summary at retrieval; this keeps the trace available for
+            # inspection and future credit-assignment work (§11).
+            self.memory_service.record_evidence(
+                EpisodicRecord(
+                    id=candidate.candidate_id,
+                    task_type=candidate.task_type,
+                    task_description=candidate.task_description,
+                    episode_id=candidate.episode_id,
+                    step_index=candidate.step_index,
+                    observation=candidate.observation,
+                    action=candidate.action,
+                    reward=candidate.reward,
+                    history=candidate.history,
+                    retrieved_memories=candidate.retrieved_memories,
+                    source_memory_id=candidate.source_memory_id,
+                )
+            )
+
             summary_content = decision.summary or candidate.fallback_summary()
             summary_writer = self.tactical_summary_writer
             if summary_writer is not None:
@@ -1299,43 +1285,39 @@ class EpisodeRunner(BaseEpisodeRunner):
         self,
         *,
         reward_histories: List[List[float]],
-        success_flags: List[bool],
         candidate_buffers: List[List[Dict[str, Any]]],
     ) -> None:
+        """Stage-1 advantage pre-filter, batched at episode end (spec §4.1).
+
+        G_t is the MC return-to-go from backward discounted recursion.
+        Admission is gated on the advantage against the per-task-type
+        baseline b(t_k), not raw return: A_t = G_t - b(t_k) > theta_adv.
+        This is the same baseline tracker used by the tactical Q update
+        (§3.1) — read here before `_update_episode_tactical_q` updates it
+        for this episode, so an episode is scored against history excluding
+        itself. Callers must invoke this before `_update_episode_tactical_q`
+        for the same episode.
+        """
+        graph = getattr(self.memory_service, "graph", None)
         gamma = float(getattr(self.memory_config, "gamma", 0.95))
         for slot_idx, candidates in enumerate(candidate_buffers):
             if not candidates:
                 continue
 
-            success = bool(success_flags[slot_idx]) if slot_idx < len(success_flags) else False
             rewards = reward_histories[slot_idx] if slot_idx < len(reward_histories) else []
             step_count = min(len(candidates), len(rewards))
             if step_count <= 0:
                 continue
 
-            if not success:
-                log_event(
-                    logger,
-                    "tactical_formation.episode_skipped",
-                    episode_index=candidates[0].get("episode_index"),
-                    episode_id=candidates[0].get("episode_id"),
-                    step_count=step_count,
-                    reason="episode_not_successful",
-                )
-                continue
-
-            propagated_targets = [0.0 for _ in range(step_count)]
-            running_target = 0.0
-            for reverse_idx in range(step_count - 1, -1, -1):
-                running_target = float(rewards[reverse_idx]) + gamma * running_target
-                propagated_targets[reverse_idx] = running_target
+            task_type = candidates[0].get("task_type")
+            baseline = graph.get_tactical_baseline(task_type) if graph is not None else 0.0
+            returns_to_go = compute_mc_return_to_go(rewards[:step_count], gamma=gamma)
 
             queued_count = 0
             for step_idx in range(step_count):
                 candidate = dict(candidates[step_idx])
-                current_value = float(candidate.pop("current_value", 0.0) or 0.0)
-                candidate["td_error"] = propagated_targets[step_idx] - current_value
-                if self._should_queue_tactical_candidate(td_error=candidate["td_error"]):
+                candidate["advantage"] = compute_advantage(returns_to_go[step_idx], baseline)
+                if self._should_queue_tactical_candidate(advantage=candidate["advantage"]):
                     self.pending_formations.append(candidate)
                     queued_count += 1
 
@@ -1346,7 +1328,8 @@ class EpisodeRunner(BaseEpisodeRunner):
                 episode_id=candidates[0].get("episode_id"),
                 step_count=step_count,
                 queued_count=queued_count,
-                propagated_return=propagated_targets[0] if propagated_targets else 0.0,
+                baseline=baseline,
+                propagated_return=returns_to_go[0] if returns_to_go else 0.0,
             )
 
     def _prune_tactical_nodes(self) -> Dict[str, Any]:

@@ -112,6 +112,14 @@ class MemoryConfig(BaseModel):
         default=0.1,
         description="Tactical single-step Q-learning rate.",
     )
+    theta_adv: float = Field(
+        default=0.0,
+        description=(
+            "Stage-1 tactical formation gate threshold (spec §4.1). A step "
+            "is admitted to Stage-2 LLM judgment when its episode advantage "
+            "A_t = G_t - b(t_k) > theta_adv."
+        ),
+    )
     alpha_omega: float = Field(
         default=0.1,
         description="Strategic option-value learning rate.",

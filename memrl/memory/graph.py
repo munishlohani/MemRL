@@ -18,6 +18,32 @@ class SkillGraph:
     root_id: str = "root"
     current_step: int = 0
     nodes: Dict[str, SkillNode] = field(default_factory=dict)
+    # Per-task-type advantage baselines b(t_k) / b^Omega(t_k) (spec §2.7, §4.1, §3.8):
+    # running mean of the tactical episode return-to-go / strategic episode
+    # return, tracked incrementally per task type. Read before update so an
+    # episode is scored against history excluding itself.
+    baseline_tactical: Dict[str, float] = field(default_factory=dict)
+    baseline_tactical_n: Dict[str, int] = field(default_factory=dict)
+    baseline_strategic: Dict[str, float] = field(default_factory=dict)
+    baseline_strategic_n: Dict[str, int] = field(default_factory=dict)
+
+    def get_tactical_baseline(self, task_type: str) -> float:
+        return float(self.baseline_tactical.get(task_type, 0.0))
+
+    def update_tactical_baseline(self, task_type: str, value: float) -> None:
+        n = int(self.baseline_tactical_n.get(task_type, 0)) + 1
+        prev = float(self.baseline_tactical.get(task_type, 0.0))
+        self.baseline_tactical[task_type] = prev + (float(value) - prev) / n
+        self.baseline_tactical_n[task_type] = n
+
+    def get_strategic_baseline(self, task_type: str) -> float:
+        return float(self.baseline_strategic.get(task_type, 0.0))
+
+    def update_strategic_baseline(self, task_type: str, value: float) -> None:
+        n = int(self.baseline_strategic_n.get(task_type, 0)) + 1
+        prev = float(self.baseline_strategic.get(task_type, 0.0))
+        self.baseline_strategic[task_type] = prev + (float(value) - prev) / n
+        self.baseline_strategic_n[task_type] = n
 
     def lambda_for_depth(self, depth: int) -> float:
         if depth == 1:

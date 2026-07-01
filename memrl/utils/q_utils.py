@@ -183,25 +183,48 @@ def get_expected_option_value(
         return compute_shrinkage_weighted_mean(q_omega, n_omega)
 
 
-def compute_td_error(
-    reward: float,
-    *,
-    gamma: float,
-    next_value: float,
-    current_value: float,
-) -> float:
-    """Compute the standard one-step TD error."""
-    return float(reward) + float(gamma) * float(next_value) - float(current_value)
-
-
 def apply_q_update(
     current_value: float,
-    td_error: float,
+    error: float,
     *,
     alpha: float,
 ) -> float:
-    """Apply a vanilla TD update to a scalar Q estimate."""
-    return float(current_value) + float(alpha) * float(td_error)
+    """Apply an incremental update Q += alpha * error to a scalar Q estimate."""
+    return float(current_value) + float(alpha) * float(error)
+
+
+def compute_mc_return_to_go(
+    rewards: Sequence[float],
+    *,
+    gamma: float,
+) -> list[float]:
+    """
+    Compute the Monte Carlo return-to-go G_t for every step of a buffered
+    trajectory, via backward discounted recursion (no bootstrap):
+
+        G_t = sum_{k >= t} gamma^(k-t) * r_k
+
+    Under sparse terminal reward (r_k = 0 for k < T-1) this collapses to
+    G_t = gamma^((T-1)-t) * R, but the recursion holds for dense rewards too.
+
+    Args:
+        rewards: per-step reward sequence r_0 .. r_{T-1} for one episode.
+        gamma: tactical discount factor.
+
+    Returns:
+        List of return-to-go values, same length and step order as `rewards`.
+    """
+    returns = [0.0] * len(rewards)
+    running = 0.0
+    for reverse_idx in range(len(rewards) - 1, -1, -1):
+        running = float(rewards[reverse_idx]) + float(gamma) * running
+        returns[reverse_idx] = running
+    return returns
+
+
+def compute_advantage(target: float, baseline: float) -> float:
+    """A_t = target - baseline (return-to-go or episode return vs per-task-type baseline)."""
+    return float(target) - float(baseline)
 
 
 __all__ = [
@@ -210,6 +233,7 @@ __all__ = [
     "get_q_salience",
     "get_q_omega_salience",
     "get_expected_option_value",
-    "compute_td_error",
     "apply_q_update",
+    "compute_mc_return_to_go",
+    "compute_advantage",
 ]

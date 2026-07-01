@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import random
 from dataclasses import dataclass, field
 from typing import Dict, Optional
 
@@ -25,6 +26,7 @@ class SkillNode:
     n_omega: Dict[str, int] = field(default_factory=dict)
     decay_rate: float = 0.0
     evidence_ids: list[str] = field(default_factory=list)
+    evidence_seen: int = 0
     consolidated: bool = False
 
     def __post_init__(self) -> None:
@@ -111,4 +113,36 @@ class SkillNode:
             return
 
         q_bar_w = get_q_salience(self, lambda_shrink=lambda_shrink)
-        self.decay_rate = lambda_base / (q_bar_w + epsilon)
+        salience = max(q_bar_w, 0.0)
+        self.decay_rate = lambda_base / (salience + epsilon)
+
+    def refresh_task_type_dominant(self) -> None:
+        """Recompute task_type_dominant = argmax_k n(t_k) (spec §5.3, §5.4).
+
+        Dynamic, not a formation-time artifact: call whenever this node's
+        retrieval counts (`n` for tactical, `n_omega` for strategic) change.
+        Ties broken by task type name for determinism. No-op if no task type
+        has been observed yet.
+        """
+        counts = self.n if self.is_tactical else self.n_omega
+        if not counts:
+            return
+        self.task_type_dominant = max(counts.items(), key=lambda item: (item[1], item[0]))[0]
+
+    def add_evidence(self, evidence_id: str, cap: int, rng: Optional[random.Random] = None) -> None:
+        """Reservoir-sample `evidence_id` into evidence_ids, capped at `cap` (spec §5.4).
+
+        Classic Algorithm R: every evidence id seen (tracked via
+        `evidence_seen`) has an equal cap/evidence_seen chance of surviving
+        in the reservoir once it is full.
+        """
+        picker = rng or random
+        self.evidence_seen += 1
+        if cap <= 0:
+            return
+        if len(self.evidence_ids) < cap:
+            self.evidence_ids.append(evidence_id)
+            return
+        j = picker.randint(1, self.evidence_seen)
+        if j <= cap:
+            self.evidence_ids[picker.randint(0, cap - 1)] = evidence_id

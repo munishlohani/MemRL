@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class TacticalFormationCandidate:
-    """One positive-TD experience awaiting formation judgment."""
+    """One above-baseline experience (Stage-1 advantage gate, §4.1) awaiting formation judgment."""
 
     candidate_id: str
     task_type: str
@@ -27,7 +27,7 @@ class TacticalFormationCandidate:
     observation: str
     action: str
     reward: float
-    td_error: float
+    advantage: float
     history: str
     retrieved_memories: str
     episode_slot_index: Optional[int] = None
@@ -48,7 +48,7 @@ class TacticalFormationCandidate:
             f"observation: {self.observation}",
             f"action: {self.action}",
             f"reward: {self.reward:.6f}",
-            f"td_error: {self.td_error:.6f}",
+            f"advantage: {self.advantage:.6f}",
             f"source_memory_id: {self.source_memory_id or 'none'}",
             f"active_strategic_node_id: {self.active_strategic_node_id or 'none'}",
             f"retrieved_ids: {', '.join(self.retrieved_ids) if self.retrieved_ids else 'none'}",
@@ -61,7 +61,7 @@ class TacticalFormationCandidate:
         """Create a deterministic summary if the judge omits one."""
         return (
             f"{self.task_type}: {self.action.strip()} after {self.observation.strip()}"
-            f" (reward={self.reward:.3f}, td={self.td_error:.3f})"
+            f" (reward={self.reward:.3f}, advantage={self.advantage:.3f})"
         ).strip()
 
 

@@ -28,13 +28,16 @@ from sqlalchemy import (
     Text,
     create_engine,
     delete,
+    inspect,
     select,
+    text,
 )
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from ..memory.graph import SkillGraph
 from ..memory.skill_node import SkillNode
 from ..memory.skill_representation import SkillRepresentation
+from ..memory.episodic_bank import EpisodicMemoryBank, EpisodicRecord
 from ..utils.q_utils import (
     compute_shrinkage_weighted_mean_from_samples,
     get_expected_option_value,
@@ -124,14 +127,37 @@ class MemoryService:
             Column("n_omega", JSON, nullable=False),
             Column("secondary_parents", JSON, nullable=False),
             Column("evidence_ids", JSON, nullable=False),
+            Column("evidence_seen", Integer, nullable=False, default=0),
+        )
+        self.episodic_memory_table = Table(
+            "episodic_memory",
+            self._metadata,
+            Column("id", String, primary_key=True),
+            Column("task_type", String, nullable=False),
+            Column("task_description", Text, nullable=False),
+            Column("episode_id", String, nullable=False),
+            Column("step_index", Integer, nullable=False),
+            Column("observation", Text, nullable=False),
+            Column("action", Text, nullable=False),
+            Column("reward", Float, nullable=False),
+            Column("history", Text, nullable=False),
+            Column("retrieved_memories", Text, nullable=False),
+            Column("source_memory_id", String, nullable=True),
         )
         self._metadata.create_all(self._engine)
+        self._migrate_add_evidence_seen_column()
 
         if self.graph.nodes:
             self._sync_graph_state_to_db()
         else:
             self._load_graph_state()
         self.retriever = SkillSimilarityRetriever()
+
+        # Raw per-step experience store, linked from SkillNode.evidence_ids
+        # (spec §1, §5.4). Nodes only ever surface their LLM-generated
+        # summary at retrieval; this bank keeps the underlying trace.
+        self.episodic_bank = EpisodicMemoryBank()
+        self._load_episodic_bank()
 
         # Empirical episode-length statistics per task type, used by the
         # finite-horizon Q^Omega initialization for spawned scaffolds
@@ -253,6 +279,7 @@ class MemoryService:
             n_omega=self._serialize_json(node.n_omega),
             secondary_parents=self._serialize_json(node.secondary_parents),
             evidence_ids=self._serialize_json(node.evidence_ids),
+            evidence_seen=int(node.evidence_seen),
         )
         stmt = stmt.on_conflict_do_update(
             index_elements=["node_id"],
@@ -270,6 +297,7 @@ class MemoryService:
                 "n_omega": stmt.excluded.n_omega,
                 "secondary_parents": stmt.excluded.secondary_parents,
                 "evidence_ids": stmt.excluded.evidence_ids,
+                "evidence_seen": stmt.excluded.evidence_seen,
             },
         )
         with self._engine.begin() as conn:
@@ -320,6 +348,7 @@ class MemoryService:
             n_omega=dict(self._deserialize_json(row["n_omega"], {})),
             decay_rate=float(row["decay_rate"]),
             evidence_ids=list(self._deserialize_json(row["evidence_ids"], [])),
+            evidence_seen=int(row["evidence_seen"] or 0),
             consolidated=bool(row["consolidated"]),
         )
 
@@ -354,9 +383,84 @@ class MemoryService:
                 raise RuntimeError("Unable to reconstruct skill graph from SQLite state")
             pending = remaining
 
+    def _migrate_add_evidence_seen_column(self) -> None:
+        """Additive migration for DBs written before `evidence_seen` existed.
+
+        `MetaData.create_all` only creates missing tables, not missing
+        columns on existing ones, so a `skill_graph_state` table from before
+        this column was introduced would otherwise fail on load.
+        """
+        inspector = inspect(self._engine)
+        existing_columns = {
+            column["name"] for column in inspector.get_columns("skill_graph_state")
+        }
+        if "evidence_seen" in existing_columns:
+            return
+        with self._engine.begin() as conn:
+            conn.execute(
+                text("ALTER TABLE skill_graph_state ADD COLUMN evidence_seen INTEGER DEFAULT 0")
+            )
+
     def _sync_graph_state_to_db(self) -> None:
         for node in self.graph.nodes.values():
             self._upsert_graph_state(node)
+
+    def _load_episodic_bank(self) -> None:
+        stmt = select(self.episodic_memory_table)
+        with self._engine.begin() as conn:
+            rows = conn.execute(stmt).mappings().all()
+        for row in rows:
+            self.episodic_bank.add(
+                EpisodicRecord(
+                    id=row["id"],
+                    task_type=row["task_type"],
+                    task_description=row["task_description"],
+                    episode_id=row["episode_id"],
+                    step_index=int(row["step_index"]),
+                    observation=row["observation"],
+                    action=row["action"],
+                    reward=float(row["reward"]),
+                    history=row["history"],
+                    retrieved_memories=row["retrieved_memories"],
+                    source_memory_id=row["source_memory_id"],
+                )
+            )
+
+    def record_evidence(self, record: EpisodicRecord) -> None:
+        """Persist a raw experience into the episodic bank, keyed by `record.id`.
+
+        `record.id` is the same id a `SkillNode.evidence_ids` entry points
+        to, so nodes can be traced back to the raw trace that formed them
+        (spec §1, §5.4) without ever surfacing it at retrieval time.
+        """
+        self.episodic_bank.add(record)
+        stmt = sqlite_insert(self.episodic_memory_table).values(
+            id=record.id,
+            task_type=record.task_type,
+            task_description=record.task_description,
+            episode_id=record.episode_id,
+            step_index=record.step_index,
+            observation=record.observation,
+            action=record.action,
+            reward=float(record.reward),
+            history=record.history,
+            retrieved_memories=record.retrieved_memories,
+            source_memory_id=record.source_memory_id,
+        )
+        stmt = stmt.on_conflict_do_nothing(index_elements=["id"])
+        with self._engine.begin() as conn:
+            conn.execute(stmt)
+
+    def get_evidence(self, record_id: str) -> Optional[EpisodicRecord]:
+        return self.episodic_bank.get(record_id)
+
+    def get_evidence_many(self, record_ids: List[str]) -> List[EpisodicRecord]:
+        return self.episodic_bank.get_many(record_ids)
+
+    def add_evidence_to_node(self, node: SkillNode, evidence_id: str) -> None:
+        """Reservoir-sample `evidence_id` into `node.evidence_ids`, capped at `r_evidence`."""
+        cap = int(getattr(self.memory_config, "r_evidence", 50) or 0)
+        node.add_evidence(evidence_id, cap=cap)
 
     def _fetch_representations(
         self,
@@ -470,7 +574,6 @@ class MemoryService:
                 task_type_dominant=task_type_dominant,
                 t_create=t_create,
                 parent_id=parent_id,
-                evidence_ids=list(evidence_ids or []),
             )
         elif depth == 2:
             node = SkillNode.create_tactical(
@@ -478,10 +581,15 @@ class MemoryService:
                 task_type_dominant=task_type_dominant,
                 t_create=t_create,
                 parent_id=parent_id,
-                evidence_ids=list(evidence_ids or []),
             )
         else:
             raise ValueError("depth must be 1 or 2")
+
+        # Reservoir-sample the seed evidence ids into the node's cap (§5.4)
+        # rather than assigning the list directly, so a large initial batch
+        # (e.g. a merged consolidation cluster) is capped correctly too.
+        for evidence_id in evidence_ids or []:
+            self.add_evidence_to_node(node, evidence_id)
 
         if last_accessed_step is not None:
             node.last_accessed_step = int(last_accessed_step)
@@ -835,9 +943,12 @@ class MemoryService:
             task_type_dominant=task_type_dominant,
             t_create=int(self.graph.current_step),
             parent_id=self.graph.root_id,
-            evidence_ids=scaffold_evidence_ids,
         )
         scaffold_node.Q_omega = scaffold_q_omega
+        # Reservoir-sample the merged cluster evidence into the cap (§5.4) —
+        # a cluster can easily contribute more raw evidence than r_evidence.
+        for evidence_id in scaffold_evidence_ids:
+            self.add_evidence_to_node(scaffold_node, evidence_id)
 
         representation = SkillRepresentation(
             id=scaffold_id,

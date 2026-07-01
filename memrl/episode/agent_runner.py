@@ -123,13 +123,10 @@ class EpisodeRunner(BaseEpisodeRunner):
         self.local_cache_dir = self.run_dir / "local_cache"
         self.local_cache_dir.mkdir(parents=True, exist_ok=True)
 
-        self.ckpt_resume_enabled = bool(ckpt_resume_enabled)
-        self.ckpt_resume_path = ckpt_resume_path
-        self.ckpt_resume_epoch = ckpt_resume_epoch
-        self.tensorboard_log_dir = tensorboard_log_dir
         self.tensorboard_writer = self._init_tensorboard_writer(tensorboard_log_dir)
 
         self.current_step = 0
+        self._episode_counter = 0
         self.results_log: List[Dict[str, Any]] = []
         self.episode_histories = [EpisodeHistory() for _ in range(self.batch_size)]
         self.pending_formations: List[Dict[str, Any]] = []
@@ -139,7 +136,6 @@ class EpisodeRunner(BaseEpisodeRunner):
         self.sleep_bootstrap_tactical_min = getattr(self.memory_config, "n_sleep", None)
         self.metrics_namespace = f"episode/{self.experiment_name}"
         self.metrics_history: List[Dict[str, Any]] = []
-        self.metrics_reporter = self._report_metrics
 
         self.random_seed = getattr(self.experiment_config, "random_seed", None)
         if self.random_seed is not None:
@@ -160,6 +156,8 @@ class EpisodeRunner(BaseEpisodeRunner):
         self.episode_histories = [EpisodeHistory() for _ in range(batch_size)]
         self.pending_formations = []
         self.episode_rewards = [0.0 for _ in range(batch_size)]
+        episode_numbers = [self._next_episode_number() for _ in range(batch_size)]
+        episode_candidate_buffers: List[List[Dict[str, Any]]] = [[] for _ in range(batch_size)]
         reward_histories = [[] for _ in range(batch_size)]
         episode_infos = [dict(info) for info in infos]
         done_flags = [False for _ in range(batch_size)]
@@ -317,6 +315,10 @@ class EpisodeRunner(BaseEpisodeRunner):
                     q_update_info = dict(step_infos[slot_idx] if slot_idx < len(step_infos) else {})
                     if active_memory_id is not None and "memory_id" not in q_update_info:
                         q_update_info["memory_id"] = active_memory_id
+                    formation_current_value = self._current_tactical_value(
+                        task_type=task_types[slot_idx],
+                        info=q_update_info,
+                    )
 
                     source_memory_id, td_error = self._update_step_q_values(
                         task_type=task_types[slot_idx],
@@ -326,53 +328,56 @@ class EpisodeRunner(BaseEpisodeRunner):
                         active_strategic_node_id=active_strategic_node_ids[slot_idx],
                     )
                     slot_context = slot_contexts[slot_idx]
-                    if self._should_queue_tactical_candidate(td_error=td_error):
-                        retrieval_state = slot_context.get("retrieval_state", {})
-                        retrieval_context = "No archived memories."
-                        retrieved_ids: List[str] = []
-                        if isinstance(retrieval_state, dict):
-                            retrieval_context = str(
-                                retrieval_state.get("context_text")
-                                or retrieval_state.get("retrieved_memories")
-                                or "No archived memories."
-                            )
-                            selected_ids = retrieval_state.get("selected_ids", [])
-                            if isinstance(selected_ids, list):
-                                retrieved_ids = [
-                                    str(item)
-                                    for item in selected_ids
-                                    if str(item).strip()
-                                ]
-
-                        self.pending_formations.append(
-                            {
-                                "candidate_id": uuid4().hex,
-                                "task_type": task_types[slot_idx],
-                                "task_description": task_descriptions[slot_idx],
-                                "episode_id": episode_ids[slot_idx],
-                                "episode_index": slot_idx,
-                                "step_index": step_counts[slot_idx],
-                                "observation": str(slot_context.get("current_observation", "")),
-                                "action": actions[slot_idx],
-                                "reward": reward,
-                                "td_error": td_error,
-                                "history": self._history_messages_to_text(
-                                    slot_context.get("history_messages", [])
-                                ),
-                                "retrieved_memories": retrieval_context,
-                                "source_memory_id": source_memory_id,
-                                "active_strategic_node_id": slot_context.get(
-                                    "active_strategic_node_id"
-                                ),
-                                "retrieved_ids": retrieved_ids,
-                            }
+                    retrieval_state = slot_context.get("retrieval_state", {})
+                    retrieval_context = "No archived memories."
+                    retrieved_ids: List[str] = []
+                    if isinstance(retrieval_state, dict):
+                        retrieval_context = str(
+                            retrieval_state.get("context_text")
+                            or retrieval_state.get("retrieved_memories")
+                            or "No archived memories."
                         )
+                        selected_ids = retrieval_state.get("selected_ids", [])
+                        if isinstance(selected_ids, list):
+                            retrieved_ids = [
+                                str(item)
+                                for item in selected_ids
+                                if str(item).strip()
+                            ]
+
+                    episode_candidate_buffers[slot_idx].append(
+                        {
+                            "candidate_id": uuid4().hex,
+                            "task_type": task_types[slot_idx],
+                            "task_description": task_descriptions[slot_idx],
+                            "episode_id": episode_ids[slot_idx],
+                            "episode_index": episode_numbers[slot_idx],
+                            "episode_slot_index": slot_idx,
+                            "step_index": step_counts[slot_idx],
+                            "observation": str(slot_context.get("current_observation", "")),
+                            "action": actions[slot_idx],
+                            "reward": reward,
+                            "td_error": td_error,
+                            "history": self._history_messages_to_text(
+                                slot_context.get("history_messages", [])
+                            ),
+                            "retrieved_memories": retrieval_context,
+                            "source_memory_id": source_memory_id,
+                            "active_strategic_node_id": slot_context.get(
+                                "active_strategic_node_id"
+                            ),
+                            "retrieved_ids": retrieved_ids,
+                            "current_value": formation_current_value,
+                        }
+                    )
 
                     self.results_log.append(
                         {
                             "run_id": self.run_id,
-                            "episode_index": slot_idx,
+                            "episode_index": episode_numbers[slot_idx],
+                            "episode_slot_index": slot_idx,
                             "step": step_counts[slot_idx],
+                            "global_step": self.current_step,
                             "task_type": task_types[slot_idx],
                             "task_description": task_descriptions[slot_idx],
                             "episode_id": episode_ids[slot_idx],
@@ -393,6 +398,11 @@ class EpisodeRunner(BaseEpisodeRunner):
                 step_infos=episode_infos,
                 active_strategic_node_ids=active_strategic_node_ids,
             )
+            self._queue_episode_tactical_candidates(
+                reward_histories=reward_histories,
+                success_flags=success_flags,
+                candidate_buffers=episode_candidate_buffers,
+            )
 
             formation_summary = self._commit_pending_formations()
             pruning_summary = self._prune_tactical_nodes()
@@ -406,7 +416,8 @@ class EpisodeRunner(BaseEpisodeRunner):
             for slot_idx in range(batch_size):
                 episode_summaries.append(
                     {
-                        "episode_index": slot_idx,
+                        "episode_index": episode_numbers[slot_idx],
+                        "episode_slot_index": slot_idx,
                         "episode_id": episode_ids[slot_idx],
                         "task_type": task_types[slot_idx],
                         "task_description": task_descriptions[slot_idx],
@@ -596,22 +607,6 @@ class EpisodeRunner(BaseEpisodeRunner):
         )
         return "look", latest_retrieval_result
 
-    def _build_retrieval_query(
-        self,
-        *,
-        task_description: str,
-        observation: str,
-        history_messages: List[Dict[str, str]],
-    ) -> str:
-        history_text = self._history_messages_to_text(history_messages)
-        parts = [
-            f"Task: {task_description.strip()}",
-            f"Observation: {observation.strip()}",
-        ]
-        if history_text:
-            parts.append(f"History: {history_text}")
-        return "\n".join(part for part in parts if part.strip())
-
     def _history_messages_to_text(self, history_messages: List[Dict[str, str]]) -> str:
         lines: List[str] = []
         for message in history_messages[-10:]:
@@ -624,47 +619,6 @@ class EpisodeRunner(BaseEpisodeRunner):
                 else:
                     lines.append(f"{role}: {content}")
         return "\n".join(lines)
-
-    def _retrieve_memory_context(
-        self,
-        *,
-        query: str,
-        task_type: str,
-        active_strategic_node_id: Optional[str],
-    ) -> str:
-        try:
-            tau = float(getattr(self.rl_config, "sim_threshold", getattr(self.rl_config, "tau", 0.0)))
-        except Exception:
-            tau = 0.0
-
-        try:
-            result, _ = self.memory_service.retrieve_query(
-                query,
-                k=self.retrieve_k,
-                threshold=tau,
-                task_type_dominant=task_type,
-                active_strategic_node_id=active_strategic_node_id,
-            )
-        except Exception as exc:
-            logger.warning("Memory retrieval failed: %s", exc)
-            return "No archived memories."
-
-        selected = (result or {}).get("selected", [])
-        if not isinstance(selected, list) or not selected:
-            return "No archived memories."
-
-        parts: List[str] = []
-        for idx, item in enumerate(selected, 1):
-            if not isinstance(item, dict):
-                continue
-            mem_id = str(item.get("memory_id") or item.get("id") or f"memory-{idx}")
-            content = str(item.get("content") or "").strip()
-            score = float(item.get("score", 0.0) or 0.0)
-            if not content:
-                continue
-            parts.append(f"{idx}. [{mem_id}] (score={score:.3f}) {content}")
-
-        return "\n".join(parts) if parts else "No archived memories."
 
     def _history_to_messages(self, history: EpisodeHistory) -> List[Dict[str, str]]:
         messages = history.get_messages()
@@ -734,6 +688,10 @@ class EpisodeRunner(BaseEpisodeRunner):
             if isinstance(value, str) and value.strip():
                 return value.strip()
         return f"{self.experiment_name}_{self.run_id}_{index}"
+
+    def _next_episode_number(self) -> int:
+        self._episode_counter += 1
+        return self._episode_counter
 
     def _report_metrics(self, metrics: Dict[str, Any]) -> None:
         payload = dict(metrics)
@@ -1147,6 +1105,18 @@ class EpisodeRunner(BaseEpisodeRunner):
                 return value.strip()
         return None
 
+    def _current_tactical_value(self, *, task_type: str, info: Dict[str, Any]) -> float:
+        node_id = self._resolve_tactical_node_id(info)
+        if node_id is None:
+            return 0.0
+        graph = getattr(self.memory_service, "graph", None)
+        if graph is None:
+            return 0.0
+        node = graph.nodes.get(node_id)
+        if node is None or not getattr(node, "is_tactical", False):
+            return 0.0
+        return float((node.Q or {}).get(task_type, 0.0) or 0.0)
+
     def _resolve_active_tactical_id(self, slot_context: Dict[str, Any]) -> Optional[str]:
         """Return the tactical node id the agent retrieved for this slot, if any.
 
@@ -1324,6 +1294,60 @@ class EpisodeRunner(BaseEpisodeRunner):
             "created_nodes": created_nodes,
             "skipped": False,
         }
+
+    def _queue_episode_tactical_candidates(
+        self,
+        *,
+        reward_histories: List[List[float]],
+        success_flags: List[bool],
+        candidate_buffers: List[List[Dict[str, Any]]],
+    ) -> None:
+        gamma = float(getattr(self.memory_config, "gamma", 0.95))
+        for slot_idx, candidates in enumerate(candidate_buffers):
+            if not candidates:
+                continue
+
+            success = bool(success_flags[slot_idx]) if slot_idx < len(success_flags) else False
+            rewards = reward_histories[slot_idx] if slot_idx < len(reward_histories) else []
+            step_count = min(len(candidates), len(rewards))
+            if step_count <= 0:
+                continue
+
+            if not success:
+                log_event(
+                    logger,
+                    "tactical_formation.episode_skipped",
+                    episode_index=candidates[0].get("episode_index"),
+                    episode_id=candidates[0].get("episode_id"),
+                    step_count=step_count,
+                    reason="episode_not_successful",
+                )
+                continue
+
+            propagated_targets = [0.0 for _ in range(step_count)]
+            running_target = 0.0
+            for reverse_idx in range(step_count - 1, -1, -1):
+                running_target = float(rewards[reverse_idx]) + gamma * running_target
+                propagated_targets[reverse_idx] = running_target
+
+            queued_count = 0
+            for step_idx in range(step_count):
+                candidate = dict(candidates[step_idx])
+                current_value = float(candidate.pop("current_value", 0.0) or 0.0)
+                candidate["td_error"] = propagated_targets[step_idx] - current_value
+                if self._should_queue_tactical_candidate(td_error=candidate["td_error"]):
+                    self.pending_formations.append(candidate)
+                    queued_count += 1
+
+            log_event(
+                logger,
+                "tactical_formation.episode_backfill",
+                episode_index=candidates[0].get("episode_index"),
+                episode_id=candidates[0].get("episode_id"),
+                step_count=step_count,
+                queued_count=queued_count,
+                propagated_return=propagated_targets[0] if propagated_targets else 0.0,
+            )
 
     def _prune_tactical_nodes(self) -> Dict[str, Any]:
         theta_prune = getattr(self.memory_config, "theta_prune", None)

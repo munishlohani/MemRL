@@ -30,6 +30,7 @@ class TacticalFormationCandidate:
     td_error: float
     history: str
     retrieved_memories: str
+    episode_slot_index: Optional[int] = None
     retrieved_ids: List[str] = field(default_factory=list)
     source_memory_id: Optional[str] = None
     active_strategic_node_id: Optional[str] = None
@@ -42,6 +43,7 @@ class TacticalFormationCandidate:
             f"task_description: {self.task_description}",
             f"episode_id: {self.episode_id}",
             f"episode_index: {self.episode_index}",
+            f"episode_slot_index: {self.episode_slot_index if self.episode_slot_index is not None else 'none'}",
             f"step_index: {self.step_index}",
             f"observation: {self.observation}",
             f"action: {self.action}",

@@ -19,6 +19,7 @@ from sqlalchemy import (
     Boolean,
     Column,
     Float,
+    Index,
     Integer,
     JSON,
     LargeBinary,
@@ -128,6 +129,9 @@ class MemoryService:
             Column("secondary_parents", JSON, nullable=False),
             Column("evidence_ids", JSON, nullable=False),
             Column("evidence_seen", Integer, nullable=False, default=0),
+            Index("idx_parent", "parent_id"),
+            Index("idx_depth", "depth"),
+            Index("idx_consolidated", "consolidated"),
         )
         self.episodic_memory_table = Table(
             "episodic_memory",
@@ -146,6 +150,7 @@ class MemoryService:
         )
         self._metadata.create_all(self._engine)
         self._migrate_add_evidence_seen_column()
+        self._migrate_add_missing_indexes()
 
         if self.graph.nodes:
             self._sync_graph_state_to_db()
@@ -399,6 +404,28 @@ class MemoryService:
         with self._engine.begin() as conn:
             conn.execute(
                 text("ALTER TABLE skill_graph_state ADD COLUMN evidence_seen INTEGER DEFAULT 0")
+            )
+
+    def _migrate_add_missing_indexes(self) -> None:
+        """Backfill the parent_id/depth/consolidated indexes (spec §5.3).
+
+        `Index(...)` declared on the Table only reaches the DB when
+        `create_all` first creates the table; a `skill_graph_state` table
+        from before these indexes were declared would otherwise stay
+        unindexed. `CREATE INDEX IF NOT EXISTS` is idempotent, so this is
+        safe to run unconditionally on every startup.
+        """
+        with self._engine.begin() as conn:
+            conn.execute(
+                text("CREATE INDEX IF NOT EXISTS idx_parent ON skill_graph_state(parent_id)")
+            )
+            conn.execute(
+                text("CREATE INDEX IF NOT EXISTS idx_depth ON skill_graph_state(depth)")
+            )
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS idx_consolidated ON skill_graph_state(consolidated)"
+                )
             )
 
     def _sync_graph_state_to_db(self) -> None:

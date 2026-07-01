@@ -81,15 +81,15 @@ class KMeansClusteringStrategy(ClusteringStrategyBase):
         return max(2, int(sqrt(n_samples)))
 
     def _run_kmeans(self, vectors: List[List[float]], k: int) -> List[int]:
-        try:
-            labels = KMeans(
-                n_clusters=k,
-                n_init="auto",
-                random_state=self.random_state,
-            ).fit_predict(np.asarray(vectors, dtype=float) if np is not None else vectors)
-            return [int(label) for label in labels.tolist()]
-        except Exception:
-            pass
+        # Let sklearn failures propagate with their original message. Sleep
+        # consolidation is the sole d=1 formation path (spec §8), so a
+        # clustering failure must surface loudly rather than be masked.
+        labels = KMeans(
+            n_clusters=k,
+            n_init="auto",
+            random_state=self.random_state,
+        ).fit_predict(np.asarray(vectors, dtype=float) if np is not None else vectors)
+        return [int(label) for label in labels.tolist()]
     
     def _best_k_local(self, vectors: List[List[float]], k_init: int) -> int:
         n_samples = len(vectors)

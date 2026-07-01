@@ -7,6 +7,7 @@ from typing import Any, Dict, Optional
 
 from ..strategies import ClusterStrategy
 from .service import SleepConsolidationService
+from ...utils.event_logging import log_event
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +60,13 @@ class SleepConsolidationCheckpoint:
             unconsolidated_count,
             n_sleep,
         )
+        log_event(
+            logger,
+            "sleep_consolidation.checkpoint_trigger",
+            unconsolidated_count=unconsolidated_count,
+            n_sleep=n_sleep,
+            current_step=self.graph.current_step,
+        )
         return self._run_consolidation(theta_consolidate=self._resolved_theta_consolidate())
 
     def _resolved_theta_consolidate(self) -> float:
@@ -89,6 +97,13 @@ class SleepConsolidationCheckpoint:
             "Sleep consolidation complete: timestamp=%s, num_results=%s",
             summary["timestamp"],
             summary["num_results"],
+        )
+        log_event(
+            logger,
+            "sleep_consolidation.checkpoint_done",
+            timestamp=summary["timestamp"],
+            num_results=summary["num_results"],
+            actions=summary["actions"],
         )
         return summary
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import math
+import logging
 from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
@@ -45,6 +46,7 @@ from .sleep_consolidation import (
     StrategicScaffoldContext,
 )
 from .retrievers import SkillSimilarityRetriever
+from ..utils.event_logging import log_event
 
 if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
@@ -54,6 +56,9 @@ else:
     Engine = Any  # type: ignore[assignment]
     MemoryConfig = Any  # type: ignore[assignment]
     BaseEmbedder = Any  # type: ignore[assignment]
+
+
+logger = logging.getLogger(__name__)
 
 
 class MemoryService:
@@ -431,6 +436,17 @@ class MemoryService:
         last_accessed_step: Optional[int] = None,
     ) -> SkillNode:
         """Create a node from text and add it to the service."""
+        log_event(
+            logger,
+            "skill_creation.start",
+            node_id=id,
+            depth=depth,
+            task_type=task_type_dominant,
+            parent_id=parent_id or self.graph.root_id,
+            t_create=t_create,
+            evidence_ids=evidence_ids or [],
+            content=content,
+        )
         if embedding is None:
             if self.embedding_provider is None:
                 raise ValueError(
@@ -465,7 +481,17 @@ class MemoryService:
             content=content,
             embedding=embedding,
         )
-        return self.add_node(node, representation, parent_id=parent_id)
+        created = self.add_node(node, representation, parent_id=parent_id)
+        log_event(
+            logger,
+            "skill_creation.done",
+            node_id=id,
+            depth=depth,
+            task_type=task_type_dominant,
+            parent_id=parent_id or self.graph.root_id,
+            evidence_ids=evidence_ids or [],
+        )
+        return created
 
 #O(n^2) time complexity. Need to work on this
 
@@ -640,6 +666,14 @@ class MemoryService:
             resolved_threshold = getattr(self.memory_config, "theta_consolidate", None)
         threshold = float(resolved_threshold) if resolved_threshold is not None else 0.0
 
+        log_event(
+            logger,
+            "sleep_consolidation.start",
+            threshold=threshold,
+            current_step=self.graph.current_step,
+            tactical_count=sum(1 for node in self.graph.nodes.values() if node.is_tactical),
+        )
+
         eligible_nodes = [
             node
             for node in self.graph.nodes.values()
@@ -649,6 +683,13 @@ class MemoryService:
         ]
         eligible_nodes.sort(key=lambda node: (int(node.t_create), node.id))
         if not eligible_nodes:
+            log_event(
+                logger,
+                "sleep_consolidation.skip",
+                reason="no_eligible_nodes",
+                threshold=threshold,
+                current_step=self.graph.current_step,
+            )
             return []
 
         eligible_representations = {
@@ -684,6 +725,15 @@ class MemoryService:
                 raw_response=raw_response,
             )
             results.append(result)
+            log_event(
+                logger,
+                "sleep_consolidation.cluster_decision",
+                cluster_indices=list(indices),
+                cluster_node_ids=[node.id for node in cluster_nodes],
+                action=decision.action.value,
+                summary=decision.summary,
+                target_scaffold_id=decision.target_scaffold_id,
+            )
 
             if decision.action == SleepConsolidationAction.SPAWN:
                 if decision.summary is None:
@@ -700,6 +750,13 @@ class MemoryService:
                     self.graph.reparent(node, scaffold_node.id)
                     node.consolidated = True
                     self._upsert_graph_state(node)
+                log_event(
+                    logger,
+                    "sleep_consolidation.spawn",
+                    scaffold_id=scaffold_node.id,
+                    cluster_node_ids=[node.id for node in cluster_nodes],
+                    summary=decision.summary,
+                )
             elif decision.action == SleepConsolidationAction.ABSORB:
                 if decision.target_scaffold_id is None:
                     raise ValueError("Absorb decisions must include a target scaffold id")
@@ -710,15 +767,32 @@ class MemoryService:
                     self.graph.reparent(node, target_scaffold.id)
                     node.consolidated = True
                     self._upsert_graph_state(node)
+                log_event(
+                    logger,
+                    "sleep_consolidation.absorb",
+                    target_scaffold_id=target_scaffold.id,
+                    cluster_node_ids=[node.id for node in cluster_nodes],
+                )
             elif decision.action == SleepConsolidationAction.DISCARD:
                 for node in cluster_nodes:
                     node.consolidated = True
                     self._upsert_graph_state(node)
+                log_event(
+                    logger,
+                    "sleep_consolidation.discard",
+                    cluster_node_ids=[node.id for node in cluster_nodes],
+                )
             else:
                 raise ValueError(
                     f"Unsupported sleep-consolidation action: {decision.action!r}"
                 )
 
+        log_event(
+            logger,
+            "sleep_consolidation.done",
+            num_results=len(results),
+            actions=[result.action.value for result in results],
+        )
         return results
 
     def _strategic_scaffold_contexts(self) -> List[StrategicScaffoldContext]:

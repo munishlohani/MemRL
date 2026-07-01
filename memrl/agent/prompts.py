@@ -119,6 +119,7 @@ Choose exactly one of the following per turn:
   Skill: memory_retrieval
 
 If you invoke the skill, the runtime will execute it and append the tool result to the conversation history before asking you again.
+REMEMBER: Only positive experiences are stored, negative experieces are pre filtered.
 """
 
 

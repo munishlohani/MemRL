@@ -107,9 +107,10 @@ class TacticalSummaryDraft:
         return "\n".join(lines).strip()
 
 
-TACTICAL_SUMMARY_PROMPT = """You are converting one positive-TD experience into a reusable tactical memory summary.
+TACTICAL_SUMMARY_PROMPT = """You are converting one successful positive-TD experience into a reusable tactical memory summary.
 
 The summary will be embedded and retrieved later, so make it semantically informative rather than a noisy trajectory dump.
+Only describe the successful path that worked; failed attempts are filtered upstream and will not be stored.
 
 Return a single JSON object and nothing else.
 
@@ -156,6 +157,7 @@ Schema:
 
 Rules:
 - Only judge the candidates listed below.
+- Only approve successful, reusable experiences; failed attempts are filtered upstream and should be rejected if they slip through.
 - Approve only if the experience is reusable, semantically coherent, and not just a one-off outcome.
 - Reject failed, noisy, duplicated, or environment-specific behavior.
 - Every approved item must include a concise reusable summary suitable for memory storage.

@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import copy
+import re
 from functools import lru_cache
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from memrl.service.memory_service import MemoryService
+from memrl.providers.base import BaseLLM
 import logging
 
 
@@ -73,10 +75,12 @@ class MemoryRetrievalSkill:
         self,
         *,
         memory_service: MemoryService,
+        llm_provider: Optional[BaseLLM] = None,
         retrieve_k: int = 1,
         rl_config: Optional[Any] = None,
     ) -> None:
         self.memory_service = memory_service
+        self.llm_provider = llm_provider
         self.retrieve_k = max(1, int(retrieve_k))
         self.rl_config = rl_config
         self._skill_contract_text = _load_skill_contract_text()
@@ -102,14 +106,8 @@ class MemoryRetrievalSkill:
             task_description=task_description,
             observation=observation,
             history_messages=history_messages,
+            query_hint=query_override,
         )
-        if query_override is not None and str(query_override).strip():
-            query_text = "\n".join(
-                [
-                    query_text,
-                    f"Skill query: {str(query_override).strip()}",
-                ]
-            )
         logger.info(
             "Memory retrieval start: task_type=%s episode_id=%s step=%s scaffold=%s query=%s",
             task_type,
@@ -152,16 +150,26 @@ class MemoryRetrievalSkill:
         task_description: str,
         observation: str,
         history_messages: Sequence[Dict[str, str]],
+        query_hint: Optional[str] = None,
     ) -> str:
         """Create the retrieval query text used for memory search."""
         history_text = self._history_messages_to_text(history_messages)
+        title = self._generate_query_title(
+            task_description=task_description,
+            observation=observation,
+            history_text=history_text,
+            query_hint=query_hint,
+        )
         parts = [
+            f"Title: {title}",
             f"Task: {task_description.strip()}",
             f"Observation: {observation.strip()}",
         ]
+        if query_hint is not None and str(query_hint).strip():
+            parts.append(f"Focus: {str(query_hint).strip()}")
         if history_text:
             parts.append(f"History: {history_text}")
-        return "\n".join(part for part in parts if part.strip())
+        return "\n\n".join(part for part in parts if part.strip())
 
     def format_selected_memories(self, selected: Sequence[Dict[str, Any]]) -> str:
         """Format retrieved memories into an agent prompt block."""
@@ -212,6 +220,71 @@ class MemoryRetrievalSkill:
         if not isinstance(selected, list):
             selected = []
         return selected, list(topk_queries or [])
+
+    def _generate_query_title(
+        self,
+        *,
+        task_description: str,
+        observation: str,
+        history_text: str,
+        query_hint: Optional[str],
+    ) -> str:
+        """Use the LLM to turn the current state into a short retrieval title."""
+        if self.llm_provider is None:
+            return self._fallback_title(task_description=task_description, query_hint=query_hint)
+
+        prompt = (
+            "Write a short memory-retrieval title for the current task.\n"
+            "Return only the title, no punctuation, no bullets, no explanation.\n"
+            "Keep it to 2 to 6 words.\n\n"
+            f"Task description: {task_description.strip()}\n"
+            f"Current observation: {observation.strip()}\n"
+            f"Recent history: {history_text.strip() or 'none'}\n"
+        )
+        if query_hint is not None and str(query_hint).strip():
+            prompt += f"Search hint: {str(query_hint).strip()}\n"
+
+        try:
+            response = self.llm_provider.generate(
+                [
+                    {
+                        "role": "system",
+                        "content": (
+                            "You produce concise retrieval titles for episodic memory search."
+                        ),
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.0,
+                max_tokens=24,
+            )
+        except Exception:
+            response = ""
+
+        title = self._sanitize_title(response)
+        if title:
+            return title
+        return self._fallback_title(task_description=task_description, query_hint=query_hint)
+
+    @staticmethod
+    def _sanitize_title(text: str) -> str:
+        value = str(text or "").strip()
+        if not value:
+            return ""
+        value = value.splitlines()[0].strip()
+        value = re.sub(r"^[\-*•\d\.\)\(]+", "", value).strip()
+        value = re.sub(r'^[\"\']+|[\"\']+$', "", value).strip()
+        value = re.sub(r"\s+", " ", value)
+        return value[:80].strip()
+
+    @staticmethod
+    def _fallback_title(*, task_description: str, query_hint: Optional[str]) -> str:
+        candidate = str(query_hint or task_description or "").strip()
+        if not candidate:
+            return "memory search"
+        candidate = re.sub(r"\s+", " ", candidate)
+        words = candidate.split()
+        return " ".join(words[:6]) if words else "memory search"
 
     @staticmethod
     def _history_messages_to_text(history_messages: Sequence[Dict[str, str]]) -> str:

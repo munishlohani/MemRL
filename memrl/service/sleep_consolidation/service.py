@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import List, Optional, Sequence, Tuple
 
 from ...providers.base import BaseLLM
@@ -19,6 +20,10 @@ from .types import (
     SleepConsolidationResult,
     StrategicScaffoldContext,
 )
+from ...utils.event_logging import log_event
+
+
+logger = logging.getLogger(__name__)
 
 
 class SleepConsolidationService:
@@ -64,8 +69,23 @@ class SleepConsolidationService:
             cluster_contents=cluster_contents,
             existing_scaffolds=scaffold_contents,
         )
+        log_event(
+            logger,
+            "sleep_consolidation.prompt",
+            cluster_size=len(cluster_texts),
+            existing_scaffolds=[scaffold.node_id for scaffold in existing_scaffolds],
+            prompt=prompt,
+        )
         raw_response = self._generate(prompt, temperature=0)
         decision = self._parse_decision(raw_response)
+        log_event(
+            logger,
+            "sleep_consolidation.response",
+            action=decision.action.value,
+            summary=decision.summary,
+            target_scaffold_id=decision.target_scaffold_id,
+            response=raw_response,
+        )
         if decision.action == SleepConsolidationAction.ABSORB:
             scaffold_ids = {scaffold.node_id for scaffold in existing_scaffolds}
             if decision.target_scaffold_id not in scaffold_ids:

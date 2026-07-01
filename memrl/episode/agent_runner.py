@@ -97,6 +97,7 @@ class EpisodeRunner(BaseEpisodeRunner):
         )
         self.memory_retrieval_skill = MemoryRetrievalSkill(
             memory_service=memory_service,
+            llm_provider=llm_provider,
             retrieve_k=retrieve_k,
             rl_config=self.rl_config,
         )
@@ -329,6 +330,7 @@ class EpisodeRunner(BaseEpisodeRunner):
                         reward=reward,
                         action=actions[slot_idx],
                         td_error=td_error,
+                        theta_delta=getattr(self.memory_config, "theta_delta", None),
                     ):
                         retrieval_state = slot_context.get("retrieval_state", {})
                         retrieval_context = "No archived memories."
@@ -1161,15 +1163,19 @@ class EpisodeRunner(BaseEpisodeRunner):
             logger.debug("Failed to inspect strategic scaffold availability", exc_info=True)
         return False
 
-    @staticmethod
     def _should_queue_tactical_candidate(
+        self,
         *,
         observation: Any,
         reward: float,
         action: Any,
         td_error: Optional[float],
+        theta_delta: Optional[float],
     ) -> bool:
-        if td_error is None or td_error <= 0.0:
+        if td_error is None:
+            return False
+        threshold = float(theta_delta) if theta_delta is not None else 0.0
+        if td_error <= threshold:
             return False
         if float(reward) <= 0.0:
             return False
@@ -1205,6 +1211,7 @@ class EpisodeRunner(BaseEpisodeRunner):
                 reward=float(candidate.get("reward", 0.0) or 0.0),
                 action=candidate.get("action", ""),
                 td_error=float(candidate.get("td_error", 0.0) or 0.0),
+                theta_delta=getattr(self.memory_config, "theta_delta", None),
             )
         ]
         if not candidates:

@@ -7,6 +7,11 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence
 
 from ..providers.base import BaseLLM
+from ..utils.event_logging import log_event
+import logging
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -145,15 +150,15 @@ TACTICAL_FORMATION_PROMPT = """You are deciding whether each positive-TD experie
 Return a single JSON object and nothing else.
 
 Schema:
-{
+{{
   "decisions": [
-    {
+    {{
       "candidate_id": string,
       "approved": boolean,
       "summary": string | null
-    }
+    }}
   ]
-}
+}}
 
 Rules:
 - Only judge the candidates listed below.
@@ -186,6 +191,12 @@ class TacticalFormationJudge:
         if not candidates:
             return []
 
+        log_event(
+            logger,
+            "tactical_judge.start",
+            candidate_count=len(candidates),
+            candidate_ids=[candidate.candidate_id for candidate in candidates],
+        )
         prompt = TACTICAL_FORMATION_PROMPT.format(
             episode_context=self._render_episode_context(candidates),
             candidates=self._render_candidates(candidates),
@@ -194,7 +205,15 @@ class TacticalFormationJudge:
             [{"role": "user", "content": prompt}],
             temperature=0.0,
         )
-        return self._parse_response(response, candidates)
+        decisions = self._parse_response(response, candidates)
+        log_event(
+            logger,
+            "tactical_judge.done",
+            candidate_count=len(candidates),
+            approved_count=sum(1 for decision in decisions if decision.approved),
+            decision_ids=[decision.candidate_id for decision in decisions],
+        )
+        return decisions
 
     def _render_episode_context(
         self,
@@ -264,6 +283,15 @@ class TacticalFormationJudge:
                     approved=False,
                     summary=None,
                 )
+            )
+
+        for decision in decisions:
+            log_event(
+                logger,
+                "tactical_judge.decision",
+                candidate_id=decision.candidate_id,
+                approved=decision.approved,
+                summary=decision.summary,
             )
 
         return decisions

@@ -179,7 +179,7 @@ def main():
             logger.info(
                 "Episode %s done: mean_reward=%.4f success_rate=%.4f steps=%.1f "
                 "formation=%s pruning=%s sleep=%s",
-                episode_idx,
+                episode_idx + 1,
                 float(summary.get("mean_reward", 0.0)),
                 float(summary.get("success_rate", 0.0)),
                 float(summary.get("mean_steps", 0.0)),

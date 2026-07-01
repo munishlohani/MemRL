@@ -78,6 +78,7 @@ class AlfworldRunner(BaseRunner):
         self.dataset_ratio = dataset_ratio
         self.bon = bon
         self.results_log = []
+        self._global_episode_idx = 0
         self.ckpt_resume_enabled = ckpt_resume_enabled
         self.ckpt_resume_path = ckpt_resume_path
         self.ckpt_resume_epoch = ckpt_resume_epoch
@@ -1050,6 +1051,36 @@ class AlfworldRunner(BaseRunner):
                 logger.info(f"Mini-batch {i+1} collected {len(collected_trajs)} trajectories.")
                 section_trajectories.extend(collected_trajs)
 
+                for traj in collected_trajs:
+                    self._global_episode_idx += 1
+                    episode_idx = self._global_episode_idx
+                    traj_success = bool(traj.get("success"))
+                    traj_steps = int(traj.get("steps", 0) or 0)
+                    logger.info(
+                        "Episode %d complete in section %d: success=%s steps=%s task=%s",
+                        episode_idx,
+                        section_num,
+                        traj_success,
+                        traj_steps,
+                        traj.get("task_description", ""),
+                    )
+                    self.writer.add_scalar(
+                        "Train/Episode_Success",
+                        1.0 if traj_success else 0.0,
+                        episode_idx,
+                    )
+                    self.writer.add_scalar(
+                        "Train/Episode_Steps",
+                        float(traj_steps),
+                        episode_idx,
+                    )
+                    self.results_log.append({
+                        "section": section_num,
+                        "episode": episode_idx,
+                        "success": traj_success,
+                        "steps": traj_steps,
+                    })
+
                 # --- Memory Processing for this mini-batch ---
                 task_descriptions = [traj["task_description"] for traj in collected_trajs]
                 trajectories = [traj['trajectory'] for traj in collected_trajs]
@@ -1121,14 +1152,6 @@ class AlfworldRunner(BaseRunner):
             logger.info(f" Saved ckpt: {ckpt_meta}")
             snapshot_root = Path(self.ck_dir) / "snapshot" / str(section_num)
             self._persist_cum_state(snapshot_root / "local_cache" / "cum_state.json")
-            # --- Log results for this section ---
-            for traj_data in section_trajectories:
-                self.results_log.append({
-                    "section": section_num,
-                    "success": traj_data["success"],
-                    "steps": traj_data["steps"],
-                })
-
             # --- [TENSORBOARD] Log training metrics for this section ---
             if section_trajectories:
                 section_success = sum(1 for traj in section_trajectories if traj["success"])

@@ -727,9 +727,9 @@ for each episode:
         a_t.recompute_decay_rate(graph.lambda_base, graph.epsilon, graph.lambda_shrink)
 
         # STAGE 1 — TD PRE-FILTER
-        if delta_t > theta_delta:
+        if delta_t > 0:
             pending_formations.append(experience(s_t, a_t, r_t, t_k))
-        elif delta_t < -theta_delta:
+        elif delta_t < 0:
             for (s, step_s) in active_skills:
                 penalty = abs(delta_t) * (gamma ** (current_step - step_s))
                 update_Q(s, t_k, -penalty, alpha=1.0)        # updates s.Q[t_k]

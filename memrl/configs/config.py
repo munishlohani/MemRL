@@ -72,7 +72,7 @@ class MemoryConfig(BaseModel):
     )
     
     # Memory parameters
-    k_retrieve: int = Field(default=1, gt=-1, description="Number of memories to retrieve")
+    k_retrieve: int = Field(default=5, gt=-1, description="Number of memories to retrieve")
     max_keywords: int = Field(
         default=8,
         gt=0,
@@ -88,10 +88,6 @@ class MemoryConfig(BaseModel):
                                       description="Token budget (character-level) for injected memory context. 0 means unlimited (no truncation).")
 
     # Phase 1 hyperparameters from Project.md.
-    theta_delta: Optional[float] = Field(
-        default=None,
-        description="Gate 1 TD-error admission threshold for tactical skill formation.",
-    )
     lambda_shrink: float = Field(
         default=10.0,
         description="Bayesian shrinkage pseudocount used in weighted-mean utility.",

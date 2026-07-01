@@ -417,6 +417,16 @@ class MemoryService:
         """Insert a node into the graph and its SQLite representation store."""
         if node.id != representation.id:
             raise ValueError("SkillNode id must match representation id")
+        log_event(
+            logger,
+            "memory_node.create",
+            node_id=node.id,
+            depth=node.depth,
+            parent_id=parent_id or self.graph.root_id,
+            task_type=node.task_type_dominant,
+            t_create=node.t_create,
+            consolidated=bool(getattr(node, "consolidated", False)),
+        )
         self.graph.insert(node, parent_id=parent_id)
         self._upsert_representation(representation)
         self._upsert_graph_state(node)
@@ -481,17 +491,7 @@ class MemoryService:
             content=content,
             embedding=embedding,
         )
-        created = self.add_node(node, representation, parent_id=parent_id)
-        log_event(
-            logger,
-            "skill_creation.done",
-            node_id=id,
-            depth=depth,
-            task_type=task_type_dominant,
-            parent_id=parent_id or self.graph.root_id,
-            evidence_ids=evidence_ids or [],
-        )
-        return created
+        return self.add_node(node, representation, parent_id=parent_id)
 
 #O(n^2) time complexity. Need to work on this
 

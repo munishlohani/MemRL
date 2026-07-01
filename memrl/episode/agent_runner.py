@@ -31,6 +31,7 @@ from memrl.utils.q_utils import (
     get_q_salience,
 )
 from .env_adapter import EpisodeEnvAdapter
+from memrl.utils.event_logging import log_event
 
 MAX_RETRIES=4
 RETRY_DELAY=2
@@ -325,13 +326,7 @@ class EpisodeRunner(BaseEpisodeRunner):
                         active_strategic_node_id=active_strategic_node_ids[slot_idx],
                     )
                     slot_context = slot_contexts[slot_idx]
-                    if self._should_queue_tactical_candidate(
-                        observation=slot_context.get("current_observation", ""),
-                        reward=reward,
-                        action=actions[slot_idx],
-                        td_error=td_error,
-                        theta_delta=getattr(self.memory_config, "theta_delta", None),
-                    ):
+                    if self._should_queue_tactical_candidate(td_error=td_error):
                         retrieval_state = slot_context.get("retrieval_state", {})
                         retrieval_context = "No archived memories."
                         retrieved_ids: List[str] = []
@@ -834,11 +829,12 @@ class EpisodeRunner(BaseEpisodeRunner):
             next_value=next_value,
             current_value=current_value,
         )
-        node.Q[task_type] = apply_q_update(
+        updated_value = apply_q_update(
             current_value,
             td_error,
             alpha=alpha,
         )
+        node.Q[task_type] = updated_value
         node.n[task_type] = int(node.n.get(task_type, 0) or 0) + 1
         node.last_accessed_step = self.current_step
         if hasattr(self.memory_service.graph, "refresh_decay_rate"):
@@ -853,9 +849,22 @@ class EpisodeRunner(BaseEpisodeRunner):
         self._report_metrics(
             {
                 "episode/td_error": td_error,
-                "episode/tactical_q": float(node.Q.get(task_type, 0.0)),
+                "episode/tactical_q": float(updated_value),
                 "episode/tactical_salience": float(get_q_salience(node, lambda_shrink=float(getattr(self.memory_config, "lambda_shrink", 10.0)))),
             }
+        )
+        log_event(
+            logger,
+            "tactical_q.update",
+            node_id=node_id,
+            task_type=task_type,
+            reward=reward,
+            done=done,
+            current_value=current_value,
+            next_value=next_value,
+            td_error=td_error,
+            updated_value=updated_value,
+            visit_count=node.n.get(task_type, 0),
         )
         self.memory_service.persist_node_state(node)
 
@@ -950,12 +959,24 @@ class EpisodeRunner(BaseEpisodeRunner):
                     next_value=0.0,
                     current_value=current_value,
                 )
-                node.Q_omega[task_type] = apply_q_update(
+                updated_value = apply_q_update(
                     current_value,
                     td_error,
                     alpha=alpha_omega,
                 )
+                node.Q_omega[task_type] = updated_value
                 node.n_omega[task_type] = int(node.n_omega.get(task_type, 0) or 0) + 1
+                log_event(
+                    logger,
+                    "strategic_q.update",
+                    node_id=node.id,
+                    task_type=task_type,
+                    episode_return=episode_return,
+                    current_value=current_value,
+                    td_error=td_error,
+                    updated_value=updated_value,
+                    visit_count=node.n_omega.get(task_type, 0),
+                )
 
             self.memory_service.persist_node_state(node)
 
@@ -1166,22 +1187,17 @@ class EpisodeRunner(BaseEpisodeRunner):
     def _should_queue_tactical_candidate(
         self,
         *,
-        observation: Any,
-        reward: float,
-        action: Any,
         td_error: Optional[float],
-        theta_delta: Optional[float],
     ) -> bool:
         if td_error is None:
             return False
-        threshold = float(theta_delta) if theta_delta is not None else 0.0
-        if td_error <= threshold:
-            return False
-        if float(reward) <= 0.0:
-            return False
-        if not str(observation or "").strip():
-            return False
-        if not str(action or "").strip():
+        if td_error < 0.0:
+            log_event(
+                logger,
+                "tactical_formation.rejected",
+                reason="negative_td",
+                td_error=td_error,
+            )
             return False
         return True
 
@@ -1190,6 +1206,12 @@ class EpisodeRunner(BaseEpisodeRunner):
         self.pending_formations = []
         if not candidates_raw:
             return {"candidates": 0, "approved": 0, "created_nodes": [], "skipped": False}
+
+        log_event(
+            logger,
+            "tactical_formation.start",
+            raw_candidates=len(candidates_raw),
+        )
 
         if self.formation_judge is None:
             logger.warning(
@@ -1207,13 +1229,15 @@ class EpisodeRunner(BaseEpisodeRunner):
             TacticalFormationCandidate(**candidate)
             for candidate in candidates_raw
             if self._should_queue_tactical_candidate(
-                observation=candidate.get("observation", ""),
-                reward=float(candidate.get("reward", 0.0) or 0.0),
-                action=candidate.get("action", ""),
                 td_error=float(candidate.get("td_error", 0.0) or 0.0),
-                theta_delta=getattr(self.memory_config, "theta_delta", None),
             )
         ]
+        log_event(
+            logger,
+            "tactical_formation.filtered",
+            raw_candidates=len(candidates_raw),
+            passed_candidates=len(candidates),
+        )
         if not candidates:
             return {
                 "candidates": len(candidates_raw),
@@ -1233,12 +1257,26 @@ class EpisodeRunner(BaseEpisodeRunner):
                 "skipped": True,
                 "error": str(exc),
             }
+        log_event(
+            logger,
+            "tactical_formation.judge_done",
+            passed_candidates=len(candidates),
+            decision_count=len(decisions),
+            approved_count=sum(1 for decision in decisions if decision.approved),
+        )
 
         decisions_by_id = {decision.candidate_id: decision for decision in decisions}
         created_nodes: List[str] = []
         for candidate in candidates:
             decision = decisions_by_id.get(candidate.candidate_id)
             if decision is None or not decision.approved:
+                log_event(
+                    logger,
+                    "tactical_formation.decision",
+                    candidate_id=candidate.candidate_id,
+                    approved=False,
+                    summary=None,
+                )
                 continue
 
             parent_id = candidate.active_strategic_node_id or self.memory_service.graph.root_id
@@ -1258,6 +1296,15 @@ class EpisodeRunner(BaseEpisodeRunner):
                         "Tactical summary generation failed; using judge summary instead: %s",
                         exc,
                     )
+            log_event(
+                logger,
+                "tactical_formation.decision",
+                candidate_id=candidate.candidate_id,
+                approved=True,
+                summary=summary_content,
+                parent_id=parent_id,
+                source_memory_id=candidate.source_memory_id,
+            )
 
             self.memory_service.add_node_from_text(
                 id=node_id,

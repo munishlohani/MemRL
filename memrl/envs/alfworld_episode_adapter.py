@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from typing import Any, Dict, List, Optional
 
 from ..episode.env_adapter import EpisodeEnvAdapter, EpisodeResetResult, EpisodeStepResult
@@ -43,6 +44,23 @@ def _task_type_from_gamefile(gamefile: Optional[str]) -> Optional[str]:
     for prefix in _ALFWORLD_TASK_PREFIXES:
         if directory.startswith(prefix):
             return prefix
+    return None
+
+
+def _task_description_from_observation(observation: Optional[str]) -> Optional[str]:
+    text = str(observation or "")
+    patterns = (
+        r"Your task is to:\s*(.+)",
+        r"Task:\s*(.+)",
+        r"Your goal is to:\s*(.+)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            task = match.group(1).strip()
+            if task:
+                task = task.split("\n", 1)[0].strip()
+                return task.rstrip(".")
     return None
 
 
@@ -100,6 +118,9 @@ class AlfWorldEpisodeEnvAdapter(EpisodeEnvAdapter):
             task_type = _task_type_from_gamefile(gamefile)
             if task_type is not None:
                 info.setdefault("task_type", task_type)
+            task_description = _task_description_from_observation(info.get("obs") or entry.get("obs"))
+            if task_description is not None:
+                info.setdefault("task_description", task_description)
             infos.append(info)
         self._last_reset_infos = infos
         self._log_reset_output(observations, infos)
@@ -126,6 +147,10 @@ class AlfWorldEpisodeEnvAdapter(EpisodeEnvAdapter):
             for key in ("gamefile", "task_type"):
                 if key not in info and key in reset_info:
                     info[key] = reset_info[key]
+            if "task_description" not in info:
+                task_description = _task_description_from_observation(observations[-1] if observations else entry.get("obs"))
+                if task_description is not None:
+                    info["task_description"] = task_description
             infos.append(info)
         self._log_step_output(actions, observations, rewards, dones, infos)
         return EpisodeStepResult(
@@ -206,4 +231,10 @@ class AlfWorldEpisodeEnvAdapter(EpisodeEnvAdapter):
             )
 
 
-__all__ = ["AlfWorldEpisodeEnvAdapter", "EpisodeResetResult", "EpisodeStepResult"]
+__all__ = [
+    "AlfWorldEpisodeEnvAdapter",
+    "EpisodeResetResult",
+    "EpisodeStepResult",
+    "_task_description_from_observation",
+    "_task_type_from_gamefile",
+]

@@ -66,9 +66,6 @@ class EpisodeRunner(BaseEpisodeRunner):
         max_steps: int = 1,
         llm_provider: Optional[BaseLLM] = None,
         strategic_k: int = 3,
-        ckpt_resume_enabled: bool = False,
-        ckpt_resume_path: Optional[str] = None,
-        ckpt_resume_epoch: Optional[int] = None,
         tensorboard_log_dir: Optional[str] = None,
     ):
         self.agent = agent
@@ -428,7 +425,6 @@ class EpisodeRunner(BaseEpisodeRunner):
                 task_types=task_types,
                 reward_histories=reward_histories,
                 step_counts=step_counts,
-                done_flags=done_flags,
                 step_infos=episode_infos,
                 active_strategic_node_ids=active_strategic_node_ids,
                 dirty_nodes=dirty_nodes,
@@ -1119,7 +1115,6 @@ class EpisodeRunner(BaseEpisodeRunner):
         task_types: List[str],
         reward_histories: List[List[float]],
         step_counts: List[int],
-        done_flags: List[bool],
         step_infos: List[Dict[str, Any]],
         active_strategic_node_ids: List[Optional[str]],
         dirty_nodes: Dict[str, Any],

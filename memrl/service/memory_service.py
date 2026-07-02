@@ -709,23 +709,6 @@ class MemoryService:
     def get_representation(self, node_id: str) -> SkillRepresentation:
         return self._fetch_representation(node_id)
 
-    def list_nodes(self, depth: Optional[int] = None) -> List[SkillNode]:
-        nodes = list(self.graph.nodes.values())
-        if depth is None:
-            return nodes
-        return [node for node in nodes if node.depth == depth]
-
-    def list_representations(
-        self,
-        depth: Optional[int] = None,
-        *,
-        task_type_dominant: Optional[str] = None,
-    ) -> List[SkillRepresentation]:
-        return self._fetch_representations(
-            depth=depth,
-            task_type_dominant=task_type_dominant,
-        )
-
     def search_nodes(
         self,
         query_embedding: List[float],
@@ -760,45 +743,6 @@ class MemoryService:
             depth=depth,
             task_type_dominant=task_type_dominant,
         )
-
-    def search_by_text(
-        self,
-        query_text: str,
-        *,
-        top_k: int = 5,
-        depth: Optional[int] = None,
-        task_type_dominant: Optional[str] = None,
-    ) -> List[Dict[str, Any]]:
-        """Convenience wrapper that embeds text before similarity search."""
-        if self.embedding_provider is None:
-            raise ValueError("embedding_provider is required for text search")
-        query_embedding = self.embedding_provider.embed_single(query_text)
-        return self.search_nodes(
-            query_embedding,
-            top_k=top_k,
-            depth=depth,
-            task_type_dominant=task_type_dominant,
-        )
-
-    def find_best_parent(
-        self,
-        query_embedding: List[float],
-        *,
-        target_depth: int,
-        task_type_dominant: Optional[str] = None,
-    ) -> Optional[SkillNode]:
-        """Find the best parent candidate for a query embedding."""
-        best = self.retriever.best_node(
-            self._fetch_representations(
-                depth=target_depth,
-                task_type_dominant=task_type_dominant,
-            ),
-            query_embedding,
-            depth=None,
-        )
-        if best is None:
-            return None
-        return self.graph.get(best.id)
 
     def sleep_consolidation_count(self) -> int:
         """Return the active count used to decide whether sleep consolidation fires."""
@@ -1170,42 +1114,6 @@ class MemoryService:
     def close(self) -> None:
         """Close the SQLite connection."""
         self._engine.dispose()
-
-    def remove_node(self, node_id: str) -> None:
-        """Remove a node and its subtree from the graph and SQLite table."""
-        removed_ids = self.graph.remove(node_id)
-        with self._engine.begin() as conn:
-            for rid in removed_ids:
-                conn.execute(
-                    delete(self.skill_representation_table).where(
-                        self.skill_representation_table.c.node_id == rid
-                    )
-                )
-                conn.execute(
-                    delete(self.skill_graph_state_table).where(
-                        self.skill_graph_state_table.c.node_id == rid
-                    )
-                )
-
-    def refresh_content_db(self) -> None:
-        """Synchronize both SQLite tables with the graph."""
-        valid_ids = list(self.graph.nodes)
-        with self._engine.begin() as conn:
-            if not valid_ids:
-                conn.execute(delete(self.skill_representation_table))
-                conn.execute(delete(self.skill_graph_state_table))
-                return
-
-            conn.execute(
-                delete(self.skill_representation_table).where(
-                    ~self.skill_representation_table.c.node_id.in_(valid_ids)
-                )
-            )
-            conn.execute(
-                delete(self.skill_graph_state_table).where(
-                    ~self.skill_graph_state_table.c.node_id.in_(valid_ids)
-                )
-            )
 
     def retrieve_query(
         self,

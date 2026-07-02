@@ -92,11 +92,6 @@ class SkillNode:
     def is_tactical(self) -> bool:
         return self.depth == 2
 
-    @property
-    def total_accessed(self) -> int:
-        """Total tactical retrievals across all task types."""
-        return sum(self.n.values())
-
     def q_salience(self, lambda_shrink: float = 10.0) -> float:
         """Return the task-agnostic utility salience used by decay."""
         return get_q_salience(self, lambda_shrink=lambda_shrink)

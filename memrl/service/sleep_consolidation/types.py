@@ -31,18 +31,6 @@ class SleepConsolidationDecision:
     summary: Optional[str] = None
     target_scaffold_id: Optional[str] = None
 
-    @property
-    def creates_node(self) -> bool:
-        return self.action == SleepConsolidationAction.SPAWN
-
-    @property
-    def absorbs(self) -> bool:
-        return self.action == SleepConsolidationAction.ABSORB
-
-    @property
-    def discards(self) -> bool:
-        return self.action == SleepConsolidationAction.DISCARD
-
 
 @dataclass(frozen=True)
 class SleepConsolidationResult:
@@ -55,11 +43,3 @@ class SleepConsolidationResult:
     target_scaffold_id: Optional[str] = None
     prompt: str = ""
     raw_response: str = ""
-
-    @property
-    def creates_node(self) -> bool:
-        return self.action == SleepConsolidationAction.SPAWN
-
-    @property
-    def discards(self) -> bool:
-        return self.action == SleepConsolidationAction.DISCARD

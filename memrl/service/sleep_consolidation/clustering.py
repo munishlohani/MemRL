@@ -135,6 +135,34 @@ class HDBSCANStrategy(ClusteringStrategyBase):
         raise NotImplementedError("HDBSCAN clustering will be implemented next.")
 
 
+def compute_davies_bouldin_index(
+    embeddings: Sequence[Sequence[float]],
+    clusters: Sequence[Sequence[int]],
+) -> Optional[float]:
+    """Davies-Bouldin index for a chosen cluster assignment (lower is better).
+
+    Reported as a metric *before* trusting the cluster assignment for
+    sleep-consolidation decisions -- a high score flags degenerate
+    clustering (e.g. one dominant cluster) even when the LLM's per-cluster
+    decision looks reasonable in isolation. Returns None when the score is
+    undefined: fewer than 2 clusters, or fewer samples than clusters.
+    """
+    if len(clusters) < 2:
+        return None
+    labels = [-1] * len(embeddings)
+    for cluster_idx, indices in enumerate(clusters):
+        for idx in indices:
+            labels[idx] = cluster_idx
+    if any(label < 0 for label in labels):
+        return None
+    try:
+        return float(
+            davies_bouldin_score(np.asarray(embeddings, dtype=float), np.asarray(labels))
+        )
+    except Exception:
+        return None
+
+
 def get_clustering_strategy(
     strategy: ClusterStrategy,
     *,
@@ -154,4 +182,5 @@ __all__ = [
     "KMeansClusteringStrategy",
     "HDBSCANStrategy",
     "get_clustering_strategy",
+    "compute_davies_bouldin_index",
 ]

@@ -139,6 +139,20 @@ class EpisodeRunner(BaseEpisodeRunner):
         self.metrics_namespace = f"episode/{self.experiment_name}"
         self.metrics_history: List[Dict[str, Any]] = []
 
+        # Cumulative (running, across the whole training run) metrics state.
+        # Per-batch metrics alone hide slow trends (baseline convergence,
+        # differential pruning, task-type collapse) that only show up over
+        # many episodes -- these dicts/counters accumulate across run() calls.
+        self._task_type_success_counts: Dict[str, int] = {}
+        self._task_type_total_counts: Dict[str, int] = {}
+        self._task_type_length_success: Dict[str, List[int]] = {}
+        self._task_type_length_failure: Dict[str, List[int]] = {}
+        self._strategic_selection_counts: Dict[str, int] = {}
+        self._cumulative_nodes_created = 0
+        self._cumulative_pruned_count = 0
+        self._cumulative_pruned_by_task_type: Dict[str, int] = {}
+        self._seed_known_task_types()
+
         self.random_seed = getattr(self.experiment_config, "random_seed", None)
         if self.random_seed is not None:
             random.seed(int(self.random_seed))
@@ -193,6 +207,9 @@ class EpisodeRunner(BaseEpisodeRunner):
             active_strategic_node_ids[slot_idx] = selected_id
             strategic_selection_summaries[slot_idx] = selected_summary
             if selected_id is not None:
+                self._strategic_selection_counts[selected_id] = (
+                    self._strategic_selection_counts.get(selected_id, 0) + 1
+                )
                 episode_infos[slot_idx]["active_strategic_node_id"] = selected_id
                 if selected_summary:
                     episode_infos[slot_idx]["active_strategic_node_summary"] = selected_summary
@@ -389,9 +406,10 @@ class EpisodeRunner(BaseEpisodeRunner):
             # Stage-1 gate (§4.1) must read the tactical baseline b(t_k)
             # before this episode's own return updates it, so it runs before
             # _update_episode_tactical_q (which performs that update).
-            self._queue_episode_tactical_candidates(
+            formation_gate_stats = self._queue_episode_tactical_candidates(
                 reward_histories=reward_histories,
                 candidate_buffers=episode_candidate_buffers,
+                success_flags=success_flags,
             )
 
             # Working-set protocol (§5.3): step-level Q-updates mutate nodes
@@ -470,6 +488,12 @@ class EpisodeRunner(BaseEpisodeRunner):
                     "episode/tactical_pruned": pruning_summary.get("pruned", 0),
                 }
             )
+            self._report_task_type_metrics(episode_summaries)
+            self._report_formation_pipeline_metrics(formation_gate_stats, formation_summary)
+            self._report_baseline_metrics()
+            self._report_graph_snapshot_metrics(pruning_summary)
+            self._report_strategic_layer_metrics()
+            self._report_sleep_consolidation_metrics(sleep_summary)
 
             summary_path = self.local_cache_dir / "episode_summary.json"
             with open(summary_path, "w", encoding="utf-8") as f:
@@ -730,6 +754,235 @@ class EpisodeRunner(BaseEpisodeRunner):
             pass
 
         logger.info("%s metrics: %s", self.metrics_namespace, payload)
+
+    def _seed_known_task_types(self) -> None:
+        """Best-effort seed of the 6 canonical ALFWorld task types at zero.
+
+        Ensures per-task-type dashboards show all 6 rows from the start of
+        an ALFWorld run instead of only whatever types the early (possibly
+        small) batches happen to sample. Silently no-ops for other
+        benchmarks/adapters.
+        """
+        try:
+            from memrl.envs.alfworld_episode_adapter import _ALFWORLD_TASK_PREFIXES
+        except Exception:
+            return
+        for task_type in _ALFWORLD_TASK_PREFIXES:
+            self._task_type_total_counts.setdefault(task_type, 0)
+            self._task_type_success_counts.setdefault(task_type, 0)
+            self._task_type_length_success.setdefault(task_type, [])
+            self._task_type_length_failure.setdefault(task_type, [])
+
+    def _report_task_type_metrics(self, episode_summaries: List[Dict[str, Any]]) -> None:
+        """Per-task-type success rate and episode length at success vs. failure.
+
+        Aggregate SR hides collapse on hard task types, so this reports the
+        cumulative running per-type SR (updated with this batch's episodes)
+        rather than just an overall number, plus whether successes are
+        getting shorter over training (a sign of genuine skill reuse).
+        """
+        for episode in episode_summaries:
+            task_type = episode.get("task_type") or "unknown"
+            success = bool(episode.get("success"))
+            steps = int(episode.get("steps") or 0)
+
+            self._task_type_total_counts[task_type] = (
+                self._task_type_total_counts.get(task_type, 0) + 1
+            )
+            if success:
+                self._task_type_success_counts[task_type] = (
+                    self._task_type_success_counts.get(task_type, 0) + 1
+                )
+                self._task_type_length_success.setdefault(task_type, []).append(steps)
+            else:
+                self._task_type_length_failure.setdefault(task_type, []).append(steps)
+
+        metrics: Dict[str, Any] = {}
+        for task_type, total in self._task_type_total_counts.items():
+            metrics[f"task_type/episode_count/{task_type}"] = total
+            if total <= 0:
+                continue
+            successes = self._task_type_success_counts.get(task_type, 0)
+            metrics[f"task_type/success_rate/{task_type}"] = float(successes) / float(total)
+
+            success_lengths = self._task_type_length_success.get(task_type) or []
+            failure_lengths = self._task_type_length_failure.get(task_type) or []
+            if success_lengths:
+                metrics[f"task_type/mean_length_success/{task_type}"] = float(
+                    np.mean(success_lengths)
+                )
+            if failure_lengths:
+                metrics[f"task_type/mean_length_failure/{task_type}"] = float(
+                    np.mean(failure_lengths)
+                )
+
+        if metrics:
+            self._report_metrics(metrics)
+
+    def _report_formation_pipeline_metrics(
+        self,
+        formation_gate_stats: Dict[str, int],
+        formation_summary: Dict[str, Any],
+    ) -> None:
+        """Stage-1 admission rate (overall / by outcome / by step position)
+        and Stage-2 approval rate. The by-outcome split should diverge (if
+        it doesn't, b(t_k) isn't discriminating); the by-position split
+        checks for the recency-skew failure mode."""
+
+        def _rate(admitted_key: str, total_key: str) -> Optional[float]:
+            total = formation_gate_stats.get(total_key, 0)
+            if not total:
+                return None
+            return float(formation_gate_stats.get(admitted_key, 0)) / float(total)
+
+        metrics: Dict[str, Any] = {}
+        admission_rate = _rate("admitted_steps", "total_steps")
+        if admission_rate is not None:
+            metrics["formation/stage1_admission_rate"] = admission_rate
+        for outcome in ("success", "failure"):
+            rate = _rate(f"admitted_{outcome}_steps", f"total_{outcome}_steps")
+            if rate is not None:
+                metrics[f"formation/stage1_admission_rate_{outcome}"] = rate
+        for position in ("early", "mid", "late"):
+            rate = _rate(f"admitted_{position}_steps", f"total_{position}_steps")
+            if rate is not None:
+                metrics[f"formation/stage1_admission_rate_{position}"] = rate
+
+        candidates = formation_summary.get("candidates", 0) or 0
+        approved = formation_summary.get("approved", 0) or 0
+        if candidates:
+            metrics["formation/stage2_approval_rate"] = float(approved) / float(candidates)
+
+        created = len(formation_summary.get("created_nodes") or [])
+        self._cumulative_nodes_created += created
+        metrics["formation/new_nodes"] = created
+        metrics["formation/new_nodes_cumulative"] = self._cumulative_nodes_created
+
+        if metrics:
+            self._report_metrics(metrics)
+
+    def _report_baseline_metrics(self) -> None:
+        """Per-task-type advantage baselines b(t_k) / b^Omega(t_k) (spec §2.7).
+
+        Reported every batch so convergence (or continued drift late in
+        training) is visible over time, not just the final value.
+        """
+        graph = getattr(self.memory_service, "graph", None)
+        if graph is None:
+            return
+        metrics: Dict[str, Any] = {}
+        for task_type, value in (getattr(graph, "baseline_tactical", None) or {}).items():
+            metrics[f"baseline/tactical/{task_type}"] = float(value)
+        for task_type, value in (getattr(graph, "baseline_strategic", None) or {}).items():
+            metrics[f"baseline/strategic/{task_type}"] = float(value)
+        if metrics:
+            self._report_metrics(metrics)
+
+    def _report_graph_snapshot_metrics(self, pruning_summary: Dict[str, Any]) -> None:
+        """Tactical graph size, decay-rate distribution, and pruning counts.
+
+        Pruned-count-by-task-type is tracked cumulatively to check for
+        differential starvation across easy/hard task types.
+        """
+        graph = getattr(self.memory_service, "graph", None)
+        if graph is None:
+            return
+        tactical_nodes = graph.nodes_at_depth(2) if hasattr(graph, "nodes_at_depth") else []
+        metrics: Dict[str, Any] = {"graph/tactical_node_count": len(tactical_nodes)}
+
+        decay_rates = [float(node.decay_rate) for node in tactical_nodes]
+        if decay_rates:
+            metrics["graph/decay_rate_mean"] = float(np.mean(decay_rates))
+            metrics["graph/decay_rate_min"] = float(np.min(decay_rates))
+            metrics["graph/decay_rate_max"] = float(np.max(decay_rates))
+
+        pruned_this_epoch = int(pruning_summary.get("pruned", 0) or 0)
+        self._cumulative_pruned_count += pruned_this_epoch
+        metrics["graph/pruned_this_epoch"] = pruned_this_epoch
+        metrics["graph/pruned_cumulative"] = self._cumulative_pruned_count
+
+        pruned_by_task_type = pruning_summary.get("pruned_by_task_type") or {}
+        for task_type, count in pruned_by_task_type.items():
+            self._cumulative_pruned_by_task_type[task_type] = (
+                self._cumulative_pruned_by_task_type.get(task_type, 0) + count
+            )
+        for task_type, count in self._cumulative_pruned_by_task_type.items():
+            metrics[f"graph/pruned_cumulative/{task_type}"] = count
+
+        self._report_metrics(metrics)
+
+    def _report_strategic_layer_metrics(self) -> None:
+        """Strategic scaffold count, per-scaffold Q_omega, cross-scaffold
+        spread, and selection frequency.
+
+        Near-zero Q_omega variance across scaffolds for the same task type
+        means the scaffolds aren't functionally differentiated even if
+        individually non-zero; selection frequency flags one scaffold
+        dominating every episode regardless of task type.
+        """
+        graph = getattr(self.memory_service, "graph", None)
+        if graph is None:
+            return
+        scaffolds = graph.nodes_at_depth(1) if hasattr(graph, "nodes_at_depth") else []
+        metrics: Dict[str, Any] = {"strategic/scaffold_count": len(scaffolds)}
+
+        per_task_type_values: Dict[str, List[float]] = {}
+        total_selections = sum(self._strategic_selection_counts.values())
+        for scaffold in scaffolds:
+            short_id = str(scaffold.id)[:8]
+            for task_type, value in (scaffold.Q_omega or {}).items():
+                metrics[f"strategic/q_omega/{short_id}/{task_type}"] = float(value)
+                per_task_type_values.setdefault(task_type, []).append(float(value))
+
+            selection_count = self._strategic_selection_counts.get(scaffold.id, 0)
+            metrics[f"strategic/selection_count/{short_id}"] = selection_count
+            if total_selections:
+                metrics[f"strategic/selection_fraction/{short_id}"] = (
+                    float(selection_count) / float(total_selections)
+                )
+
+        for task_type, values in per_task_type_values.items():
+            if len(values) >= 2:
+                metrics[f"strategic/q_omega_variance/{task_type}"] = float(np.var(values))
+
+        self._report_metrics(metrics)
+
+    def _report_sleep_consolidation_metrics(
+        self, sleep_summary: Optional[Dict[str, Any]]
+    ) -> None:
+        """Sleep-consolidation trigger/eligibility/clustering/action counts.
+
+        Only reports when consolidation actually ran this batch (fires
+        rarely, gated by n_sleep).
+        """
+        if not sleep_summary or not sleep_summary.get("consolidation_ran"):
+            return
+        metrics: Dict[str, Any] = {
+            "sleep/trigger_step": sleep_summary.get("trigger_step"),
+            "sleep/unconsolidated_count": sleep_summary.get("unconsolidated_count"),
+            "sleep/eligible_count": sleep_summary.get("eligible_count"),
+            "sleep/cluster_count": sleep_summary.get("cluster_count"),
+            "sleep/num_results": sleep_summary.get("num_results"),
+        }
+        cluster_sizes = sleep_summary.get("cluster_sizes") or []
+        if cluster_sizes:
+            metrics["sleep/cluster_size_min"] = min(cluster_sizes)
+            metrics["sleep/cluster_size_max"] = max(cluster_sizes)
+            metrics["sleep/cluster_size_mean"] = float(np.mean(cluster_sizes))
+            total = sum(cluster_sizes)
+            if total:
+                # Flags heavy skew, e.g. one cluster holding 90% of nodes.
+                metrics["sleep/cluster_size_max_fraction"] = max(cluster_sizes) / float(total)
+
+        db_score = sleep_summary.get("cluster_davies_bouldin")
+        if db_score is not None:
+            metrics["sleep/cluster_davies_bouldin"] = db_score
+
+        action_counts = sleep_summary.get("action_counts") or {}
+        for action_name, count in action_counts.items():
+            metrics[f"sleep/action_{action_name}"] = count
+
+        self._report_metrics({key: value for key, value in metrics.items() if value is not None})
 
     def _init_tensorboard_writer(self, tensorboard_log_dir: Optional[str]) -> Any:
         if not tensorboard_log_dir:
@@ -1314,12 +1567,31 @@ class EpisodeRunner(BaseEpisodeRunner):
             "skipped": False,
         }
 
+    @staticmethod
+    def _step_position_bucket(step_idx: int, step_count: int) -> str:
+        """Bucket a 0-indexed step into early/mid/late thirds of its episode."""
+        if step_count <= 1:
+            return "mid"
+        fraction = step_idx / float(step_count - 1)
+        if fraction < 1.0 / 3.0:
+            return "early"
+        if fraction < 2.0 / 3.0:
+            return "mid"
+        return "late"
+
+    @staticmethod
+    def _new_formation_gate_stats() -> Dict[str, int]:
+        keys = ["total", "admitted"]
+        buckets = ["", "_success", "_failure", "_early", "_mid", "_late"]
+        return {f"{key}{bucket}_steps": 0 for key in keys for bucket in buckets}
+
     def _queue_episode_tactical_candidates(
         self,
         *,
         reward_histories: List[List[float]],
         candidate_buffers: List[List[Dict[str, Any]]],
-    ) -> None:
+        success_flags: Optional[List[bool]] = None,
+    ) -> Dict[str, int]:
         """Stage-1 advantage pre-filter, batched at episode end (spec §4.1).
 
         G_t is the MC return-to-go from backward discounted recursion.
@@ -1330,9 +1602,15 @@ class EpisodeRunner(BaseEpisodeRunner):
         for this episode, so an episode is scored against history excluding
         itself. Callers must invoke this before `_update_episode_tactical_q`
         for the same episode.
+
+        Returns admission-rate bookkeeping (total/admitted step counts,
+        split by episode outcome and by within-episode step position) so
+        the caller can report the Stage-1 admission rate and check whether
+        it discriminates by outcome and isn't recency-skewed.
         """
         graph = getattr(self.memory_service, "graph", None)
         gamma = float(getattr(self.memory_config, "gamma", 0.95))
+        stats = self._new_formation_gate_stats()
         for slot_idx, candidates in enumerate(candidate_buffers):
             if not candidates:
                 continue
@@ -1345,14 +1623,32 @@ class EpisodeRunner(BaseEpisodeRunner):
             task_type = candidates[0].get("task_type")
             baseline = graph.get_tactical_baseline(task_type) if graph is not None else 0.0
             returns_to_go = compute_mc_return_to_go(rewards[:step_count], gamma=gamma)
+            success = (
+                bool(success_flags[slot_idx])
+                if success_flags is not None and slot_idx < len(success_flags)
+                else None
+            )
+            outcome_bucket = None if success is None else ("success" if success else "failure")
 
             queued_count = 0
             for step_idx in range(step_count):
                 candidate = dict(candidates[step_idx])
                 candidate["advantage"] = compute_advantage(returns_to_go[step_idx], baseline)
-                if self._should_queue_tactical_candidate(advantage=candidate["advantage"]):
+                admitted = self._should_queue_tactical_candidate(advantage=candidate["advantage"])
+                if admitted:
                     self.pending_formations.append(candidate)
                     queued_count += 1
+
+                position_bucket = self._step_position_bucket(step_idx, step_count)
+                stats["total_steps"] += 1
+                stats[f"total_{position_bucket}_steps"] += 1
+                if outcome_bucket is not None:
+                    stats[f"total_{outcome_bucket}_steps"] += 1
+                if admitted:
+                    stats["admitted_steps"] += 1
+                    stats[f"admitted_{position_bucket}_steps"] += 1
+                    if outcome_bucket is not None:
+                        stats[f"admitted_{outcome_bucket}_steps"] += 1
 
             log_event(
                 logger,
@@ -1365,17 +1661,22 @@ class EpisodeRunner(BaseEpisodeRunner):
                 propagated_return=returns_to_go[0] if returns_to_go else 0.0,
             )
 
+        return stats
+
     def _prune_tactical_nodes(self) -> Dict[str, Any]:
         theta_prune = getattr(self.memory_config, "theta_prune", None)
         if theta_prune is None:
-            return {"pruned": 0, "pruned_node_ids": [], "theta_prune": None}
+            return {"pruned": 0, "pruned_node_ids": [], "theta_prune": None, "pruned_by_task_type": {}}
 
+        task_type_counts: Dict[str, int] = {}
         pruned_node_ids = self.memory_service.prune_tactical_nodes(
             current_step=self.current_step,
             theta_prune=float(theta_prune),
+            task_type_counts_out=task_type_counts,
         )
         return {
             "pruned": len(pruned_node_ids),
             "pruned_node_ids": pruned_node_ids,
             "theta_prune": float(theta_prune),
+            "pruned_by_task_type": task_type_counts,
         }

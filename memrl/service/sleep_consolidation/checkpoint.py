@@ -67,13 +67,18 @@ class SleepConsolidationCheckpoint:
             n_sleep=n_sleep,
             current_step=self.graph.current_step,
         )
-        return self._run_consolidation(theta_consolidate=self._resolved_theta_consolidate())
+        return self._run_consolidation(
+            theta_consolidate=self._resolved_theta_consolidate(),
+            unconsolidated_count=unconsolidated_count,
+        )
 
     def _resolved_theta_consolidate(self) -> float:
         threshold = getattr(self.memory_config, "theta_consolidate", None)
         return float(threshold) if threshold is not None else 0.0
 
-    def _run_consolidation(self, *, theta_consolidate: float) -> Dict[str, Any]:
+    def _run_consolidation(
+        self, *, theta_consolidate: float, unconsolidated_count: int
+    ) -> Dict[str, Any]:
         """Execute the consolidation pipeline through MemoryService."""
         if self.llm_provider is None:
             raise ValueError("llm_provider is required for sleep consolidation")
@@ -83,15 +88,24 @@ class SleepConsolidationCheckpoint:
             llm_provider=self.llm_provider,
             cluster_strategy=cluster_strategy,
         )
+        stats: Dict[str, Any] = {}
         results = self.memory_service.sleep_consolidate(
             sleep_service,
             theta_consolidate=theta_consolidate,
+            stats_out=stats,
         )
         summary = {
             "consolidation_ran": True,
             "timestamp": self.graph.current_step,
+            "trigger_step": self.graph.current_step,
+            "unconsolidated_count": unconsolidated_count,
             "num_results": len(results),
             "actions": [result.action.value for result in results],
+            "eligible_count": stats.get("eligible_count"),
+            "cluster_count": stats.get("cluster_count"),
+            "cluster_sizes": stats.get("cluster_sizes"),
+            "cluster_davies_bouldin": stats.get("cluster_davies_bouldin"),
+            "action_counts": stats.get("action_counts"),
         }
         logger.info(
             "Sleep consolidation complete: timestamp=%s, num_results=%s",

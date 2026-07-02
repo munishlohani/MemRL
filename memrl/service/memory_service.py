@@ -49,6 +49,7 @@ from .sleep_consolidation import (
     SleepConsolidationService,
     StrategicScaffoldContext,
 )
+from .sleep_consolidation.clustering import compute_davies_bouldin_index
 from .retrievers import SkillSimilarityRetriever
 from ..utils.event_logging import log_event
 
@@ -652,8 +653,15 @@ class MemoryService:
         *,
         current_step: Optional[int] = None,
         theta_prune: Optional[float] = None,
+        task_type_counts_out: Optional[Dict[str, int]] = None,
     ) -> List[str]:
-        """Prune tactical nodes whose decay-based retention falls below threshold."""
+        """Prune tactical nodes whose decay-based retention falls below threshold.
+
+        If `task_type_counts_out` is provided, it is incremented in place with
+        each removed node's `task_type_dominant` -- lets the caller check for
+        differential pruning (starvation) across task types without changing
+        the return type for existing callers.
+        """
         resolved_threshold = theta_prune
         if resolved_threshold is None:
             resolved_threshold = getattr(self.memory_config, "theta_prune", None)
@@ -675,6 +683,9 @@ class MemoryService:
             delta_t = max(0, resolved_step - int(node.last_accessed_step))
             retention = math.exp(-float(node.decay_rate) * float(delta_t))
             if retention < threshold:
+                if task_type_counts_out is not None:
+                    task_type = node.task_type_dominant or "unknown"
+                    task_type_counts_out[task_type] = task_type_counts_out.get(task_type, 0) + 1
                 node_removed_ids = self.graph.remove(node.id)
                 removed_ids.extend(node_removed_ids)
                 with self._engine.begin() as conn:
@@ -805,6 +816,7 @@ class MemoryService:
         consolidation_service: SleepConsolidationService,
         *,
         theta_consolidate: Optional[float] = None,
+        stats_out: Optional[Dict[str, Any]] = None,
     ) -> List[SleepConsolidationResult]:
         """Run sleep consolidation and wire consolidation outcomes into the graph.
 
@@ -812,6 +824,11 @@ class MemoryService:
         ask the LLM for a structured spawn/absorb/discard action, and materialize a
         strategic scaffold node for clusters judged to spawn one. Tactical nodes
         processed in any branch are marked consolidated.
+
+        If `stats_out` is provided, it is populated in place with metrics-worthy
+        counts (eligible_count, cluster_count, cluster_sizes, cluster_davies_bouldin,
+        action_counts) for the caller to report -- kept as an optional out-param so
+        the return type/signature stays backward compatible for existing callers.
         """
         resolved_threshold = theta_consolidate
         if resolved_threshold is None:
@@ -834,6 +851,8 @@ class MemoryService:
             and node.q_salience(self.graph.lambda_shrink) > threshold
         ]
         eligible_nodes.sort(key=lambda node: (int(node.t_create), node.id))
+        if stats_out is not None:
+            stats_out["eligible_count"] = len(eligible_nodes)
         if not eligible_nodes:
             log_event(
                 logger,
@@ -854,6 +873,17 @@ class MemoryService:
         clusters = consolidation_service.cluster_embeddings(eligible_embeddings)
         existing_scaffolds = self._strategic_scaffold_contexts()
 
+        if stats_out is not None:
+            stats_out["cluster_count"] = len(clusters)
+            stats_out["cluster_sizes"] = [len(indices) for indices in clusters]
+            # Computed *before* trusting the cluster assignment for the LLM
+            # decisions below -- a degenerate clustering (e.g. one dominant
+            # cluster) should be visible even if each decision looks sane.
+            stats_out["cluster_davies_bouldin"] = compute_davies_bouldin_index(
+                eligible_embeddings, clusters
+            )
+
+        action_counts: Counter = Counter()
         results: List[SleepConsolidationResult] = []
         for indices in clusters:
             cluster_nodes = [eligible_nodes[idx] for idx in indices]
@@ -877,6 +907,7 @@ class MemoryService:
                 raw_response=raw_response,
             )
             results.append(result)
+            action_counts[decision.action.value] += 1
             log_event(
                 logger,
                 "sleep_consolidation.cluster_decision",
@@ -942,6 +973,9 @@ class MemoryService:
                 raise ValueError(
                     f"Unsupported sleep-consolidation action: {decision.action!r}"
                 )
+
+        if stats_out is not None:
+            stats_out["action_counts"] = dict(action_counts)
 
         log_event(
             logger,

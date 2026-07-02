@@ -78,10 +78,6 @@ class MemoryConfig(BaseModel):
         gt=0,
         description="Maximum keywords for optional keyword extraction helpers",
     )
-    confidence_threshold: float = Field(default=0.0, ge=0, le=1, 
-                                       description="Minimum similarity threshold")
-    memory_confidence: float = Field(default=100.0, ge=0, le=100,
-                                    description="Confidence score for new memories")
     add_similarity_threshold: float = Field(default=0.9,
                                     description="similarity_threshold for add memory")
     memory_budget_tokens: int = Field(default=0,
@@ -199,8 +195,6 @@ class EnvironmentConfig(BaseModel):
     # ALFWorld settings  
     alfworld_config_path: str = Field(default="configs/base_config.yaml",
                                      description="Path to ALFWorld configuration")
-    alfworld_env_type: str = Field(default="AlfredTWEnv",
-                                  description="ALFWorld environment type")
 
 
 class ExperimentConfig(BaseModel):
@@ -293,12 +287,6 @@ class ExperimentConfig(BaseModel):
     baseline_k: int = Field(default=10, description="Baseline rounds (k) for pass@k/reflection")
     # Output settings
     output_dir: str = Field(default="./results", description="Directory for experiment outputs")
-    save_trajectories: bool = Field(default=True, description="Save detailed trajectories")
-    save_memories: bool = Field(default=True, description="Save memory snapshots")
-
-    # Logging settings
-    enable_logging: bool = Field(default=True, description="Enable detailed logging")
-    log_level: str = Field(default="INFO", description="Logging level")
 
 class RLConfig(BaseModel):
     """Configuration for reinforcement learning parameters."""
@@ -316,16 +304,10 @@ class RLConfig(BaseModel):
             "Only applied by runners that explicitly enable it (e.g., LLB via experiment.llb_q_floor)."
         ),
     )
-    success_reward: float = Field(default=1.0, description="Reward for successful outcome")
-    failure_reward: float = Field(default=-1.0, description="Reward for failure outcome")
     # Retrieval filtering threshold used by runners when calling MemoryService.retrieve_query(...).
     # (Kept separate from `tau` to avoid conflating unknown-detection vs retrieval filtering.)
     sim_threshold: float = Field(default=0.5, description="Similarity threshold for retrieval filtering")
     topk: int = Field(default=5, description="Candidate set size for value-aware selection")
-    novelty_threshold: float = Field(default=0.85, description="Similarity threshold to treat as non-novel (merge)")
-    recency_boost: float = Field(default=0.0, description="Optional recency weight for prioritization")
-    reward_merge_gain: float = Field(default=0.1, description="Gain for attributing success to close memories")
-    q_min_threshold: float = Field(default=-0.8, description="Threshold for q min")
     weight_sim: float = Field(default=0.5, description="Weight for similarity in combined score")
     weight_q: float = Field(default=0.5, description="Weight for Q-value in combined score")
 
@@ -340,9 +322,8 @@ class MempConfig(BaseModel):
     experiment: ExperimentConfig = Field(default_factory=ExperimentConfig)
     rl_config: RLConfig = Field(default_factory=RLConfig)
     # Global settings
-    project_name: str = Field(default="memp", description="Project name")
     version: str = Field(default="0.1.0", description="Project version")
-    
+
     model_config = ConfigDict(extra="forbid")  # Don't allow extra fields
         
     @classmethod

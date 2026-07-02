@@ -814,56 +814,48 @@ class MemoryService:
         eligible_embeddings = [
             eligible_representations[node.id].embedding for node in eligible_nodes
         ]
-        clusters = consolidation_service.cluster_embeddings(eligible_embeddings)
+        eligible_texts = [
+            eligible_representations[node.id].content for node in eligible_nodes
+        ]
         existing_scaffolds = self._strategic_scaffold_contexts()
 
+        # Single source of truth for clustering + LLM decision: delegates to
+        # SleepConsolidationService.consolidate() instead of reimplementing
+        # the cluster-then-decide loop here. This method only does the
+        # graph-mutation phase (spawn/absorb/discard wiring) below.
+        results: List[SleepConsolidationResult] = consolidation_service.consolidate(
+            eligible_embeddings,
+            eligible_texts,
+            existing_scaffolds=existing_scaffolds,
+        )
+
         if stats_out is not None:
-            stats_out["cluster_count"] = len(clusters)
-            stats_out["cluster_sizes"] = [len(indices) for indices in clusters]
-            # Computed *before* trusting the cluster assignment for the LLM
-            # decisions below -- a degenerate clustering (e.g. one dominant
-            # cluster) should be visible even if each decision looks sane.
+            stats_out["cluster_count"] = len(results)
+            stats_out["cluster_sizes"] = [len(result.cluster_indices) for result in results]
+            # Same cluster assignment consolidate() just decided on, checked
+            # before trusting it -- a degenerate clustering (e.g. one
+            # dominant cluster) should be visible even if each decision
+            # looks sane.
             stats_out["cluster_davies_bouldin"] = compute_davies_bouldin_index(
-                eligible_embeddings, clusters
+                eligible_embeddings, [result.cluster_indices for result in results]
             )
 
         action_counts: Counter = Counter()
-        results: List[SleepConsolidationResult] = []
-        for indices in clusters:
-            cluster_nodes = [eligible_nodes[idx] for idx in indices]
-            if not cluster_nodes:
-                continue
-
-            cluster_texts = [
-                eligible_representations[node.id].content for node in cluster_nodes
-            ]
-            decision, prompt, raw_response = consolidation_service.decide_cluster(
-                cluster_texts,
-                existing_scaffolds=existing_scaffolds,
-            )
-            result = SleepConsolidationResult(
-                cluster_indices=list(indices),
-                cluster_texts=cluster_texts,
-                action=decision.action,
-                summary=decision.summary,
-                target_scaffold_id=decision.target_scaffold_id,
-                prompt=prompt,
-                raw_response=raw_response,
-            )
-            results.append(result)
-            action_counts[decision.action.value] += 1
+        for result in results:
+            cluster_nodes = [eligible_nodes[idx] for idx in result.cluster_indices]
+            action_counts[result.action.value] += 1
             log_event(
                 logger,
                 "sleep_consolidation.cluster_decision",
-                cluster_indices=list(indices),
+                cluster_indices=list(result.cluster_indices),
                 cluster_node_ids=[node.id for node in cluster_nodes],
-                action=decision.action.value,
-                summary=decision.summary,
-                target_scaffold_id=decision.target_scaffold_id,
+                action=result.action.value,
+                summary=result.summary,
+                target_scaffold_id=result.target_scaffold_id,
             )
 
-            if decision.action == SleepConsolidationAction.SPAWN:
-                if decision.summary is None:
+            if result.action == SleepConsolidationAction.SPAWN:
+                if result.summary is None:
                     raise ValueError("Spawn decisions must include a scaffold summary")
                 scaffold_node = self._spawn_strategic_scaffold(
                     cluster_nodes=cluster_nodes,
@@ -871,7 +863,7 @@ class MemoryService:
                         eligible_representations[node.id].embedding
                         for node in cluster_nodes
                     ],
-                    scaffold_content=decision.summary,
+                    scaffold_content=result.summary,
                 )
                 for node in cluster_nodes:
                     self.graph.reparent(node, scaffold_node.id)
@@ -882,13 +874,13 @@ class MemoryService:
                     "sleep_consolidation.spawn",
                     scaffold_id=scaffold_node.id,
                     cluster_node_ids=[node.id for node in cluster_nodes],
-                    summary=decision.summary,
+                    summary=result.summary,
                 )
-            elif decision.action == SleepConsolidationAction.ABSORB:
-                if decision.target_scaffold_id is None:
+            elif result.action == SleepConsolidationAction.ABSORB:
+                if result.target_scaffold_id is None:
                     raise ValueError("Absorb decisions must include a target scaffold id")
                 target_scaffold = self._resolve_strategic_scaffold(
-                    decision.target_scaffold_id
+                    result.target_scaffold_id
                 )
                 self._absorb_scaffold_q_omega(target_scaffold, cluster_nodes)
                 target_scaffold.refresh_task_type_dominant()
@@ -904,7 +896,7 @@ class MemoryService:
                     cluster_node_ids=[node.id for node in cluster_nodes],
                     q_omega=dict(target_scaffold.Q_omega),
                 )
-            elif decision.action == SleepConsolidationAction.DISCARD:
+            elif result.action == SleepConsolidationAction.DISCARD:
                 for node in cluster_nodes:
                     node.consolidated = True
                     self._upsert_graph_state(node)
@@ -915,7 +907,7 @@ class MemoryService:
                 )
             else:
                 raise ValueError(
-                    f"Unsupported sleep-consolidation action: {decision.action!r}"
+                    f"Unsupported sleep-consolidation action: {result.action!r}"
                 )
 
         if stats_out is not None:

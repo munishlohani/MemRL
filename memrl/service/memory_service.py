@@ -268,7 +268,7 @@ class MemoryService:
         with self._engine.begin() as conn:
             conn.execute(stmt)
 
-    def _upsert_graph_state(self, node: SkillNode) -> None:
+    def _build_upsert_graph_state_stmt(self, node: SkillNode):
         stmt = sqlite_insert(self.skill_graph_state_table).values(
             node_id=node.id,
             depth=node.depth,
@@ -286,7 +286,7 @@ class MemoryService:
             evidence_ids=self._serialize_json(node.evidence_ids),
             evidence_seen=int(node.evidence_seen),
         )
-        stmt = stmt.on_conflict_do_update(
+        return stmt.on_conflict_do_update(
             index_elements=["node_id"],
             set_={
                 "depth": stmt.excluded.depth,
@@ -305,13 +305,30 @@ class MemoryService:
                 "evidence_seen": stmt.excluded.evidence_seen,
             },
         )
+
+    def _upsert_graph_state(self, node: SkillNode) -> None:
         with self._engine.begin() as conn:
-            conn.execute(stmt)
+            conn.execute(self._build_upsert_graph_state_stmt(node))
 
     def persist_node_state(self, node_or_id: SkillNode | str) -> None:
         """Persist the current in-memory node state back to SQLite."""
         node = node_or_id if isinstance(node_or_id, SkillNode) else self.graph.get(node_or_id)
         self._upsert_graph_state(node)
+
+    def persist_nodes(self, nodes: List[SkillNode]) -> None:
+        """Batch-flush multiple nodes' graph state in a single transaction.
+
+        Implements the §5.3 working-set protocol: step-level mutation
+        happens in memory throughout the episode, and the working set is
+        flushed to SQLite once, rather than one transaction per node per
+        step. A no-op for an empty list (avoids opening an idle transaction).
+        """
+        node_list = list(nodes)
+        if not node_list:
+            return
+        with self._engine.begin() as conn:
+            for node in node_list:
+                conn.execute(self._build_upsert_graph_state_stmt(node))
 
     def _fetch_representation(self, node_id: str) -> SkillRepresentation:
         stmt = select(
@@ -898,15 +915,19 @@ class MemoryService:
                 target_scaffold = self._resolve_strategic_scaffold(
                     decision.target_scaffold_id
                 )
+                self._absorb_scaffold_q_omega(target_scaffold, cluster_nodes)
+                target_scaffold.refresh_task_type_dominant()
                 for node in cluster_nodes:
                     self.graph.reparent(node, target_scaffold.id)
                     node.consolidated = True
                     self._upsert_graph_state(node)
+                self._upsert_graph_state(target_scaffold)
                 log_event(
                     logger,
                     "sleep_consolidation.absorb",
                     target_scaffold_id=target_scaffold.id,
                     cluster_node_ids=[node.id for node in cluster_nodes],
+                    q_omega=dict(target_scaffold.Q_omega),
                 )
             elif decision.action == SleepConsolidationAction.DISCARD:
                 for node in cluster_nodes:
@@ -1047,6 +1068,51 @@ class MemoryService:
                 lambda_shrink=lambda_shrink,
             )
         return q_omega
+
+    def _absorb_scaffold_q_omega(
+        self,
+        target_scaffold: SkillNode,
+        cluster_nodes: List[SkillNode],
+    ) -> None:
+        """Merge an absorbed cluster's evidence into an existing scaffold's Q_omega.
+
+        Without this, `absorb` reparents tactical nodes under the target
+        scaffold but silently discards the cluster's advantage evidence —
+        the scaffold's Q_omega/n_omega stay exactly as they were. This
+        blends the cluster's shrinkage-weighted mean advantage per task
+        type into the scaffold's existing Q_omega, treating the cluster as
+        an additional weighted sample (mirrors the spawn-time
+        initialization in `_spawned_scaffold_q_omega`, but combined with
+        the scaffold's prior evidence rather than initializing from zero).
+        No horizon scaling is applied — both sides are already advantage,
+        not raw return (spec §3.5's advantage-space resolution).
+        """
+        lambda_shrink = float(
+            getattr(self.memory_config, "lambda_shrink", self.graph.lambda_shrink)
+        )
+        cluster_task_types = sorted({task_type for node in cluster_nodes for task_type in node.Q})
+        for task_type in cluster_task_types:
+            samples = [
+                (float(node.Q[task_type]), int(node.n.get(task_type, 0) or 0))
+                for node in cluster_nodes
+                if task_type in node.Q and int(node.n.get(task_type, 0) or 0) > 0
+            ]
+            if not samples:
+                continue
+            cluster_mean = compute_shrinkage_weighted_mean_from_samples(
+                samples, lambda_shrink=lambda_shrink
+            )
+            cluster_n = sum(count for _, count in samples)
+
+            existing_value = float(target_scaffold.Q_omega.get(task_type, 0.0))
+            existing_n = int(target_scaffold.n_omega.get(task_type, 0) or 0)
+
+            merged_value = compute_shrinkage_weighted_mean_from_samples(
+                [(existing_value, existing_n), (cluster_mean, cluster_n)],
+                lambda_shrink=lambda_shrink,
+            )
+            target_scaffold.Q_omega[task_type] = merged_value
+            target_scaffold.n_omega[task_type] = existing_n + cluster_n
 
     @staticmethod
     def _majority_task_type(cluster_nodes: List[SkillNode]) -> str:

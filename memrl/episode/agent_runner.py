@@ -394,10 +394,16 @@ class EpisodeRunner(BaseEpisodeRunner):
                 candidate_buffers=episode_candidate_buffers,
             )
 
+            # Working-set protocol (§5.3): step-level Q-updates mutate nodes
+            # in memory only; touched nodes are collected here and flushed
+            # to SQLite once, after pruning, instead of one transaction per
+            # node per step.
+            dirty_nodes: Dict[str, Any] = {}
             self._update_episode_tactical_q(
                 task_types=task_types,
                 reward_histories=reward_histories,
                 active_tactical_visits=active_tactical_visits,
+                dirty_nodes=dirty_nodes,
             )
 
             self._update_episode_q_omega(
@@ -407,10 +413,12 @@ class EpisodeRunner(BaseEpisodeRunner):
                 done_flags=done_flags,
                 step_infos=episode_infos,
                 active_strategic_node_ids=active_strategic_node_ids,
+                dirty_nodes=dirty_nodes,
             )
 
             formation_summary = self._commit_pending_formations()
             pruning_summary = self._prune_tactical_nodes()
+            self._flush_dirty_nodes(dirty_nodes)
 
             if self.sleep_checkpoint is not None and self.mode == "train":
                 sleep_summary = self.sleep_checkpoint.check_and_trigger()
@@ -768,6 +776,7 @@ class EpisodeRunner(BaseEpisodeRunner):
         task_types: List[str],
         reward_histories: List[List[float]],
         active_tactical_visits: List[List[Optional[str]]],
+        dirty_nodes: Dict[str, Any],
     ) -> None:
         """Monte Carlo return-to-go tactical Q update, committed at episode end (spec §3.2).
 
@@ -834,7 +843,7 @@ class EpisodeRunner(BaseEpisodeRunner):
                     updated_value=updated_value,
                     visit_count=node.n.get(task_type, 0),
                 )
-                self.memory_service.persist_node_state(node)
+                dirty_nodes[node.id] = node
 
                 self._report_metrics(
                     {
@@ -857,6 +866,7 @@ class EpisodeRunner(BaseEpisodeRunner):
         done_flags: List[bool],
         step_infos: List[Dict[str, Any]],
         active_strategic_node_ids: List[Optional[str]],
+        dirty_nodes: Dict[str, Any],
     ) -> None:
         gamma_omega = float(getattr(self.memory_config, "gamma_omega", 0.95))
         alpha_omega = float(getattr(self.memory_config, "alpha_omega", 0.1))
@@ -910,7 +920,7 @@ class EpisodeRunner(BaseEpisodeRunner):
                     visit_count=node.n_omega.get(task_type, 0),
                 )
 
-            self.memory_service.persist_node_state(node)
+            dirty_nodes[node.id] = node
 
             # Feed empirical episode-length statistics for finite-horizon
             # Q^Omega init of future spawned scaffolds (spec §3.5, W3).
@@ -932,6 +942,29 @@ class EpisodeRunner(BaseEpisodeRunner):
                     ),
                 }
             )
+
+    def _flush_dirty_nodes(self, dirty_nodes: Dict[str, Any]) -> None:
+        """Batch-persist the episode's in-memory working set (spec §5.3).
+
+        Called after pruning, so a node removed by decay-based pruning this
+        same episode is dropped from the flush instead of being written
+        back and resurrecting a row that was just deleted.
+        """
+        if not dirty_nodes:
+            return
+        graph = getattr(self.memory_service, "graph", None)
+        if graph is None:
+            return
+        surviving = [
+            node for node_id, node in dirty_nodes.items() if graph.has_node(node_id)
+        ]
+        if not surviving:
+            return
+        if hasattr(self.memory_service, "persist_nodes"):
+            self.memory_service.persist_nodes(surviving)
+        else:
+            for node in surviving:
+                self.memory_service.persist_node_state(node)
 
     def _select_strategic_scaffold(
         self,

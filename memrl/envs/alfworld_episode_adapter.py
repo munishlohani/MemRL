@@ -188,6 +188,9 @@ class AlfWorldEpisodeEnvAdapter(EpisodeEnvAdapter):
     def is_batch(self) -> bool:
         return self._batch_size > 1
 
+    def known_task_types(self) -> List[str]:
+        return list(_ALFWORLD_TASK_PREFIXES)
+
     def _log_reset_output(
         self,
         observations: List[str],

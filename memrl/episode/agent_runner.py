@@ -756,18 +756,21 @@ class EpisodeRunner(BaseEpisodeRunner):
         logger.info("%s metrics: %s", self.metrics_namespace, payload)
 
     def _seed_known_task_types(self) -> None:
-        """Best-effort seed of the 6 canonical ALFWorld task types at zero.
+        """Seed per-task-type metrics at zero for the env adapter's fixed taxonomy.
 
-        Ensures per-task-type dashboards show all 6 rows from the start of
-        an ALFWorld run instead of only whatever types the early (possibly
-        small) batches happen to sample. Silently no-ops for other
-        benchmarks/adapters.
+        Ensures per-task-type dashboards show every known type from the
+        start of a run instead of only whatever types the early (possibly
+        small) batches happen to sample. Delegates to
+        `env_adapter.known_task_types()` so this stays benchmark-neutral --
+        adapters without a fixed taxonomy (the base default) contribute
+        nothing here.
         """
+        known_task_types = []
         try:
-            from memrl.envs.alfworld_episode_adapter import _ALFWORLD_TASK_PREFIXES
+            known_task_types = self.env_adapter.known_task_types()
         except Exception:
-            return
-        for task_type in _ALFWORLD_TASK_PREFIXES:
+            logger.debug("Failed to read known_task_types from env_adapter", exc_info=True)
+        for task_type in known_task_types:
             self._task_type_total_counts.setdefault(task_type, 0)
             self._task_type_success_counts.setdefault(task_type, 0)
             self._task_type_length_success.setdefault(task_type, [])

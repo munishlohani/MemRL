@@ -57,6 +57,17 @@ class EpisodeEnvAdapter(ABC):
         """Return whether the adapter is managing multiple parallel episodes."""
         return False
 
+    def known_task_types(self) -> List[str]:
+        """Return the benchmark's fixed task-type taxonomy, if it has one.
+
+        Used by the runner to pre-seed per-task-type metrics (e.g. success
+        rate) at zero so dashboards show every type from the start of a run
+        instead of only whatever types early batches happen to sample.
+        Empty by default -- benchmarks without a fixed taxonomy (or that
+        derive task types dynamically) simply get no pre-seeding.
+        """
+        return []
+
 
 __all__ = [
     "EpisodeEnvAdapter",

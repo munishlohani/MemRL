@@ -128,22 +128,6 @@ class MemoryConfig(BaseModel):
         default=0.95,
         description="Strategic option-value discount factor.",
     )
-    q_omega_init_horizon: str = Field(
-        default="infinite",
-        description=(
-            "Q^Omega initialization horizon for spawned scaffolds. "
-            "'infinite' (default) uses the 1/(1-gamma_omega) upper bound; "
-            "'empirical' uses the finite-horizon geometric sum "
-            "(1 - gamma_omega^T)/(1 - gamma_omega) with T = tracked mean "
-            "episode length for the task type, falling back to infinite when "
-            "no episode-length statistics are available yet."
-        ),
-    )
-    q_omega_init_min_horizon: int = Field(
-        default=1,
-        ge=1,
-        description="Floor on the empirical horizon T used for finite-horizon Q^Omega init.",
-    )
     strategic_discount_mode: str = Field(
         default="separate",
         description=(

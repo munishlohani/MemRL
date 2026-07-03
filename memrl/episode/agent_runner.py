@@ -424,7 +424,6 @@ class EpisodeRunner(BaseEpisodeRunner):
             self._update_episode_q_omega(
                 task_types=task_types,
                 reward_histories=reward_histories,
-                step_counts=step_counts,
                 step_infos=episode_infos,
                 active_strategic_node_ids=active_strategic_node_ids,
                 dirty_nodes=dirty_nodes,
@@ -1114,7 +1113,6 @@ class EpisodeRunner(BaseEpisodeRunner):
         *,
         task_types: List[str],
         reward_histories: List[List[float]],
-        step_counts: List[int],
         step_infos: List[Dict[str, Any]],
         active_strategic_node_ids: List[Optional[str]],
         dirty_nodes: Dict[str, Any],
@@ -1172,17 +1170,6 @@ class EpisodeRunner(BaseEpisodeRunner):
                 )
 
             dirty_nodes[node.id] = node
-
-            # Feed empirical episode-length statistics for finite-horizon
-            # Q^Omega init of future spawned scaffolds (spec §3.5, W3).
-            if hasattr(self.memory_service, "record_episode_length"):
-                try:
-                    self.memory_service.record_episode_length(
-                        task_types[slot_idx],
-                        int(step_counts[slot_idx] if slot_idx < len(step_counts) else len(rewards)),
-                    )
-                except Exception:
-                    logger.debug("Failed to record episode length", exc_info=True)
 
             self._report_metrics(
                 {

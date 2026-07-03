@@ -27,8 +27,9 @@ memory:
   max_keywords: 8
   confidence_threshold: 0.0
   memory_confidence: 100.0
-  add_similarity_threshold: 0.90 
+  add_similarity_threshold: 0.90
   n_sleep: 10
+  lambda_base: 1e-3  # Base decay rate for tactical nodes (spec sweep range [1e-4, 1e-2] log-scale).
   # MemOS configuration
   mos_config_path: "configs/mos_config_final.json"
   user_id: "memrl_user"

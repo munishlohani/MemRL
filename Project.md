@@ -317,9 +317,11 @@ Until the first sleep consolidation event fires, $d=1$ is empty or manually seed
 -- Write-once at creation. content and embedding never diverge.
 CREATE TABLE skill_representation (
     node_id     TEXT PRIMARY KEY,
-    content     TEXT NOT NULL,      -- LLM-generated summary. NOT raw experience trace.
+    content     TEXT NOT NULL,      -- LLM-formatted memory text. NOT the raw EpisodicMemoryBank record.
                                     -- Kept concise for context-window efficiency at retrieval.
-                                    -- Tactical: LLM-distilled procedural summary of the experience.
+                                    -- Tactical: LLM-formatted episodic step trace (goal + literal
+                                    -- ordered observation->action steps + outcome) -- not compressed
+                                    -- into an abstracted procedure/rule.
                                     -- Strategic: LLM-synthesized abstraction from cluster summaries.
     embedding   BLOB NOT NULL       -- Vector of content summary. numpy.ndarray.tobytes();
                                     -- np.frombuffer() to deserialize.
@@ -351,7 +353,7 @@ CREATE INDEX idx_consolidated ON skill_graph_state(consolidated);  -- for sleep 
 
 **Working-set protocol:** load relevant `SkillNode` objects into in-memory working set at episode start. All step-level mutation happens in-memory. Flush to `skill_graph_state` in one batch write at episode end. SQLite is the durable store; the working set is scratch space for one episode.
 
-**Content generation:** at tactical node creation, the LLM is called once to produce a concise procedural summary of the experience — not the raw trace. The raw trace is stored in `EpisodicMemoryBank` via `evidence_ids` and is available for inspection but never surfaced directly at retrieval. This keeps retrieved content short enough to fit within the agent's context window when multiple nodes are retrieved per step.
+**Content generation:** at tactical node creation, the LLM is called once to reformat the admitted step's experience into an episodic memory: a goal line, the literal ordered sequence of (observation, action) steps taken, and an outcome line — not compressed into an abstracted procedure or reusable rule, and not the raw `EpisodicMemoryBank` record either (the LLM still cleans up/formats the trace for storage). The raw trace itself is stored in `EpisodicMemoryBank` via `evidence_ids` and is available for inspection but never surfaced directly at retrieval. This keeps retrieved content short enough to fit within the agent's context window when multiple nodes are retrieved per step.
 
 **Embeddings computed once at creation**, over the LLM-generated summary, never recomputed on read. Query embedding $e_q$ is the only embedding computed at inference time.
 
@@ -471,7 +473,7 @@ class SkillNode:
 | `evidence_ids` | Reservoir-sampled at cap $R$. Implement `add_evidence(eid)` with reservoir sampling. |
 | `total_accessed` | `@property` over `n`. Never store separately — it will diverge. |
 
-**`content` and `embedding`** live in `skill_representation`, not on `SkillNode`. For tactical nodes: LLM-generated concise procedural summary + embedding of that summary. Raw experience trace is stored separately in `EpisodicMemoryBank` via `evidence_ids` — never surfaced directly at retrieval. For strategic nodes: LLM-synthesized abstraction from cluster summaries + embedding of that abstraction. Cluster centroid embedding is used as the initial embedding; can be replaced with a fresh embedding of the synthesized content — pick one, document it, do not leave ambiguous.
+**`content` and `embedding`** live in `skill_representation`, not on `SkillNode`. For tactical nodes: LLM-formatted episodic step trace (goal + literal ordered observation→action steps + outcome, not an abstracted procedure/rule) + embedding of that trace. Raw experience trace is stored separately in `EpisodicMemoryBank` via `evidence_ids` — never surfaced directly at retrieval. For strategic nodes: LLM-synthesized abstraction from cluster summaries + embedding of that abstraction. Cluster centroid embedding is used as the initial embedding; can be replaced with a fresh embedding of the synthesized content — pick one, document it, do not leave ambiguous.
 
 ---
 
@@ -808,7 +810,7 @@ for each episode:
 | Item | Status | Notes |
 |---|---|---|
 | Utility representation | **Confirmed** | Per-task-type mean **advantage** (return-to-go − baseline) for both tiers; decay salience uses $\max(\bar{Q}_{i,w},0)$; selection ranks by advantage |
-| Content representation | **Confirmed** | LLM-generated concise summary; raw trace stored in `EpisodicMemoryBank` via `evidence_ids` |
+| Content representation | **Confirmed** | Tactical: LLM-formatted episodic step trace (goal + literal steps + outcome), not an abstracted procedure/rule. Strategic: LLM-synthesized abstraction from cluster summaries. Raw trace stored in `EpisodicMemoryBank` via `evidence_ids` |
 | Clustering method (sleep consolidation) | **Confirmed** | K-means over node embeddings; $k$ selection open — sweep or elbow heuristic |
 | Tactical retrieval technique | **Confirmed** | Within-cluster advantage-ranking under active scaffold $\omega$; bootstrap fallback uses decay-weighted cosine similarity over flat tactical layer |
 | Embedding strategy | **Open** | Frozen LLM encoder vs. fine-tuned |

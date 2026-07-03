@@ -75,71 +75,63 @@ class TacticalFormationDecision:
 
 
 @dataclass
-class TacticalSummaryDraft:
-    """Structured tactical summary used for storage and embedding."""
+class TacticalEpisodicStep:
+    """One literal (observation, action) pair from the source trajectory."""
 
-    title: str
+    observation: str
+    action: str
+
+
+@dataclass
+class TacticalSummaryDraft:
+    """Episodic tactical memory: goal + literal step trace + outcome.
+
+    Unlike an abstracted skill summary, this preserves the actual sequence
+    of steps taken rather than compressing them into a generalized rule.
+    """
+
     goal: str
-    setup: str
-    procedure: List[str] = field(default_factory=list)
+    steps: List[TacticalEpisodicStep] = field(default_factory=list)
     outcome: str = ""
-    reusable_rule: str = ""
-    failure_modes: List[str] = field(default_factory=list)
 
     def to_text(self) -> str:
-        """Render the draft into a canonical summary string."""
+        """Render the draft into a canonical episodic memory string."""
         lines: List[str] = []
-        if self.title.strip():
-            lines.append(f"TITLE: {self.title.strip()}")
         if self.goal.strip():
             lines.append(f"GOAL: {self.goal.strip()}")
-        if self.setup.strip():
-            lines.append(f"SETUP: {self.setup.strip()}")
-        if self.procedure:
-            lines.append("PROCEDURE:")
-            for idx, step in enumerate(self.procedure, 1):
-                step_text = str(step).strip()
-                if step_text:
-                    lines.append(f"{idx}. {step_text}")
+        if self.steps:
+            lines.append("STEPS:")
+            for idx, step in enumerate(self.steps, 1):
+                observation = step.observation.strip()
+                action = step.action.strip()
+                if observation or action:
+                    lines.append(f"{idx}. obs: {observation} -> action: {action}")
         if self.outcome.strip():
             lines.append(f"OUTCOME: {self.outcome.strip()}")
-        if self.reusable_rule.strip():
-            lines.append(f"REUSABLE RULE: {self.reusable_rule.strip()}")
-        if self.failure_modes:
-            lines.append("FAILURE MODES:")
-            for idx, item in enumerate(self.failure_modes, 1):
-                item_text = str(item).strip()
-                if item_text:
-                    lines.append(f"{idx}. {item_text}")
         return "\n".join(lines).strip()
 
 
-TACTICAL_SUMMARY_PROMPT = """You are converting one successful positive-TD experience into a reusable tactical memory summary.
+TACTICAL_SUMMARY_PROMPT = """You are converting one successful positive-TD experience into an episodic tactical memory.
 
-The summary will be embedded and retrieved later, so make it semantically informative rather than a noisy trajectory dump.
-Only describe the successful path that worked; failed attempts are filtered upstream and will not be stored.
+The memory will be embedded and retrieved later. Preserve the literal step-by-step trace of what happened -- do not compress, generalize, or abstract it into a rule or lesson. Only describe the successful path that worked; failed attempts are filtered upstream and will not be stored.
 
 Return a single JSON object and nothing else.
 
 Schema:
 {{
-  "title": string,
   "goal": string,
-  "setup": string,
-  "procedure": [string, ...],
-  "outcome": string,
-  "reusable_rule": string,
-  "failure_modes": [string, ...]
+  "steps": [
+    {{"observation": string, "action": string}},
+    ...
+  ],
+  "outcome": string
 }}
 
 Rules:
-- Write for reuse, not narration.
-- Compress the experience into a clear procedural pattern.
-- Do not copy the raw step-by-step trace.
-- Keep the summary short, specific, and action-oriented.
-- procedure should contain 2 to 6 high-signal steps.
-- failure_modes should list when the pattern should not be used or what can go wrong.
-- Omit incidental observations unless they matter for reuse.
+- goal: one sentence describing what this episode accomplished.
+- steps: the actual ordered sequence of (observation, action) pairs taken, drawn directly from the source experience below. Do not merge, skip, or paraphrase steps into a shorter abstracted procedure -- one entry per step actually taken.
+- outcome: one short sentence stating the result (e.g. success/failure and reward).
+- Do not include a reusable rule, lesson, or generalization -- this memory is episodic, not a distilled skill.
 - Do not include markdown, explanations, or extra keys.
 
 Source experience:
@@ -366,24 +358,16 @@ class TacticalSummaryWriter:
     ) -> TacticalSummaryDraft:
         payload = self._load_json_object(response)
 
-        title = self._coerce_optional_str(payload.get("title")) or candidate.task_description
         goal = self._coerce_optional_str(payload.get("goal")) or candidate.task_description
-        setup = self._coerce_optional_str(payload.get("setup")) or candidate.observation
-        procedure = self._coerce_str_list(payload.get("procedure"))
-        if not procedure:
-            procedure = [candidate.fallback_summary()]
+        steps = self._coerce_steps(payload.get("steps"))
+        if not steps:
+            steps = [TacticalEpisodicStep(observation=candidate.observation, action=candidate.action)]
         outcome = self._coerce_optional_str(payload.get("outcome")) or f"Reward={candidate.reward:.3f}"
-        reusable_rule = self._coerce_optional_str(payload.get("reusable_rule")) or candidate.fallback_summary()
-        failure_modes = self._coerce_str_list(payload.get("failure_modes"))
 
         return TacticalSummaryDraft(
-            title=title,
             goal=goal,
-            setup=setup,
-            procedure=procedure,
+            steps=steps,
             outcome=outcome,
-            reusable_rule=reusable_rule,
-            failure_modes=failure_modes,
         )
 
     @staticmethod
@@ -415,21 +399,24 @@ class TacticalSummaryWriter:
         return stripped or None
 
     @staticmethod
-    def _coerce_str_list(value: object) -> List[str]:
+    def _coerce_steps(value: object) -> List[TacticalEpisodicStep]:
         if not isinstance(value, list):
             return []
-        items: List[str] = []
+        steps: List[TacticalEpisodicStep] = []
         for item in value:
-            if isinstance(item, str):
-                stripped = item.strip()
-                if stripped:
-                    items.append(stripped)
-        return items
+            if not isinstance(item, dict):
+                continue
+            observation = str(item.get("observation") or "").strip()
+            action = str(item.get("action") or "").strip()
+            if observation or action:
+                steps.append(TacticalEpisodicStep(observation=observation, action=action))
+        return steps
 
 
 __all__ = [
     "TACTICAL_FORMATION_PROMPT",
     "TACTICAL_SUMMARY_PROMPT",
+    "TacticalEpisodicStep",
     "TacticalFormationCandidate",
     "TacticalFormationDecision",
     "TacticalFormationJudge",

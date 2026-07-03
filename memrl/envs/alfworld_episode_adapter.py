@@ -47,17 +47,23 @@ def _extract_gamefile(info: Dict[str, Any]) -> Optional[str]:
 def _task_type_from_gamefile(gamefile: Optional[str]) -> Optional[str]:
     """Derive an ALFWorld task type from a gamefile path.
 
-    ALFWorld gamefiles live in directories whose name starts with one of the
-    six canonical task prefixes (e.g. ``pick_and_place_simple-...``). We map
-    any matching prefix to the canonical task type; this is the per-task-type
-    signal the Phase-1 Q-value machinery keys on (spec §3.1).
+    ALFWorld gamefiles live two directories below the task-type directory
+    (e.g. ``.../pick_and_place_simple-.../trial_T2019.../game.tw-pddl``,
+    with the trial subdirectory in between), whose name starts with one of
+    the six canonical task prefixes. Walk up the ancestor directories
+    (rather than assuming a fixed depth) and return the first one that
+    matches a prefix; this is the per-task-type signal the Phase-1 Q-value
+    machinery keys on (spec §3.1).
     """
     if not gamefile:
         return None
-    directory = os.path.basename(os.path.dirname(os.path.normpath(gamefile)))
-    for prefix in _ALFWORLD_TASK_PREFIXES:
-        if directory.startswith(prefix):
-            return prefix
+    directory = os.path.dirname(os.path.normpath(gamefile))
+    while directory and directory != os.path.dirname(directory):
+        name = os.path.basename(directory)
+        for prefix in _ALFWORLD_TASK_PREFIXES:
+            if name.startswith(prefix):
+                return prefix
+        directory = os.path.dirname(directory)
     return None
 
 

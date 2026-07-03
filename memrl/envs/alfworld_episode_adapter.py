@@ -30,6 +30,20 @@ _ALFWORLD_TASK_PREFIXES = (
 )
 
 
+def _extract_gamefile(info: Dict[str, Any]) -> Optional[str]:
+    """Read the gamefile path out of an ALFWorld info dict.
+
+    The real ALFWorld/TextWorld info dict keys this "extra.gamefile" (a
+    literal dotted key, not a nested dict) -- "gamefile" is checked as a
+    fallback for callers/tests that pass a flat dict directly.
+    """
+    for key in ("extra.gamefile", "gamefile"):
+        value = info.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
 def _task_type_from_gamefile(gamefile: Optional[str]) -> Optional[str]:
     """Derive an ALFWorld task type from a gamefile path.
 
@@ -114,7 +128,9 @@ class AlfWorldEpisodeEnvAdapter(EpisodeEnvAdapter):
         for entry in raw:
             observations.append(str(entry.get("obs", "")))
             info = dict(entry.get("info") or {})
-            gamefile = info.get("gamefile")
+            gamefile = _extract_gamefile(info)
+            if gamefile is not None:
+                info.setdefault("gamefile", gamefile)
             task_type = _task_type_from_gamefile(gamefile)
             if task_type is not None:
                 info.setdefault("task_type", task_type)
@@ -175,8 +191,8 @@ class AlfWorldEpisodeEnvAdapter(EpisodeEnvAdapter):
     def episode_id(self, index: int = 0) -> Optional[str]:
         if index >= len(self._last_reset_infos):
             return None
-        gamefile = self._last_reset_infos[index].get("gamefile")
-        if isinstance(gamefile, str) and gamefile:
+        gamefile = _extract_gamefile(self._last_reset_infos[index])
+        if gamefile:
             return os.path.normpath(gamefile)
         return None
 
@@ -204,7 +220,7 @@ class AlfWorldEpisodeEnvAdapter(EpisodeEnvAdapter):
                 "ALFWorld reset[%s]: task_type=%s gamefile=%s obs=%s",
                 idx,
                 info.get("task_type"),
-                info.get("gamefile"),
+                _extract_gamefile(info),
                 _shorten_text(observation),
             )
 

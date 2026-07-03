@@ -494,6 +494,19 @@ class EpisodeRunner(BaseEpisodeRunner):
             with open(summary_path, "w", encoding="utf-8") as f:
                 json.dump(summary, f, ensure_ascii=False, indent=2, default=str)
 
+            # Append one JSON line per individual episode to a single,
+            # run-lifetime file (never overwritten, never split into
+            # per-episode directories) so it's trivial to check how many
+            # episodes actually ran: `wc -l episodes.jsonl`.
+            episodes_jsonl_path = self.local_cache_dir / "episodes.jsonl"
+            with open(episodes_jsonl_path, "a", encoding="utf-8") as f:
+                for episode in episode_summaries:
+                    record = dict(episode)
+                    record["run_id"] = self.run_id
+                    record["experiment_name"] = self.experiment_name
+                    record["global_step"] = self.current_step
+                    f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+
             return summary
         finally:
             try:

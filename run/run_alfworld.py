@@ -172,23 +172,30 @@ def main():
             logger.info("EpisodeRunner + AlfWorldEpisodeEnvAdapter initialized; exiting due to --init-only.")
             return
 
-        num_episodes = 1 if args.smoke else (args.episodes or cfg.experiment.num_sections)
-        logger.info("Running %s episode(s) on ALFWorld via EpisodeRunner.", num_episodes)
-        for episode_idx in range(int(num_episodes)):
-            summary = runner.run()
-            logger.info(
-                "Episode %s done: mean_reward=%.4f success_rate=%.4f steps=%.1f "
-                "formation=%s pruning=%s sleep=%s",
-                episode_idx + 1,
-                float(summary.get("mean_reward", 0.0)),
-                float(summary.get("success_rate", 0.0)),
-                float(summary.get("mean_steps", 0.0)),
-                summary.get("formation"),
-                summary.get("pruning"),
-                summary.get("sleep_consolidation"),
-            )
-            if args.smoke:
-                break
+        try:
+            num_episodes = 1 if args.smoke else (args.episodes or cfg.experiment.num_sections)
+            logger.info("Running %s episode(s) on ALFWorld via EpisodeRunner.", num_episodes)
+            for episode_idx in range(int(num_episodes)):
+                summary = runner.run()
+                logger.info(
+                    "Episode %s done: mean_reward=%.4f success_rate=%.4f steps=%.1f "
+                    "formation=%s pruning=%s sleep=%s",
+                    episode_idx + 1,
+                    float(summary.get("mean_reward", 0.0)),
+                    float(summary.get("success_rate", 0.0)),
+                    float(summary.get("mean_steps", 0.0)),
+                    summary.get("formation"),
+                    summary.get("pruning"),
+                    summary.get("sleep_consolidation"),
+                )
+                if args.smoke:
+                    break
+        finally:
+            # Close once after the whole outer loop, not per run() call --
+            # closing the env adapter between sections forces ALFWorld to
+            # rebuild from scratch on the next reset(), losing its shuffled
+            # game-cycling position and replaying the same game every section.
+            runner.close()
 
     except Exception as e:
         logger.error(f"An unhandled error occurred during the experiment: {e}", exc_info=True)

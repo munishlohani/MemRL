@@ -509,12 +509,22 @@ class EpisodeRunner(BaseEpisodeRunner):
 
             return summary
         finally:
-            try:
-                self.env_adapter.close()
-            except Exception:
-                logger.exception("Failed to close episode environment adapter")
-            finally:
-                self._close_tensorboard_writer()
+            self._close_tensorboard_writer()
+
+    def close(self) -> None:
+        """Release the environment adapter's resources.
+
+        Callers that invoke `run()` repeatedly on the same instance (e.g. an
+        outer num_sections loop) must call this once after the whole loop
+        finishes, not after each `run()` -- closing the env adapter mid-loop
+        forces it to lazily rebuild on the next reset(), which for ALFWorld
+        means a brand-new env reseeded from scratch (losing the shuffled
+        game-cycling position and effectively replaying the same game).
+        """
+        try:
+            self.env_adapter.close()
+        except Exception:
+            logger.exception("Failed to close episode environment adapter")
 
     def _act_with_retry(
         self,

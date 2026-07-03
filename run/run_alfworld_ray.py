@@ -321,14 +321,21 @@ def _run_trial(
         )
 
         episode_summaries: List[Dict[str, Any]] = []
-        for episode_idx in range(num_episodes):
-            logger.info(
-                "Ray trial %s running section %s/%s",
-                trial_name,
-                episode_idx + 1,
-                num_episodes,
-            )
-            episode_summaries.append(runner.run())
+        try:
+            for episode_idx in range(num_episodes):
+                logger.info(
+                    "Ray trial %s running section %s/%s",
+                    trial_name,
+                    episode_idx + 1,
+                    num_episodes,
+                )
+                episode_summaries.append(runner.run())
+        finally:
+            # Close once after the whole outer loop, not per run() call --
+            # closing the env adapter between sections forces ALFWorld to
+            # rebuild from scratch on the next reset(), losing its shuffled
+            # game-cycling position and replaying the same game every section.
+            runner.close()
 
         mean_reward = (
             sum(float(item.get("mean_reward", 0.0)) for item in episode_summaries)

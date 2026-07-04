@@ -110,10 +110,14 @@ def main():
             token_log_dir=str(log_dir),
         )
 
+        # Fresh skill DB per run -- cfg.memory.skill_db_path is a single
+        # fixed path, so reusing it verbatim would silently carry over
+        # (and keep growing) the entire memory graph from every prior run.
+        db_path = run_dir / "skill_memory.sqlite"
         memory_service = MemoryService(
             memory_config=cfg.memory,
             embedding_provider=embedding_provider,
-            db_path=cfg.memory.skill_db_path,
+            db_path=str(db_path),
         )
 
         import json

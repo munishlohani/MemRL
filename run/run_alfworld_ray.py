@@ -8,6 +8,7 @@ import tempfile
 import time
 from pathlib import Path
 from typing import Any, Dict, List
+from uuid import uuid4
 
 import yaml
 
@@ -143,10 +144,14 @@ def _build_runner(cfg: MempConfig, *, config_path: Path, run_root: Path) -> Epis
         max_text_len=getattr(cfg.embedding, "max_text_len", 4096),
         token_log_dir=str(log_dir),
     )
+    # Fresh skill DB per run -- cfg.memory.skill_db_path is a single fixed
+    # path, so reusing it verbatim would silently carry over (and keep
+    # growing) the entire memory graph from every prior trial run.
+    db_path = run_root / "skill_memory.sqlite"
     memory_service = MemoryService(
         memory_config=cfg.memory,
         embedding_provider=embedding_provider,
-        db_path=cfg.memory.skill_db_path,
+        db_path=str(db_path),
     )
 
     import json
@@ -307,17 +312,24 @@ def _run_trial(
         )
         cfg = MempConfig.from_yaml(str(resolved_config_path))
         setup_logging(project_root, f"alfworld_{trial_name}")
-        run_root = Path(cfg.experiment.output_dir) / "alfworld" / trial_name
+        # run_root is per-invocation (not just per-trial-name): re-running the
+        # same trial config must not reuse the previous run's tensorboard
+        # events, episodes.jsonl/metrics.jsonl, or skill DB. time.strftime is
+        # only second-resolution, so parallel Ray trials (or two invocations
+        # in the same second) need the random suffix to actually be unique.
+        run_id = f"{time.strftime('%Y%m%d-%H%M%S')}-{uuid4().hex[:8]}"
+        run_root = Path(cfg.experiment.output_dir) / "alfworld" / f"{trial_name}_{run_id}"
         run_root.mkdir(parents=True, exist_ok=True)
         runner = _build_runner(cfg, config_path=resolved_config_path, run_root=run_root)
         num_episodes = max(1, int(cfg.experiment.num_sections))
         logger = logging.getLogger(__name__)
         logger.info(
-            "Starting Ray trial %s for %s episode section(s) with batch_size=%s max_steps=%s",
+            "Starting Ray trial %s for %s episode section(s) with batch_size=%s max_steps=%s, output=%s",
             trial_name,
             num_episodes,
             cfg.experiment.batch_size,
             cfg.experiment.max_steps,
+            run_root,
         )
 
         episode_summaries: List[Dict[str, Any]] = []

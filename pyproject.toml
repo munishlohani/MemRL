@@ -40,6 +40,7 @@ dependencies = [
     # Benchmark-specific dependencies are installed via `requirements.txt`
     # (see `requirements/benchmarks.txt`) to keep the core package lightweight.
     "pytest>=9.1.0",
+    "alfworld>=0.4.2",
 ]
 
 [project.optional-dependencies]

@@ -110,10 +110,31 @@ class SleepConsolidationService:
         results: List[SleepConsolidationResult] = []
         for indices in clusters:
             texts = [cluster_texts[idx] for idx in indices]
-            decision, prompt, raw_response = self.decide_cluster(
-                texts,
-                existing_scaffolds=existing_scaffolds,
-            )
+            try:
+                decision, prompt, raw_response = self.decide_cluster(
+                    texts,
+                    existing_scaffolds=existing_scaffolds,
+                )
+            except Exception as exc:
+                # A malformed/hallucinated LLM decision for one cluster (bad
+                # JSON, unrecognized action, an absorb target that doesn't
+                # match any existing scaffold, a provider error, ...) must
+                # not take down the whole sleep-consolidation event -- and by
+                # extension the whole training run. Skip this cluster; its
+                # nodes stay unconsolidated and are eligible again next time
+                # sleep consolidation fires.
+                log_event(
+                    logger,
+                    "sleep_consolidation.cluster_decision_failed",
+                    cluster_indices=list(indices),
+                    error=str(exc),
+                )
+                logger.warning(
+                    "Sleep consolidation cluster decision failed; skipping cluster "
+                    "(nodes remain unconsolidated): %s",
+                    exc,
+                )
+                continue
             results.append(
                 SleepConsolidationResult(
                     cluster_indices=list(indices),

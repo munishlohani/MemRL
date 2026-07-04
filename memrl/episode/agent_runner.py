@@ -751,6 +751,7 @@ class EpisodeRunner(BaseEpisodeRunner):
     def _report_metrics(self, metrics: Dict[str, Any]) -> None:
         payload = dict(metrics)
         self.metrics_history.append(payload)
+        self._append_metrics_jsonl(payload)
         self._report_tensorboard(payload)
 
         try:
@@ -772,6 +773,23 @@ class EpisodeRunner(BaseEpisodeRunner):
             pass
 
         logger.info("%s metrics: %s", self.metrics_namespace, payload)
+
+    def _append_metrics_jsonl(self, payload: Dict[str, Any]) -> None:
+        """Append one JSON line per _report_metrics call to a single,
+        run-lifetime file -- metrics_history is in-memory only (lost on
+        process exit) and the TensorBoard event file isn't easy to load
+        into pandas/duckdb for ad hoc analysis, so this is the structured,
+        durable record. Mirrors the episodes.jsonl pattern.
+        """
+        record = dict(payload)
+        record["global_step"] = self.current_step
+        record["run_id"] = self.run_id
+        try:
+            metrics_jsonl_path = self.local_cache_dir / "metrics.jsonl"
+            with open(metrics_jsonl_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+        except Exception:
+            logger.debug("Failed to append metrics.jsonl", exc_info=True)
 
     def _seed_known_task_types(self) -> None:
         """Seed per-task-type metrics at zero for the env adapter's fixed taxonomy.

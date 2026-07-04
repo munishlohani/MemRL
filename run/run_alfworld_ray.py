@@ -86,6 +86,16 @@ def _merge_dicts(base: Dict[str, Any], overlay: Dict[str, Any]) -> Dict[str, Any
     return result
 
 
+def _resolve_num_instances(raw: Any) -> int:
+    """Parse a trial's num_instances, defaulting to 1 (single instance,
+    today's behavior) and floored at 1 -- 0 or negative parallel copies
+    doesn't mean anything."""
+    try:
+        return max(1, int(raw))
+    except (TypeError, ValueError):
+        return 1
+
+
 def _resolve_trials(ray_cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
     trials = ray_cfg.get("trials")
     if isinstance(trials, list) and trials:
@@ -97,6 +107,7 @@ def _resolve_trials(ray_cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
                 {
                     "name": str(trial.get("name") or f"trial-{idx}"),
                     "overrides": dict(trial.get("overrides") or {}),
+                    "num_instances": _resolve_num_instances(trial.get("num_instances", 1)),
                 }
             )
         if normalized:
@@ -106,6 +117,7 @@ def _resolve_trials(ray_cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
         {
             "name": str(ray_cfg.get("name") or "alfworld-ray"),
             "overrides": dict(ray_cfg.get("overrides") or {}),
+            "num_instances": _resolve_num_instances(ray_cfg.get("num_instances", 1)),
         }
     ]
 

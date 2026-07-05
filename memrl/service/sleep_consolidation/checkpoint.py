@@ -105,6 +105,7 @@ class SleepConsolidationCheckpoint:
             "cluster_count": stats.get("cluster_count"),
             "cluster_sizes": stats.get("cluster_sizes"),
             "cluster_davies_bouldin": stats.get("cluster_davies_bouldin"),
+            "cluster_decision_failed_count": stats.get("cluster_decision_failed_count"),
             "action_counts": stats.get("action_counts"),
         }
         logger.info(

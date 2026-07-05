@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from ...providers.base import BaseLLM
 from ..strategies import ClusterStrategy
-from .clustering import ClusteringStrategyBase, get_clustering_strategy
+from .clustering import ClusteringStrategyBase, compute_davies_bouldin_index, get_clustering_strategy
 from .prompts import (
     build_sleep_consolidation_prompt,
     format_cluster_contents,
@@ -101,12 +101,29 @@ class SleepConsolidationService:
         cluster_texts: Sequence[str],
         *,
         existing_scaffolds: Sequence[StrategicScaffoldContext] = (),
+        stats_out: Optional[Dict[str, Any]] = None,
     ) -> List[SleepConsolidationResult]:
-        """Cluster then decide how to consolidate each cluster."""
+        """Cluster then decide how to consolidate each cluster.
+
+        If `stats_out` is provided, it is populated in place with the RAW
+        clustering stats (cluster_count, cluster_sizes, cluster_davies_bouldin)
+        computed right after clustering, before any per-cluster decision can
+        fail and get skipped -- and cluster_decision_failed_count, so "only
+        1 cluster shows up" can be told apart from "clustering only formed 1
+        cluster" vs. "clustering formed more, but decisions for the rest
+        failed and were skipped." The returned list only contains clusters
+        with a successful decision.
+        """
         if len(embeddings) != len(cluster_texts):
             raise ValueError("embeddings and cluster_texts must have the same length")
 
         clusters = self.cluster_embeddings(embeddings)
+        if stats_out is not None:
+            stats_out["cluster_count"] = len(clusters)
+            stats_out["cluster_sizes"] = [len(indices) for indices in clusters]
+            stats_out["cluster_davies_bouldin"] = compute_davies_bouldin_index(embeddings, clusters)
+            stats_out["cluster_decision_failed_count"] = 0
+
         results: List[SleepConsolidationResult] = []
         for indices in clusters:
             texts = [cluster_texts[idx] for idx in indices]
@@ -123,6 +140,10 @@ class SleepConsolidationService:
                 # extension the whole training run. Skip this cluster; its
                 # nodes stay unconsolidated and are eligible again next time
                 # sleep consolidation fires.
+                if stats_out is not None:
+                    stats_out["cluster_decision_failed_count"] = (
+                        stats_out.get("cluster_decision_failed_count", 0) + 1
+                    )
                 log_event(
                     logger,
                     "sleep_consolidation.cluster_decision_failed",

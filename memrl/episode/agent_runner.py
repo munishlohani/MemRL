@@ -1000,8 +1000,15 @@ class EpisodeRunner(BaseEpisodeRunner):
             "sleep/trigger_step": sleep_summary.get("trigger_step"),
             "sleep/unconsolidated_count": sleep_summary.get("unconsolidated_count"),
             "sleep/eligible_count": sleep_summary.get("eligible_count"),
+            # cluster_count is the RAW number of clusters k-means formed;
+            # num_results is how many of those got a successful LLM decision
+            # and were actually acted on. cluster_count > num_results means
+            # some clusters' decisions failed and were silently skipped --
+            # see cluster_decision_failed_count below, not a sign that
+            # clustering itself collapsed to fewer clusters.
             "sleep/cluster_count": sleep_summary.get("cluster_count"),
             "sleep/num_results": sleep_summary.get("num_results"),
+            "sleep/cluster_decision_failed_count": sleep_summary.get("cluster_decision_failed_count"),
         }
         cluster_sizes = sleep_summary.get("cluster_sizes") or []
         if cluster_sizes:

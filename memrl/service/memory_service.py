@@ -49,7 +49,6 @@ from .sleep_consolidation import (
     SleepConsolidationService,
     StrategicScaffoldContext,
 )
-from .sleep_consolidation.clustering import compute_davies_bouldin_index
 from .retrievers import SkillSimilarityRetriever
 from ..utils.event_logging import log_event
 
@@ -737,8 +736,12 @@ class MemoryService:
 
         If `stats_out` is provided, it is populated in place with metrics-worthy
         counts (eligible_count, cluster_count, cluster_sizes, cluster_davies_bouldin,
-        action_counts) for the caller to report -- kept as an optional out-param so
-        the return type/signature stays backward compatible for existing callers.
+        cluster_decision_failed_count, action_counts) for the caller to report --
+        kept as an optional out-param so the return type/signature stays backward
+        compatible for existing callers. cluster_count/cluster_sizes/
+        cluster_davies_bouldin reflect the raw clustering (all clusters formed),
+        not just the ones with a successful LLM decision; action_counts only
+        covers successful decisions.
         """
         resolved_threshold = theta_consolidate
         if resolved_threshold is None:
@@ -789,22 +792,20 @@ class MemoryService:
         # SleepConsolidationService.consolidate() instead of reimplementing
         # the cluster-then-decide loop here. This method only does the
         # graph-mutation phase (spawn/absorb/discard wiring) below.
+        #
+        # stats_out is passed straight into consolidate() so cluster_count/
+        # cluster_sizes/cluster_davies_bouldin reflect the RAW clustering
+        # (computed there before any per-cluster decision can fail and get
+        # skipped) rather than len(results) -- which only counts clusters
+        # whose decision succeeded and would otherwise make "clustering only
+        # formed 1 cluster" indistinguishable from "clustering formed more,
+        # but every other cluster's decision failed and was skipped."
         results: List[SleepConsolidationResult] = consolidation_service.consolidate(
             eligible_embeddings,
             eligible_texts,
             existing_scaffolds=existing_scaffolds,
+            stats_out=stats_out,
         )
-
-        if stats_out is not None:
-            stats_out["cluster_count"] = len(results)
-            stats_out["cluster_sizes"] = [len(result.cluster_indices) for result in results]
-            # Same cluster assignment consolidate() just decided on, checked
-            # before trusting it -- a degenerate clustering (e.g. one
-            # dominant cluster) should be visible even if each decision
-            # looks sane.
-            stats_out["cluster_davies_bouldin"] = compute_davies_bouldin_index(
-                eligible_embeddings, [result.cluster_indices for result in results]
-            )
 
         action_counts: Counter = Counter()
         for result in results:

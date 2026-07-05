@@ -7,7 +7,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List
 from uuid import uuid4
 
 import yaml
@@ -86,16 +86,6 @@ def _merge_dicts(base: Dict[str, Any], overlay: Dict[str, Any]) -> Dict[str, Any
     return result
 
 
-def _resolve_num_instances(raw: Any) -> int:
-    """Parse a trial's num_instances, defaulting to 1 (single instance,
-    today's behavior) and floored at 1 -- 0 or negative parallel copies
-    doesn't mean anything."""
-    try:
-        return max(1, int(raw))
-    except (TypeError, ValueError):
-        return 1
-
-
 def _resolve_trials(ray_cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
     trials = ray_cfg.get("trials")
     if isinstance(trials, list) and trials:
@@ -107,7 +97,6 @@ def _resolve_trials(ray_cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
                 {
                     "name": str(trial.get("name") or f"trial-{idx}"),
                     "overrides": dict(trial.get("overrides") or {}),
-                    "num_instances": _resolve_num_instances(trial.get("num_instances", 1)),
                 }
             )
         if normalized:
@@ -117,35 +106,8 @@ def _resolve_trials(ray_cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
         {
             "name": str(ray_cfg.get("name") or "alfworld-ray"),
             "overrides": dict(ray_cfg.get("overrides") or {}),
-            "num_instances": _resolve_num_instances(ray_cfg.get("num_instances", 1)),
         }
     ]
-
-
-def _build_dispatch_plan(
-    trials: List[Dict[str, Any]],
-) -> List[Tuple[str, Dict[str, Any]]]:
-    """Expand each trial into num_instances (instance_name, overrides) pairs.
-
-    Each instance runs fully independently (own memory graph/skill DB/
-    run_root, see _run_trial's per-invocation run_root) rather than sharing
-    state, so this is just naming + fan-out, not scheduling/coordination.
-    Keeps the base trial name when there's only one instance (today's
-    behavior, and what existing configs/results expect); only appends an
-    instance suffix once there's more than one, since each then needs a
-    distinct identity.
-    """
-    plan: List[Tuple[str, Dict[str, Any]]] = []
-    for trial in trials:
-        num_instances = _resolve_num_instances(trial.get("num_instances", 1))
-        for instance_idx in range(num_instances):
-            instance_name = (
-                str(trial["name"])
-                if num_instances == 1
-                else f"{trial['name']}-inst{instance_idx}"
-            )
-            plan.append((instance_name, trial["overrides"]))
-    return plan
 
 
 def _write_resolved_config(
@@ -314,14 +276,15 @@ def main() -> None:
         resources = {"num_cpus": 1}
 
     remote_worker = ray.remote(**resources)(_run_trial)
-    object_refs = [
-        remote_worker.remote(
-            trial_name=instance_name,
-            base_config_path=str(base_config_path),
-            overrides=overrides,
+    object_refs = []
+    for trial in trials:
+        object_refs.append(
+            remote_worker.remote(
+                trial_name=str(trial["name"]),
+                base_config_path=str(base_config_path),
+                overrides=trial["overrides"],
+            )
         )
-        for instance_name, overrides in _build_dispatch_plan(trials)
-    ]
 
     results = ray.get(object_refs)
     for result in results:

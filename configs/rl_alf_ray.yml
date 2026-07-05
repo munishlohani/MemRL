@@ -16,12 +16,6 @@ ray:
 
 trials:
   - name: alfworld-baseline
-    # Number of fully independent parallel copies of this trial to launch
-    # (each gets its own memory graph/skill DB/run_root -- see
-    # run_alfworld_ray.py's _run_trial). Bump this to actually parallelize;
-    # resources_per_trial above is applied per instance, so make sure your
-    # cluster has num_instances * num_cpus available.
-    num_instances: 1
     overrides:
       experiment:
         experiment_name: alfworld_memrl_ray

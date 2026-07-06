@@ -8,9 +8,9 @@
 
 We propose a memory architecture for AI agents that organizes skills within a two-tier hierarchical graph. The **strategic tier** ($d=1$) holds reasoning scaffolds — abstract frames selected once per episode under an options/semi-MDP formalism, with option-values stored per task type. The **tactical tier** (flat) holds directly executable skills formed from experience and retained via utility-modulated Ebbinghaus decay. Tactical skills are admitted by an advantage pre-filter (Monte Carlo return-to-go vs. a per-task-type baseline) followed by LLM judgment, stored immediately, and pruned by decay. Periodically, a **sleep consolidation** event clusters surviving tactical memories and uses LLM judgment to abstract them into strategic scaffolds — the sole mechanism by which $d=1$ nodes are created. The system is framed as a two-tier extended semi-MDP. Both tactical and strategic Q-values are stored **per task type**. Memory retention follows a biologically-grounded Ebbinghaus decay formula modulated by the **confidence-weighted mean utility** $\bar{Q}_{i,w}$ across task types — a task-agnostic salience denominator consistent with the unified (non-partitioned) graph design.
 
-**Base template:** MemRL. This architecture extends MemRL by: (1) replacing flat memory with a two-tier hierarchical graph whose structure is determined by utility evidence and LLM abstraction rather than recency alone; (2) introducing a gated tactical formation pipeline with LLM judgment; (3) a separate sleep-consolidation pipeline for strategic scaffold formation; (4) options-style credit assignment for strategic actions; and (5) utility-modulated decay salience that governs global graph membership.
+**Base template:** MemRL. This architecture extends MemRL by: (1) replacing MemRL's flat, append-only memory bank with a two-tier hierarchical graph whose structure is determined by utility evidence and LLM abstraction rather than append-order alone; (2) introducing a gated tactical formation pipeline with LLM judgment; (3) a separate sleep-consolidation pipeline for strategic scaffold formation; (4) options-style credit assignment for strategic actions; and (5) utility-modulated decay salience that governs global graph membership.
 
-**Key departure from MemRL:** MemRL delegates all memory quality judgment to the backbone LLM's in-context reasoning at retrieval time. This architecture offloads structural decisions — what to form, what to retain, when to consolidate — to an algorithmic layer (advantage / MC return-to-go, decay, clustering), while trusting the LLM for semantic judgment (formation quality, consolidation content synthesis). The combination reduces the burden on the LLM while preserving its strength in semantic abstraction.
+**Key departure from MemRL.** MemRL is a flat, append-only bank of Intent–Experience–Utility triplets. It *already* selects memories by learned utility — its **Two-Phase Retrieval** recalls candidates by embedding similarity, then re-ranks by a **similarity–utility blend (optimal at λ=0.5)** — and updates utility by a Monte Carlo terminal-reward rule (Eq. 8). Crucially, it never deletes, abstracts, or organizes memory: every experience is appended and retained. So the departure here is **not utility-aware retrieval** — MemRL has that, and its own ablations show it works. The departure is two things MemRL lacks: (1) **hierarchy** — a strategic tier of multi-step scaffolds that condition whole episodes, absent from MemRL's single-shot triplet injection; and (2) **structural curation** — utility-modulated decay (forgetting) and sleep consolidation (abstraction) that actively reorganize the store, where MemRL only appends. Structural decisions (what to form, retain, consolidate) are offloaded to an algorithmic layer; the LLM is used for semantic judgment only.
 
 > **Status:** Phase 1 architecture confirmed. Utility estimator: **Monte Carlo return-to-go** (no bootstrap), committed at episode end. Both tiers store a per-task-type **mean advantage** (return-to-go minus a per-task-type baseline); selection, decay salience, consolidation eligibility, and $Q^\Omega$ init all read advantage. Decay salience is the shrinkage-weighted mean advantage floored at zero. Strategic scaffolds carry an advantage against a strategic baseline (penalized when their episodes underperform). $Q^\Omega$ init scale is resolved by advantage space — horizon inflation retired (§3.5).
 
@@ -52,7 +52,7 @@ Standard agent memory systems conflate several distinct questions:
 - Which stored experience is worth keeping?
 - Which kept experience generalizes to new tasks?
 
-Most prior work (MemGPT, A-MEM, Voyager, SkillLib) optimizes retrieval — choosing what to surface at inference time — but treats memory formation and consolidation as secondary. MemRL, the base template for this work, updates memory utility with a Monte Carlo terminal-reward rule (its Eq. 8, $Q \leftarrow Q + \alpha(r - Q)$ — a one-step-to-terminal collapse of the general TD form) and delegates all memory quality judgment to the backbone LLM. This works for large frontier models with strong meta-cognitive capacity, but conflates formation, retention, and abstraction into a single undifferentiated mechanism.
+Most prior work (MemGPT, A-MEM, Voyager, SkillLib) optimizes retrieval — choosing what to surface at inference time — but treats memory formation and consolidation as secondary. MemRL, the base template for this work, updates memory utility with a Monte Carlo terminal-reward rule (its Eq. 8, $Q \leftarrow Q + \alpha(r - Q)$ — a one-step-to-terminal collapse of the general TD form) and selects memories by a learned similarity–utility blend at retrieval (Two-Phase Retrieval, λ=0.5), *not* by LLM judgment. But its store is flat and append-only: it never selectively forms, forgets, or abstracts, conflating these three questions into a single append-and-retrieve mechanism.
 
 This work separates these three questions:
 
@@ -61,6 +61,10 @@ This work separates these three questions:
 - **Abstraction** is handled by periodic sleep consolidation with LLM synthesis (batch, principled).
 
 The central hypothesis is that the LLM's strength is in semantic judgment and abstraction — not in deciding how often to retrieve, how long to retain, or when to consolidate. Offloading those structural decisions to an algorithmic layer produces a more principled and debuggable memory system.
+
+**Central research question.** *Does narrowing the tactical candidate set and supplying a clear per-task strategy raise an agent's success rate — and does the benefit grow as backbone capacity shrinks?* The two levers are separable and must be ablated separately: (a) **narrowing** — scoping tactical candidates to the children of an active scaffold, reducing the set the LLM chooses among; (b) **strategy conditioning** — the scaffold itself framing the episode's reasoning.
+
+> **Honest positioning against MemRL (do not over-claim the narrowing lever).** MemRL's own retrieval-size ablation already shows that *compact* retrieval $(k_1{=}5,k_2{=}3)$ beats larger $(k_1{=}10,k_2{=}5)$ — i.e., **narrowing-helps is a result MemRL already reports.** The novel lever here is therefore **(b) strategy conditioning via a hierarchical scaffold**, which MemRL has no analogue for; **(a) narrowing** is the *mechanism* through which the scaffold acts, not itself the contribution. The ablation must isolate (b): hierarchical-scoped-narrowing vs. flat-compact-narrowing at matched candidate-set size. If flat-compact matches hierarchical at equal $k$, the hierarchy adds nothing over MemRL's existing finding — that is the null this project must defeat.
 
 **Key design decisions confirmed for Phase 1:**
 
@@ -256,13 +260,15 @@ Admission is gated on **advantage against a per-task-type baseline**, not raw re
 
 $$A_t = G_t - b(t_k) > \theta_{\text{adv}} \;\Rightarrow\; \text{pass step to Stage 2}$$
 
-where $b(t_k)$ is the running mean episode return for task type $t_k$, tracked incrementally (Welford/EMA) — bookkeeping, not a model.
+where $b(t_k)$ is a **windowed** running mean of episode return for task type $t_k$ — an EMA with decay (or last-$K$ window), *not* a lifetime mean. This matters over long runs: the agent improves, so a lifetime baseline drifts upward while stored node advantages were computed against older, lower baselines, pushing mature good skills below the moving yardstick → max decay → wrongful pruning (the standard non-stationary-target pathology; cf. prioritized replay recomputing priorities, Schaul et al. 2016). A windowed baseline keeps node-$Q$ and baseline on the same recent clock. Bookkeeping, not a model.
 
 **What this gate does and does not do.** Under sparse terminal reward, $G_t$ has the *same sign for every step in an episode* — it is a coarse **episode-success** signal, not a per-step skill-quality signal. Subtracting $b(t_k)$ sharpens it to "this trajectory beat the average outcome for this task type," discarding mediocre episodes cheaply before any LLM call. It **cannot** isolate the load-bearing step within a successful trajectory; that intra-trajectory localization is delegated entirely to Stage 2.
 
 **Division of labor (explicit):** Stage 1 is a cheap arithmetic *episode-level* gate (advantage sign). Stage 2 (§4.2) is LLM *intra-trajectory* localization + quality judgment, receiving every above-baseline step of an admitted episode. This is a deliberate reallocation: the RL signal is too coarse under sparse terminal reward to perform step-level credit assignment, so the judger absorbs that burden — at higher token cost, since a successful $T$-step episode yields up to $T$ candidates rather than the one or two a true surprise gate would emit.
 
 **Known limitation (Phase 2):** distinguishing the causally-responsible step from incidental steps in a successful trajectory requires a per-step reward signal — a learned credit model or process reward model (Lightman et al. 2023) — which Phase 1 deliberately omits. See §11. Negative-outcome (avoidance) skill formation remains a Phase 2 item; episodes with $A_t \leq \theta_{\text{adv}}$ contribute no tactical formations.
+
+> **Reviewer-facing risk — corrective-failure memories (must preempt).** This gate admits only *above-baseline* episodes, so it discards below-baseline trajectories entirely. MemRL reports that this is exactly the wrong thing to throw away: its Q-critic correlates with success at Pearson $r{=}0.861$, and its case studies show **high-Q *failure* memories** — near-misses encoding "don't do X, do Y" corrections — driving **100% downstream success**. Hindsight relabeling (HER, Andrychowicz et al. 2017) makes the same point: failed trajectories carry transferable signal. A one-line, cheap mitigation is available now: gate on **$|A_t| > \theta_{\text{adv}}$** (both tails) and let Stage-2 LLM judgment tag a retained node as *corrective/avoidance* — the judger already reads the trace, so the marginal cost is a label, not a new model. If we instead keep the one-sided gate, §11 must cite MemRL's finding and defend the exclusion explicitly rather than leaving it silent.
 
 ### 4.2 Stage 2 — LLM Judgment
 
@@ -677,6 +683,8 @@ If $d=1$ is empty ($\omega = \text{null}$), tactical retrieval falls back to fla
 
 **Cold task type** ($Q^\Omega_{\omega_j}(t_k)$ undefined for all scaffolds): fall back to the scaffold with the highest cross-task shrinkage-weighted mean advantage $\bar{Q}^\Omega_{\omega_j}$ (§3.8).
 
+**Phase 2 change (deferred by design — Phase 1 stays $\arg\max$):** replace the deterministic option-value $\arg\max$ with a **top-$k$ shortlist → LLM chooses** procedure, where the shortlist is ranked by a **similarity–utility blend** in the style of MemRL's Two-Phase Retrieval (their $\lambda{=}0.5$ balance). Phase 1 is intentionally naive here — pure $Q^\Omega$ $\arg\max$, no embedding step, no LLM-in-the-loop selection, no blend. The blend + LLM selection is the primary Phase-2 retrieval upgrade.
+
 ### 9.2 Tactical Retrieval (Every Step, within $\omega$'s cluster)
 
 At every step, tactical candidates are drawn exclusively from the children of $\omega$ — the tactical nodes parented under the active scaffold.
@@ -705,6 +713,8 @@ $$\text{score}(s_i,\ \Delta t) = d_i(\Delta t) \cdot \cos(e_i,\ e_q)$$
 Decay-weighted cosine similarity over all tactical nodes — flat scan used only until first sleep consolidation populates $d=1$.
 
 **Known gap:** if sleep consolidation assigned a skill to the wrong cluster (LLM misjudged absorb/spawn), that skill is unreachable under any $\omega$ that doesn't parent it. No cross-cluster fallback in Phase 1. Mitigation: LLM consolidation quality, decay pruning of misassigned low-utility nodes, and Phase 2 DAG extension allowing multi-parent nodes.
+
+**Phase 2 change (deferred by design — Phase 1 stays $\arg\max$):** tactical selection also becomes **top-$k$ shortlist → LLM chooses**, with the shortlist ranked by a similarity–utility blend (λ≈0.5) rather than pure $Q_i(t_k)$ $\arg\max$. In Phase 1 the stored advantage is the sole ranking signal and the top-scoring child is taken directly.
 
 ---
 
@@ -827,6 +837,7 @@ for each episode:
 | Double Q-learning | **Deferred Phase 2** | Overestimation bias correction |
 | Memory-quality reward bonus | **Deferred Phase 2** | $r_t^{\text{mem}} = Q_i(t_k) - \bar{Q}(t_k)$ |
 | DAG extension | **Deferred Phase 2** | Multi-parent nodes |
+| Strategic scaffold selection | **Deferred Phase 2** | Replace $Q^\Omega$ argmax (§9.1) with embedding similarity top-$k$ over scaffold task descriptions, then LLM chooses among the shortlist |
 
 ---
 
@@ -835,8 +846,9 @@ for each episode:
 | Symbol | Role | Starting value | Status |
 |---|---|---|---|
 | $\theta_{\text{adv}}$ | Advantage pre-filter threshold (Stage 1); admits step to judger if $A_t = G_t - b(t_k) > \theta_{\text{adv}}$ | $0$ | sweep |
-| $b(t_k)$ | Tactical advantage baseline: per-task-type running mean terminal reward $R$ | tracked, not swept | — |
-| $b^\Omega(t_k)$ | Strategic advantage baseline: per-task-type running mean discounted return $G^\Omega$ | tracked, not swept | — |
+| $b(t_k)$ | Tactical advantage baseline: per-task-type **windowed** mean terminal reward $R$ (EMA/last-$K$, not lifetime — §4.1) | tracked, not swept | — |
+| $b^\Omega(t_k)$ | Strategic advantage baseline: per-task-type **windowed** mean discounted return $G^\Omega$ | tracked, not swept | — |
+| $K_b$ | Baseline window length (EMA horizon or last-$K$) — governs baseline non-stationarity | $\sim$100 episodes | sweep |
 | $\lambda$ | Base decay rate (flat tactical layer) | — | sweep |
 | $\lambda_{\text{shrink}}$ | Bayesian shrinkage pseudocount for $\bar{Q}_{i,w}$, $\bar{Q}^\Omega_\omega$, and $Q^\Omega$ init | $10$ | sweep |
 | $\epsilon$ | Salience floor in decay denominator (denominator is $\max(\bar{Q}_{i,w},0)+\epsilon$) | $0.01$ | sweep |
@@ -862,11 +874,11 @@ $\theta_1$, $\theta_2$, $\theta_{\text{CV}}$, $N_{\min}$, $\epsilon_{\text{hyst}
 |---|---|---|
 | Memory structure | Flat bank | Two-tier: $d=1$ strategic scaffolds + flat tactical layer |
 | Storage backend | SQLite via SQLAlchemy (`MemoryService`) | Same; two tables: write-once `skill_representation`, mutable `skill_graph_state` |
-| Skill formation | All experiences stored | Advantage pre-filter → LLM judgment → storage at episode end |
+| Skill formation | Append-only: every trajectory stored as an IEU triplet; no formation gate | Advantage pre-filter → LLM judgment → storage at episode end |
 | Formation signal | LLM judgment only | Advantage (MC return-to-go vs. baseline; algorithmic, cheap) gates before LLM (semantic, expensive) |
 | Retention | Recency / retrieval frequency | Ebbinghaus decay modulated by $\bar{Q}_{i,w}$ — shrinkage-weighted mean across task types; task-agnostic |
 | Abstraction | None | Periodic sleep consolidation: K-means cluster surviving tactical memories → LLM returns structured `spawn` / `absorb` / `discard` action; `SkillRepresentation.content` stores summary; code computes $Q^\Omega$ → $d=1$ scaffold |
-| Retrieval | Flat similarity scan over all memories | Two-tier: $\omega$ selected once by $\arg\max Q^\Omega(t_k)$; tactical candidates scoped to children of $\omega$, ranked by $Q_i(t_k)$ — no per-step embedding comparison |
+| Retrieval | Two-Phase Retrieval: similarity recall (top-$k_1$) then similarity–utility blend re-rank (top-$k_2$), λ=0.5; compact $(k_1{=}5,k_2{=}3)$ beats larger | Two-tier: $\omega$ selected once by $\arg\max Q^\Omega(t_k)$; tactical candidates scoped to children of $\omega$, ranked by $Q_i(t_k)$ — no per-step embedding comparison (Phase 1) |
 | Action space | Flat, single-tier | Two-tier: strategic option (once per episode) + tactical action (every step, within-cluster) |
 | Action space bound | Unbounded | Hard cap $\|A^\tau\| \leq N$ within cluster + soft decay pruning |
 | Utility signal | MC terminal-reward EMA ($Q\leftarrow Q+\alpha(r-Q)$, Eq. 8) | Mean **advantage** per task type: tactical = MC return-to-go − baseline; strategic = discounted episode return − baseline |

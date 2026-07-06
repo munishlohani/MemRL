@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import copy
 import logging
+import math
 import sys
 import tempfile
 import time
@@ -323,6 +324,22 @@ def _run_trial(
         runner = _build_runner(cfg, config_path=resolved_config_path, run_root=run_root)
         num_episodes = max(1, int(cfg.experiment.num_sections))
         logger = logging.getLogger(__name__)
+        if cfg.experiment.num_epochs is not None:
+            num_games = runner.env_adapter.num_games()
+            if num_games:
+                num_episodes = int(cfg.experiment.num_epochs) * math.ceil(
+                    num_games / int(cfg.experiment.batch_size)
+                )
+                logger.info(
+                    "num_epochs=%s resolved to num_sections=%s (num_games=%s, batch_size=%s)",
+                    cfg.experiment.num_epochs, num_episodes, num_games, cfg.experiment.batch_size,
+                )
+            else:
+                logger.warning(
+                    "num_epochs=%s set but env_adapter.num_games() returned nothing; "
+                    "falling back to num_sections=%s",
+                    cfg.experiment.num_epochs, num_episodes,
+                )
         logger.info(
             "Starting Ray trial %s for %s episode section(s) with batch_size=%s max_steps=%s, output=%s",
             trial_name,

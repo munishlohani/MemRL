@@ -213,6 +213,10 @@ class AlfWorldEpisodeEnvAdapter(EpisodeEnvAdapter):
     def known_task_types(self) -> List[str]:
         return list(_ALFWORLD_TASK_PREFIXES)
 
+    def num_games(self) -> Optional[int]:
+        """Total distinct games in this split (builds the env if not built yet)."""
+        return self.alf_env.num_games
+
     def _log_reset_output(
         self,
         observations: List[str],

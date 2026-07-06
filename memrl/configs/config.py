@@ -252,6 +252,14 @@ class ExperimentConfig(BaseModel):
     )
 
     num_sections: int = Field(default=5, description="Number of sections to split the training data into")
+    num_epochs: Optional[int] = Field(
+        default=None,
+        description=(
+            "ALFWorld only: if set, overrides num_sections with num_epochs * "
+            "ceil(num_games / batch_size), so training runs through the full "
+            "game set exactly num_epochs times instead of a raw section count."
+        ),
+    )
     batch_size: int = Field(default=32, description="Number of parallel environments for sampling")
     max_steps: int = Field(default=30, description="Max steps per episode during training and evaluation")
     valid_interval: int = Field(default=1, description="Run evaluation on the validation set every N sections. Set to 0 to disable.")

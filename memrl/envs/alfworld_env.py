@@ -47,7 +47,8 @@ class AlfWorldEnv(IEnv):
         self.config_path = config_path
         self.batch_size = batch_size
         self.current_trace_list = [[] for _ in range(batch_size)]
-        
+        self.underlying_env_controller = None
+
         if preconfigured_env:
             # If a specific environment is passed in, use it directly.
             self.env = preconfigured_env
@@ -59,8 +60,13 @@ class AlfWorldEnv(IEnv):
                 ) from _ALFWORLD_IMPORT_ERROR
             config = load_config_from_path(config_path)
             env_type = config['env']['type']
-            underlying_env_controller = get_environment(env_type)(config, train_eval=task_type)
-            self.env = underlying_env_controller.init_env(batch_size=batch_size)
+            self.underlying_env_controller = get_environment(env_type)(config, train_eval=task_type)
+            self.env = self.underlying_env_controller.init_env(batch_size=batch_size)
+
+    @property
+    def num_games(self) -> Optional[int]:
+        """Total distinct games in this split, if known (spawned via collect_game_files())."""
+        return getattr(self.underlying_env_controller, "num_games", None)
 
     def reset(self):
         """

@@ -2,6 +2,7 @@ import sys
 from pathlib import Path
 import logging
 import argparse
+import math
 import time
 
 project_root = Path(__file__).parent.parent
@@ -178,6 +179,22 @@ def main():
 
         try:
             num_episodes = 1 if args.smoke else (args.episodes or cfg.experiment.num_sections)
+            if not args.smoke and args.episodes is None and cfg.experiment.num_epochs is not None:
+                num_games = env_adapter.num_games()
+                if num_games:
+                    num_episodes = int(cfg.experiment.num_epochs) * math.ceil(
+                        num_games / int(cfg.experiment.batch_size)
+                    )
+                    logger.info(
+                        "num_epochs=%s resolved to num_sections=%s (num_games=%s, batch_size=%s)",
+                        cfg.experiment.num_epochs, num_episodes, num_games, cfg.experiment.batch_size,
+                    )
+                else:
+                    logger.warning(
+                        "num_epochs=%s set but env_adapter.num_games() returned nothing; "
+                        "falling back to num_sections=%s",
+                        cfg.experiment.num_epochs, num_episodes,
+                    )
             logger.info("Running %s episode(s) on ALFWorld via EpisodeRunner.", num_episodes)
             for episode_idx in range(int(num_episodes)):
                 summary = runner.run()

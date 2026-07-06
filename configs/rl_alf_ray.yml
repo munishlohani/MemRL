@@ -22,6 +22,7 @@ trials:
         mode: train
         batch_size: 1
         num_sections: 3553
+        # num_epochs: 1  # If set, overrides num_sections with num_epochs * ceil(num_games / batch_size)
         max_steps: 50
       memory:
         k_retrieve: 5

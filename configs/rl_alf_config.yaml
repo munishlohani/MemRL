@@ -1,9 +1,9 @@
 # LLM provider configuration
 llm:
   provider: "openai"
-  api_key: "sk-auxocnVIj9xR7h5Kd0UeS8nUclUyDDaqDKVGCIn19DsR3JZe"
-  base_url: "https://yunwu.ai/v1"
-  model: "gpt-40-mini"
+  api_key: ""
+  base_url: ""
+  model: "gpt-4o-mini"
   temperature: 0
   max_tokens: 4096
 

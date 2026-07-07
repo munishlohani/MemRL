@@ -30,6 +30,8 @@ memory:
   add_similarity_threshold: 0.90
   n_sleep: 10
   lambda_base: 1e-3  # Base decay rate for tactical nodes (spec sweep range [1e-4, 1e-2] log-scale).
+  lambda_retrieval: 0.5  # Advantage weight in the retrieval blend (spec §P2.1, shared by tactical and strategic): score = lambda_retrieval * rank_norm(Q) + (1 - lambda_retrieval) * rank_norm(cos(e_i, e_q)). Reasoned default (MemRL's own blend), not swept.
+  theta_retrieval: 0.0  # Tactical-only quality gate: candidates scoring below this are dropped entirely (no memory is better than a bad one). 0.0 = no-op; not yet swept.
   # MemOS configuration
   mos_config_path: "configs/mos_config_final.json"
   user_id: "memrl_user"
@@ -50,7 +52,7 @@ experiment:
   mode: 'train'  # control whether to only test, if set as 'test' won't run on train spilt.
   num_sections: 10  # Number of sections (re-uses the same training set each section)
   # num_epochs: 1  # If set, overrides num_sections with num_epochs * ceil(num_games / batch_size)
-  batch_size: 32  # Number of parallel environments for sampling.
+  batch_size: 5  # Number of parallel environments for sampling (mini-batch).
   max_steps: 50  # Max steps per episode.
   dataset_ratio: 1.0  # Proportion of files randomly selected for training (rest used for validation)
   few_shot_path: 'data/alfworld/alfworld_examples.json' # path for alfworld examples

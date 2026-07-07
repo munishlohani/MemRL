@@ -48,6 +48,32 @@ def cosine_similarity(left: Any, right: Any) -> float:
     return dot / (sqrt(left_norm) * sqrt(right_norm))
 
 
+def rank_normalize(values: Sequence[float]) -> List[float]:
+    """Map values to [0, 1] by rank within the sequence (ties share the
+    average rank), so terms on incomparable raw scales -- e.g. an advantage
+    centered at 0 with roughly half its mass negative, vs. a cosine
+    similarity confined to [0, 1] -- can be blended without one silently
+    dominating just because of its native magnitude (spec §P2.1)."""
+    n = len(values)
+    if n == 0:
+        return []
+    if n == 1:
+        return [1.0]
+
+    order = sorted(range(n), key=lambda i: values[i])
+    ranks = [0.0] * n
+    i = 0
+    while i < n:
+        j = i
+        while j + 1 < n and values[order[j + 1]] == values[order[i]]:
+            j += 1
+        avg_rank = (i + j) / 2.0
+        for k in range(i, j + 1):
+            ranks[order[k]] = avg_rank
+        i = j + 1
+    return [rank / (n - 1) for rank in ranks]
+
+
 class SkillSimilarityRetriever:
     """Retriever-style embedding search for skill representations."""
 
@@ -105,6 +131,16 @@ class SkillSimilarityRetriever:
             return None
         return ranked[0]["node"]
 
+    @staticmethod
+    def _tactical_task_value(node: Any, task_type_dominant: Optional[str], lambda_shrink: float) -> float:
+        """Q_i(t_k) for the current task type (spec §3.6/§9.2); falls back to
+        the cross-task shrinkage-weighted mean Q_bar_w when this node has
+        never been used on t_k, so it stays selectable rather than locked out."""
+        q_values = getattr(node, "Q", None) or {}
+        if task_type_dominant is not None and task_type_dominant in q_values:
+            return float(q_values[task_type_dominant])
+        return get_q_salience(node, lambda_shrink=lambda_shrink)
+
     def tactical_retrieve(
         self,
         *,
@@ -117,9 +153,31 @@ class SkillSimilarityRetriever:
         current_step: int = 0,
         lambda_shrink: float = 10.0,
         cluster_scoped: bool = False,
+        task_type_dominant: Optional[str] = None,
+        lambda_retrieval: float = 0.5,
+        theta_retrieval: float = 0.0,
     ) -> Tuple[Dict[str, Any], List[Tuple[str, float]]]:
+        """Within-cluster retrieval blends per-task-type advantage with query
+        similarity as a convex combination (spec §P2.1, tuned per §P2.8):
+
+            score = lambda_retrieval * rank_norm(Q_i(t_k))
+                    + (1 - lambda_retrieval) * rank_norm(cos(e_i, e_q))
+
+        Both terms are rank-normalized over the candidate set first -- Q is
+        an advantage centered near 0 (often negative), cosine similarity
+        lives in [0, 1], so blending the raw values would let similarity
+        dominate every comparison regardless of lambda_retrieval. The
+        bootstrap fallback (cluster_scoped=False, no d=1 scaffold yet) keeps
+        the decay-weighted pure-similarity score -- newly formed nodes
+        rarely have usable per-task-type Q yet.
+
+        theta_retrieval is a tactical-only quality gate applied to the final
+        score: a candidate scoring below it is dropped rather than returned,
+        so a step can legitimately retrieve nothing when every candidate is
+        bad -- no memory is better than a bad one.
+        """
         rep_by_id = {getattr(rep, "id", None): rep for rep in representations}
-        selected: List[Dict[str, Any]] = []
+        candidates: List[Dict[str, Any]] = []
 
         for node in nodes:
             if getattr(node, "depth", None) != 2:
@@ -133,27 +191,49 @@ class SkillSimilarityRetriever:
             decay_rate = float(getattr(node, "decay_rate", 0.0) or 0.0)
             delta_t = max(0, int(current_step) - last_accessed_step)
             decay_factor = math.exp(-decay_rate * float(delta_t))
-            q_value = get_q_salience(node, lambda_shrink=lambda_shrink)
+            similarity = cosine_similarity(query_embedding, getattr(rep, "embedding", None))
 
-            if cluster_scoped:
-                similarity = 1.0
-                score = q_value
-            else:
-                similarity = cosine_similarity(query_embedding, getattr(rep, "embedding", None))
-                if threshold is not None and similarity < float(threshold):
-                    continue
-                score = similarity * decay_factor
+            if not cluster_scoped and threshold is not None and similarity < float(threshold):
+                continue
 
-            selected.append(
-                self._format_selected_payload(
-                    node=node,
-                    representation=rep,
-                    similarity=similarity,
-                    score=score,
-                    q_estimate=q_value,
-                    decay_factor=decay_factor,
-                )
+            q_value = (
+                self._tactical_task_value(node, task_type_dominant, lambda_shrink)
+                if cluster_scoped
+                else get_q_salience(node, lambda_shrink=lambda_shrink)
             )
+            candidates.append(
+                {
+                    "node": node,
+                    "rep": rep,
+                    "similarity": similarity,
+                    "decay_factor": decay_factor,
+                    "q_value": q_value,
+                }
+            )
+
+        if cluster_scoped:
+            lam = float(lambda_retrieval)
+            q_norms = rank_normalize([c["q_value"] for c in candidates])
+            sim_norms = rank_normalize([c["similarity"] for c in candidates])
+            for candidate, q_norm, sim_norm in zip(candidates, q_norms, sim_norms):
+                candidate["score"] = lam * q_norm + (1.0 - lam) * sim_norm
+        else:
+            for candidate in candidates:
+                candidate["score"] = candidate["similarity"] * candidate["decay_factor"]
+
+        candidates = [c for c in candidates if float(c["score"]) >= float(theta_retrieval)]
+
+        selected = [
+            self._format_selected_payload(
+                node=candidate["node"],
+                representation=candidate["rep"],
+                similarity=candidate["similarity"],
+                score=candidate["score"],
+                q_estimate=candidate["q_value"],
+                decay_factor=candidate["decay_factor"],
+            )
+            for candidate in candidates
+        ]
 
         selected.sort(
             key=lambda item: (
@@ -172,13 +252,27 @@ class SkillSimilarityRetriever:
         self,
         *,
         query_text: str,
+        query_embedding: Any = None,
         nodes: Sequence[Any],
         representations: Sequence[Any],
         top_k: int = 5,
         task_type_dominant: Optional[str] = None,
+        lambda_retrieval: float = 0.5,
     ) -> Tuple[Dict[str, Any], List[Tuple[str, float]]]:
+        """Strategic scaffold scoring uses the same convex blend as tactical
+        retrieval (spec §P2.1, extended to §9.1 per explicit instruction),
+        with the same lambda_retrieval -- one shared coefficient, not a
+        second one:
+
+            score = lambda_retrieval * rank_norm(Q_omega)
+                    + (1 - lambda_retrieval) * rank_norm(cos(e_i, e_q))
+
+        No quality gate here (theta_retrieval is tactical-only) -- an
+        episode must always end up with an active scaffold or explicit
+        bootstrap-null, never a mid-episode "no scaffold" default.
+        """
         rep_by_id = {getattr(rep, "id", None): rep for rep in representations}
-        selected: List[Dict[str, Any]] = []
+        candidates: List[Dict[str, Any]] = []
 
         for node in nodes:
             if getattr(node, "depth", None) != 1:
@@ -186,16 +280,30 @@ class SkillSimilarityRetriever:
 
             q_estimate = get_expected_option_value(node, task_type_dominant)
             rep = rep_by_id.get(getattr(node, "id", None))
-            selected.append(
-                self._format_selected_payload(
-                    node=node,
-                    representation=rep,
-                    similarity=0.0,
-                    score=q_estimate,
-                    q_estimate=q_estimate,
-                    decay_factor=1.0,
-                )
+            similarity = (
+                cosine_similarity(query_embedding, getattr(rep, "embedding", None))
+                if rep is not None
+                else 0.0
             )
+            candidates.append({"node": node, "rep": rep, "q_value": q_estimate, "similarity": similarity})
+
+        lam = float(lambda_retrieval)
+        q_norms = rank_normalize([c["q_value"] for c in candidates])
+        sim_norms = rank_normalize([c["similarity"] for c in candidates])
+        for candidate, q_norm, sim_norm in zip(candidates, q_norms, sim_norms):
+            candidate["score"] = lam * q_norm + (1.0 - lam) * sim_norm
+
+        selected = [
+            self._format_selected_payload(
+                node=candidate["node"],
+                representation=candidate["rep"],
+                similarity=candidate["similarity"],
+                score=candidate["score"],
+                q_estimate=candidate["q_value"],
+                decay_factor=1.0,
+            )
+            for candidate in candidates
+        ]
 
         selected.sort(
             key=lambda item: (
@@ -246,4 +354,4 @@ class SkillSimilarityRetriever:
         return payload
 
 
-__all__ = ["SkillSimilarityRetriever", "cosine_similarity"]
+__all__ = ["SkillSimilarityRetriever", "cosine_similarity", "rank_normalize"]

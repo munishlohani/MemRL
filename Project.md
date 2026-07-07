@@ -8,9 +8,9 @@
 
 We propose a memory architecture for AI agents that organizes skills within a two-tier hierarchical graph. The **strategic tier** ($d=1$) holds reasoning scaffolds — abstract frames selected once per episode under an options/semi-MDP formalism, with option-values stored per task type. The **tactical tier** (flat) holds directly executable skills formed from experience and retained via utility-modulated Ebbinghaus decay. Tactical skills are admitted by an advantage pre-filter (Monte Carlo return-to-go vs. a per-task-type baseline) followed by LLM judgment, stored immediately, and pruned by decay. Periodically, a **sleep consolidation** event clusters surviving tactical memories and uses LLM judgment to abstract them into strategic scaffolds — the sole mechanism by which $d=1$ nodes are created. The system is framed as a two-tier extended semi-MDP. Both tactical and strategic Q-values are stored **per task type**. Memory retention follows a biologically-grounded Ebbinghaus decay formula modulated by the **confidence-weighted mean utility** $\bar{Q}_{i,w}$ across task types — a task-agnostic salience denominator consistent with the unified (non-partitioned) graph design.
 
-**Base template:** MemRL. This architecture extends MemRL by: (1) replacing MemRL's flat, append-only memory bank with a two-tier hierarchical graph whose structure is determined by utility evidence and LLM abstraction rather than append-order alone; (2) introducing a gated tactical formation pipeline with LLM judgment; (3) a separate sleep-consolidation pipeline for strategic scaffold formation; (4) options-style credit assignment for strategic actions; and (5) utility-modulated decay salience that governs global graph membership.
+**Base template:** MemRL. This architecture extends MemRL by: (1) replacing flat memory with a two-tier hierarchical graph whose structure is determined by utility evidence and LLM abstraction rather than recency alone; (2) introducing a gated tactical formation pipeline with LLM judgment; (3) a separate sleep-consolidation pipeline for strategic scaffold formation; (4) options-style credit assignment for strategic actions; and (5) utility-modulated decay salience that governs global graph membership.
 
-**Key departure from MemRL.** MemRL is a flat, append-only bank of Intent–Experience–Utility triplets. It *already* selects memories by learned utility — its **Two-Phase Retrieval** recalls candidates by embedding similarity, then re-ranks by a **similarity–utility blend (optimal at λ=0.5)** — and updates utility by a Monte Carlo terminal-reward rule (Eq. 8). Crucially, it never deletes, abstracts, or organizes memory: every experience is appended and retained. So the departure here is **not utility-aware retrieval** — MemRL has that, and its own ablations show it works. The departure is two things MemRL lacks: (1) **hierarchy** — a strategic tier of multi-step scaffolds that condition whole episodes, absent from MemRL's single-shot triplet injection; and (2) **structural curation** — utility-modulated decay (forgetting) and sleep consolidation (abstraction) that actively reorganize the store, where MemRL only appends. Structural decisions (what to form, retain, consolidate) are offloaded to an algorithmic layer; the LLM is used for semantic judgment only.
+**Key departure from MemRL:** MemRL delegates all memory quality judgment to the backbone LLM's in-context reasoning at retrieval time. This architecture offloads structural decisions — what to form, what to retain, when to consolidate — to an algorithmic layer (advantage / MC return-to-go, decay, clustering), while trusting the LLM for semantic judgment (formation quality, consolidation content synthesis). The combination reduces the burden on the LLM while preserving its strength in semantic abstraction.
 
 > **Status:** Phase 1 architecture confirmed. Utility estimator: **Monte Carlo return-to-go** (no bootstrap), committed at episode end. Both tiers store a per-task-type **mean advantage** (return-to-go minus a per-task-type baseline); selection, decay salience, consolidation eligibility, and $Q^\Omega$ init all read advantage. Decay salience is the shrinkage-weighted mean advantage floored at zero. Strategic scaffolds carry an advantage against a strategic baseline (penalized when their episodes underperform). $Q^\Omega$ init scale is resolved by advantage space — horizon inflation retired (§3.5).
 
@@ -52,7 +52,7 @@ Standard agent memory systems conflate several distinct questions:
 - Which stored experience is worth keeping?
 - Which kept experience generalizes to new tasks?
 
-Most prior work (MemGPT, A-MEM, Voyager, SkillLib) optimizes retrieval — choosing what to surface at inference time — but treats memory formation and consolidation as secondary. MemRL, the base template for this work, updates memory utility with a Monte Carlo terminal-reward rule (its Eq. 8, $Q \leftarrow Q + \alpha(r - Q)$ — a one-step-to-terminal collapse of the general TD form) and selects memories by a learned similarity–utility blend at retrieval (Two-Phase Retrieval, λ=0.5), *not* by LLM judgment. But its store is flat and append-only: it never selectively forms, forgets, or abstracts, conflating these three questions into a single append-and-retrieve mechanism.
+Most prior work (MemGPT, A-MEM, Voyager, SkillLib) optimizes retrieval — choosing what to surface at inference time — but treats memory formation and consolidation as secondary. MemRL, the base template for this work, updates memory utility with a Monte Carlo terminal-reward rule (its Eq. 8, $Q \leftarrow Q + \alpha(r - Q)$ — a one-step-to-terminal collapse of the general TD form) and delegates all memory quality judgment to the backbone LLM. This works for large frontier models with strong meta-cognitive capacity, but conflates formation, retention, and abstraction into a single undifferentiated mechanism.
 
 This work separates these three questions:
 
@@ -61,10 +61,6 @@ This work separates these three questions:
 - **Abstraction** is handled by periodic sleep consolidation with LLM synthesis (batch, principled).
 
 The central hypothesis is that the LLM's strength is in semantic judgment and abstraction — not in deciding how often to retrieve, how long to retain, or when to consolidate. Offloading those structural decisions to an algorithmic layer produces a more principled and debuggable memory system.
-
-**Central research question.** *Does narrowing the tactical candidate set and supplying a clear per-task strategy raise an agent's success rate — and does the benefit grow as backbone capacity shrinks?* The two levers are separable and must be ablated separately: (a) **narrowing** — scoping tactical candidates to the children of an active scaffold, reducing the set the LLM chooses among; (b) **strategy conditioning** — the scaffold itself framing the episode's reasoning.
-
-> **Honest positioning against MemRL (do not over-claim the narrowing lever).** MemRL's own retrieval-size ablation already shows that *compact* retrieval $(k_1{=}5,k_2{=}3)$ beats larger $(k_1{=}10,k_2{=}5)$ — i.e., **narrowing-helps is a result MemRL already reports.** The novel lever here is therefore **(b) strategy conditioning via a hierarchical scaffold**, which MemRL has no analogue for; **(a) narrowing** is the *mechanism* through which the scaffold acts, not itself the contribution. The ablation must isolate (b): hierarchical-scoped-narrowing vs. flat-compact-narrowing at matched candidate-set size. If flat-compact matches hierarchical at equal $k$, the hierarchy adds nothing over MemRL's existing finding — that is the null this project must defeat.
 
 **Key design decisions confirmed for Phase 1:**
 
@@ -260,15 +256,13 @@ Admission is gated on **advantage against a per-task-type baseline**, not raw re
 
 $$A_t = G_t - b(t_k) > \theta_{\text{adv}} \;\Rightarrow\; \text{pass step to Stage 2}$$
 
-where $b(t_k)$ is a **windowed** running mean of episode return for task type $t_k$ — an EMA with decay (or last-$K$ window), *not* a lifetime mean. This matters over long runs: the agent improves, so a lifetime baseline drifts upward while stored node advantages were computed against older, lower baselines, pushing mature good skills below the moving yardstick → max decay → wrongful pruning (the standard non-stationary-target pathology; cf. prioritized replay recomputing priorities, Schaul et al. 2016). A windowed baseline keeps node-$Q$ and baseline on the same recent clock. Bookkeeping, not a model.
+where $b(t_k)$ is the running mean episode return for task type $t_k$, tracked incrementally (Welford/EMA) — bookkeeping, not a model.
 
 **What this gate does and does not do.** Under sparse terminal reward, $G_t$ has the *same sign for every step in an episode* — it is a coarse **episode-success** signal, not a per-step skill-quality signal. Subtracting $b(t_k)$ sharpens it to "this trajectory beat the average outcome for this task type," discarding mediocre episodes cheaply before any LLM call. It **cannot** isolate the load-bearing step within a successful trajectory; that intra-trajectory localization is delegated entirely to Stage 2.
 
 **Division of labor (explicit):** Stage 1 is a cheap arithmetic *episode-level* gate (advantage sign). Stage 2 (§4.2) is LLM *intra-trajectory* localization + quality judgment, receiving every above-baseline step of an admitted episode. This is a deliberate reallocation: the RL signal is too coarse under sparse terminal reward to perform step-level credit assignment, so the judger absorbs that burden — at higher token cost, since a successful $T$-step episode yields up to $T$ candidates rather than the one or two a true surprise gate would emit.
 
 **Known limitation (Phase 2):** distinguishing the causally-responsible step from incidental steps in a successful trajectory requires a per-step reward signal — a learned credit model or process reward model (Lightman et al. 2023) — which Phase 1 deliberately omits. See §11. Negative-outcome (avoidance) skill formation remains a Phase 2 item; episodes with $A_t \leq \theta_{\text{adv}}$ contribute no tactical formations.
-
-> **Reviewer-facing risk — corrective-failure memories (must preempt).** This gate admits only *above-baseline* episodes, so it discards below-baseline trajectories entirely. MemRL reports that this is exactly the wrong thing to throw away: its Q-critic correlates with success at Pearson $r{=}0.861$, and its case studies show **high-Q *failure* memories** — near-misses encoding "don't do X, do Y" corrections — driving **100% downstream success**. Hindsight relabeling (HER, Andrychowicz et al. 2017) makes the same point: failed trajectories carry transferable signal. A one-line, cheap mitigation is available now: gate on **$|A_t| > \theta_{\text{adv}}$** (both tails) and let Stage-2 LLM judgment tag a retained node as *corrective/avoidance* — the judger already reads the trace, so the marginal cost is a label, not a new model. If we instead keep the one-sided gate, §11 must cite MemRL's finding and defend the exclusion explicitly rather than leaving it silent.
 
 ### 4.2 Stage 2 — LLM Judgment
 
@@ -683,7 +677,7 @@ If $d=1$ is empty ($\omega = \text{null}$), tactical retrieval falls back to fla
 
 **Cold task type** ($Q^\Omega_{\omega_j}(t_k)$ undefined for all scaffolds): fall back to the scaffold with the highest cross-task shrinkage-weighted mean advantage $\bar{Q}^\Omega_{\omega_j}$ (§3.8).
 
-**Phase 2 change (deferred by design — Phase 1 stays $\arg\max$):** replace the deterministic option-value $\arg\max$ with a **top-$k$ shortlist → LLM chooses** procedure, where the shortlist is ranked by a **similarity–utility blend** in the style of MemRL's Two-Phase Retrieval (their $\lambda{=}0.5$ balance). Phase 1 is intentionally naive here — pure $Q^\Omega$ $\arg\max$, no embedding step, no LLM-in-the-loop selection, no blend. The blend + LLM selection is the primary Phase-2 retrieval upgrade.
+**Phase 2 change:** replace the pure option-value argmax with embedding similarity between the query and strategic scaffold task descriptions to shortlist the top-$k$ candidates, then let the LLM choose among them (rather than a deterministic $Q^\Omega$ argmax with no embedding step). Not yet implemented in Phase 1.
 
 ### 9.2 Tactical Retrieval (Every Step, within $\omega$'s cluster)
 
@@ -713,8 +707,6 @@ $$\text{score}(s_i,\ \Delta t) = d_i(\Delta t) \cdot \cos(e_i,\ e_q)$$
 Decay-weighted cosine similarity over all tactical nodes — flat scan used only until first sleep consolidation populates $d=1$.
 
 **Known gap:** if sleep consolidation assigned a skill to the wrong cluster (LLM misjudged absorb/spawn), that skill is unreachable under any $\omega$ that doesn't parent it. No cross-cluster fallback in Phase 1. Mitigation: LLM consolidation quality, decay pruning of misassigned low-utility nodes, and Phase 2 DAG extension allowing multi-parent nodes.
-
-**Phase 2 change (deferred by design — Phase 1 stays $\arg\max$):** tactical selection also becomes **top-$k$ shortlist → LLM chooses**, with the shortlist ranked by a similarity–utility blend (λ≈0.5) rather than pure $Q_i(t_k)$ $\arg\max$. In Phase 1 the stored advantage is the sole ranking signal and the top-scoring child is taken directly.
 
 ---
 
@@ -846,9 +838,8 @@ for each episode:
 | Symbol | Role | Starting value | Status |
 |---|---|---|---|
 | $\theta_{\text{adv}}$ | Advantage pre-filter threshold (Stage 1); admits step to judger if $A_t = G_t - b(t_k) > \theta_{\text{adv}}$ | $0$ | sweep |
-| $b(t_k)$ | Tactical advantage baseline: per-task-type **windowed** mean terminal reward $R$ (EMA/last-$K$, not lifetime — §4.1) | tracked, not swept | — |
-| $b^\Omega(t_k)$ | Strategic advantage baseline: per-task-type **windowed** mean discounted return $G^\Omega$ | tracked, not swept | — |
-| $K_b$ | Baseline window length (EMA horizon or last-$K$) — governs baseline non-stationarity | $\sim$100 episodes | sweep |
+| $b(t_k)$ | Tactical advantage baseline: per-task-type running mean terminal reward $R$ | tracked, not swept | — |
+| $b^\Omega(t_k)$ | Strategic advantage baseline: per-task-type running mean discounted return $G^\Omega$ | tracked, not swept | — |
 | $\lambda$ | Base decay rate (flat tactical layer) | — | sweep |
 | $\lambda_{\text{shrink}}$ | Bayesian shrinkage pseudocount for $\bar{Q}_{i,w}$, $\bar{Q}^\Omega_\omega$, and $Q^\Omega$ init | $10$ | sweep |
 | $\epsilon$ | Salience floor in decay denominator (denominator is $\max(\bar{Q}_{i,w},0)+\epsilon$) | $0.01$ | sweep |
@@ -874,11 +865,11 @@ $\theta_1$, $\theta_2$, $\theta_{\text{CV}}$, $N_{\min}$, $\epsilon_{\text{hyst}
 |---|---|---|
 | Memory structure | Flat bank | Two-tier: $d=1$ strategic scaffolds + flat tactical layer |
 | Storage backend | SQLite via SQLAlchemy (`MemoryService`) | Same; two tables: write-once `skill_representation`, mutable `skill_graph_state` |
-| Skill formation | Append-only: every trajectory stored as an IEU triplet; no formation gate | Advantage pre-filter → LLM judgment → storage at episode end |
+| Skill formation | All experiences stored | Advantage pre-filter → LLM judgment → storage at episode end |
 | Formation signal | LLM judgment only | Advantage (MC return-to-go vs. baseline; algorithmic, cheap) gates before LLM (semantic, expensive) |
 | Retention | Recency / retrieval frequency | Ebbinghaus decay modulated by $\bar{Q}_{i,w}$ — shrinkage-weighted mean across task types; task-agnostic |
 | Abstraction | None | Periodic sleep consolidation: K-means cluster surviving tactical memories → LLM returns structured `spawn` / `absorb` / `discard` action; `SkillRepresentation.content` stores summary; code computes $Q^\Omega$ → $d=1$ scaffold |
-| Retrieval | Two-Phase Retrieval: similarity recall (top-$k_1$) then similarity–utility blend re-rank (top-$k_2$), λ=0.5; compact $(k_1{=}5,k_2{=}3)$ beats larger | Two-tier: $\omega$ selected once by $\arg\max Q^\Omega(t_k)$; tactical candidates scoped to children of $\omega$, ranked by $Q_i(t_k)$ — no per-step embedding comparison (Phase 1) |
+| Retrieval | Flat similarity scan over all memories | Two-tier: $\omega$ selected once by $\arg\max Q^\Omega(t_k)$; tactical candidates scoped to children of $\omega$, ranked by $Q_i(t_k)$ — no per-step embedding comparison |
 | Action space | Flat, single-tier | Two-tier: strategic option (once per episode) + tactical action (every step, within-cluster) |
 | Action space bound | Unbounded | Hard cap $\|A^\tau\| \leq N$ within cluster + soft decay pruning |
 | Utility signal | MC terminal-reward EMA ($Q\leftarrow Q+\alpha(r-Q)$, Eq. 8) | Mean **advantage** per task type: tactical = MC return-to-go − baseline; strategic = discounted episode return − baseline |
@@ -938,3 +929,192 @@ The architecture reuses well-known hierarchical-RL (HRL) and skill-discovery pri
 **The genuine contribution**, beyond applying HRL primitives to LLM agents, is the **division of labor between an algorithmic structural layer and an LLM semantic-judgment layer**: MC advantage, Ebbinghaus decay, and clustering decide *formation, retention, and consolidation timing*; the LLM is invoked only for *semantic* judgment (is this a coherent skill? does this cluster generalize?). This is the opposite of base MemRL, which delegates *all* memory-quality judgment to the backbone LLM's in-context reasoning at retrieval time. The side-channel $\mathcal{M}$ formulation (memory conditions the policy without entering $S$, preserving convergence) and the advantage-gate-precedes-LLM-call pattern are the domain-specific novelty — not the options or clustering themselves, which are acknowledged HRL borrowings.
 
 **Positioning vs Option-Critic / DIAYN:** those works *learn* the option policy and termination end-to-end from reward. This work does **not** learn sub-policies — the backbone LLM is the (fixed) policy; the options are *memory structures* that condition the LLM's context. The contribution is a memory architecture, not a new HRL algorithm, and should be framed as such.
+---
+
+# Phase 2 — Working Notes (Planning, NOT Locked)
+
+**Status:** agreed design directions from the P2 planning discussion, staged for brainstorming. Phase 1 (§1–§15) remains **locked and running** — nothing below modifies Phase 1 mechanics in place. Items tagged **[early-stage candidate]** may be pulled into the current run *only* if a diagnostic (§P2.6) justifies it. Two open diagnostics gate the object-abstraction and reflection-altitude decisions; do not lock those until resolved.
+
+Design through-line to keep honest: every P2 item below (blend, reflection, warm-start, failed-episode rescue) is a mechanism for **extracting signal when the utility graph is starved** — i.e. weak backbone (4o-mini) on the 3 complex ALFWorld types where success ≈ 10% and the tactical layer never fills. This is the right thing to fix, but it makes the ablation in §P2.7 existential.
+
+---
+
+## P2.1 Tactical Retrieval — Similarity–Utility Blend
+
+> **Status: implemented as a convex combination, not the additive form below.** `SkillSimilarityRetriever.tactical_retrieve` in `memrl/service/retrievers.py` scores cluster-scoped candidates as `lambda_retrieval * rank_norm(Q_i(t_k)) + (1 - lambda_retrieval) * rank_norm(cos(e_i, e_q))` (new `MemoryConfig.lambda_retrieval`, default 0.5, reasoned from MemRL's own blend but not independently swept). Rank-normalization matches the spec's normalization requirement; the combination shape was changed from `norm(Q) + λ·norm(sim)` to the convex form per explicit instruction, ahead of the §P2.6.1 gate/instrumentation sequencing above.
+
+**Problem.** Phase 1 §9.2 selects $a_t^\tau = \arg\max_{s_i \in \text{children}(\omega)} Q_i(t_k)$. This has **no dependence on $t$ or $c_t$** — for fixed $\omega$ and $t_k$ it returns the *same* skill at every step. Context-blind by construction; this is MemRL's unstable pure-utility ablation corner. State carries $h_t, c_t$ then discards them at selection.
+
+**Change.** Restore MemRL's two-phase (recall-then-blend) retrieval, scoped to $\omega$'s children:
+
+$$\text{score}(s_i,\ c_t) = \text{norm}\big(Q_i(t_k)\big) \;+\; \lambda_{\text{sim}} \cdot \text{norm}\big(\cos(e_i,\ e_q)\big)$$
+
+- $e_q$ recomputed **per step** → moves with the current subgoal → supplies the temporal discrimination across steps that $Q$ (constant in $t$) structurally cannot. This is live in steady state, not merely a bootstrap patch.
+- **CRITICAL normalization (do not skip).** $Q$ is an *advantage* (centered at 0, ~half negative); $\cos$ is ~$[0,1]$ and always positive. Blending raw makes the sim term dominate every comparison → silent collapse to the pure-similarity (Voyager) corner while you think you tuned $\lambda_{\text{sim}}$. **Rank-normalize both terms over the candidate set**, or squash advantage via $\sigma(A/\tau)$, *before* combining. Do **not** copy MemRL's $\lambda=0.5$ against raw advantage space.
+
+**Precedent.** Park et al., *Generative Agents* (UIST 2023): retrieval = recency + importance + relevance; relevance (query similarity) is included *specifically because* importance-only surfaces globally-salient-but-locally-irrelevant memories — our pure-$Q$ is their importance-only failure. Voyager (Wang et al. 2023) is the pure-similarity opposite corner. The blend is the known-good middle.
+
+**Touches:** §3.6, §9.2. New hyperparameter $\lambda_{\text{sim}}$ (§P2.8) — set after a normalization sweep, not at 0.5.
+
+---
+
+## P2.2 Reflection Channel — Strategic Content Revised at Sleep
+
+**Scope decision (agreed).** Reflection lives on the **strategic node**, not in a separate store. Scoping a "when this strategy fails" lesson to the strategy that failed is natural. But reflection **revises the scaffold's own strategic `content`** (a *rewrite*), it is **not** a parallel field. Rationale: a success-abstraction `content` + a bolted-on failure note produces a self-contradictory object the conditioning step can't cleanly use ("do X / X fails because Y"). A researcher rewrites a failing plan; they don't staple a sticky-note to it.
+
+**Framing.** Reflection = the **update rule for strategic content**. Failure trajectory = loss; reflection = natural-language gradient; rewritten scaffold summary = parameter update. This is the TextGrad abstraction (Yuksekgonul et al., *Nature* 2025) — backprop of NL critique into a text artifact. This is cleaner and more novel than "MemRL + a reflection field."
+
+**Trigger — NOT per-failure.** On the 3 complex types 4o-mini fails ~90% of episodes; a per-failure rewrite thrashes (content overwritten from fresh failure every episode, never stabilizes — Reflexion gets away with per-attempt because it has ~3 attempts, we have thousands of episodes). Instead:
+
+- **Revision happens inside sleep consolidation** (§8), which is already batched, already the sole $d=1$ mutation point, and already on a cadence **decoupled from $Q^\Omega$ selection**. Batching gives contrast across failures → a generalizable lesson (this is ExpeL's insight-extraction over a *set* of trajectories, Zhao et al., AAAI 2024). Decoupling from selection kills the **derank-death loop**: a low-$Q^\Omega$ scaffold still gets revised even while deranked, so its maturing lesson isn't stranded.
+- **Two passes in one sleep event, different inputs — do not overload one LLM call:**
+  1. *Tactical pass* (existing §8.2): cluster surviving tactical nodes → spawn/absorb/discard.
+  2. *Strategic-revision pass* (new): for each existing $d=1$ scaffold, pull its recent failure trajectories → rewrite its `content` (TextGrad-style, using the §P2.5 prompt spec).
+- **Cold-type escape valve** [early-stage candidate]: a **failure-count-triggered early sleep** for a scaffold accumulating failures fast, independent of the global $N_{\text{sleep}}$ counter. Global sleep cadence may be hundreds of episodes between revisions on a low-traffic complex type — too slow to escape the cold-start floor in time.
+
+**Precedent / threat.** CLIN (Majumder et al., 2023, *Continually Learning Language Agent*): persistent causal-abstraction memory, periodically revised, retrieved to condition future attempts, on ALFWorld-family tasks. This is **very close** to "strategic node carrying an updating reflection." Our differentiator must be the **advantage-gated, $Q^\Omega$-selected, decay-curated** version — CLIN has neither $Q^\Omega$ selection nor decay. Make that delta explicit in §13 or CLIN eats the novelty.
+
+**Touches:** §8 (new revision pass), §8.1 (optional early-sleep trigger), §13 (MemRL/related-work delta), §P2.5 (prompt).
+
+---
+
+## P2.3 Warm Start — Per-Task-Type Scaffold Seeding [early-stage candidate]
+
+**Problem (the doom loop, observed live).** Weak backbone + empty memory on a hard type → ~0 success → ~no positive-advantage episodes → empty tactical layer for that type → sleep has nothing to cluster → no scaffold ever forms → type stays at floor **forever**. This is a fixed point, not slow convergence. It is the mechanistic root of "harder task types underrepresented in strategic nodes."
+
+**Change.** Seed **one strategic scaffold per task type at init** from an LLM zero-shot plan on the task-type *description* (no evidence required). Sanctioned by existing §5.2 ("$d=1$ empty or manually seeded… no formal gating on bootstrap-seeded $d=1$ nodes"). Effect: non-null $\omega$ from episode 1; $Q^\Omega$ starts at 0 but the seed is the only option for its type so it is selected and updated. Seeds are **training wheels** — normal sleep-consolidation absorb/spawn logic (§8.2) later replaces them with evidence-grounded scaffolds. Free, no new machinery.
+
+**Coupling.** Warm-start = positive prior (seeded scaffold); reflection (§P2.2) = accumulating negative corrections. Together they replace the 10-episode dead zone. Reflection is the *only* conditioning signal before the graph exists, which is why the "without reflection there's no point" observation on complex types is expected.
+
+**Touches:** §5.2 (formalize seeding), §10 (init before episode 1).
+
+---
+
+## P2.4 Failed-Episode Rescue — Option A (Candidate-Discovery + Empty-Q Init)
+
+**Problem.** §4.1: under sparse terminal reward $G_t$ has the **same sign for every step**, so on a failed episode *every* step gets negative advantage — including the good actions preceding the one fatal mistake. Phase 1 discards all of them (§11 "Avoidance skill formation — Known gap"). On complex types (success ≈10%) this discards ~90% of all trajectories wholesale → the tactical layer for those types stays empty. Correct to fix; this is the same cold-start root as §P2.3.
+
+**The trap (why the naive fix corrupts values).** MC return-to-go **cannot do intra-episode credit assignment** (§11). If you rescue a good action and store it with its episode advantage $A_t = G_t - b(t_k) < 0$, the node is *simultaneously* "worth storing" and "below baseline → salience floors to 0 → max decay → pruned before ever retrieved." Rescue mechanism and deletion mechanism in the same node. So the fix **cannot** live in the advantage math.
+
+**Option A (committed for the first P2 pass).**
+- **Failed episodes → candidate discovery only.** Extend the Stage-2 LLM judger (§4.2) to failed episodes: it identifies the subset of steps that were *locally correct despite the bad outcome* and admits those.
+- **Init empty, NOT at episode advantage.** Rescued nodes enter with $Q$ **empty** (§3.5 tactical-init path), i.e. unproven: salience 0, max decay. They must **earn** positive advantage through *future successful* retrievals to survive. The failed episode is used purely to *surface a candidate*; subsequent successful usage assigns the value.
+- This changes *what enters Stage 2 from failed episodes* and the *init source*, and touches **nothing** in the value-update equations. Precedent: ExpeL/Reflexion use failed trajectories as learning signal without treating the failure reward as the stored value.
+
+**Deferred within P2 (not the first pass):**
+- **Option B — real PRM** (Lightman et al. 2023): per-step score independent of episode outcome → good action in a failed episode enters *positive*. This is the principled fix and is the eventual utility signal, but on ALFWorld it needs Math-Shepherd-style automatic per-step labeling via MC rollouts (Wang et al. 2024) — a substantial, noisy sub-project on long-horizon sparse tasks. Layer on **after** A proves the mechanism helps. Do not hand-wave "we'll use a PRM."
+- **Option C — HER** (Andrychowicz et al. 2017): relabel failure as success toward the goal actually achieved. **Does not transfer cleanly to ALFWorld** — goals are compositional, discrete, non-substitutable; heating the wrong object hasn't achieved *a* valid goal. Needs a partial-completion→valid-subgoal relabeler, which is a paper of its own. Reflexion's authors chose verbal reflection over HER for exactly this reason. Skip unless the relabeler is built.
+
+**Touches:** §3.5 (rescued-node init = empty), §4.1 (gate now also emits candidates from below-baseline episodes), §4.2 (judger scope extended to failed episodes), §11 (closes the avoidance-gap row). *Option B (PRM) requires the raw per-step trace §5.3 already stores — do not drop it.*
+
+---
+
+## P2.5 Strategic Summary Prompt Spec (Spawn Summary + Reflection Revision)
+
+**Diagnosis first (do not skip — see §P2.6).** "Cooling a tomato and placing" as a *strategic* summary is a symptom with two opposite causes:
+- **Case 2 (prompt bug):** cluster was diverse (tomato, mug, plate) but the summarizer over-anchored on one instance → prompt fix below works.
+- **Case 1 (clustering bug):** cluster was tomato-*only* because tactical embeddings are computed over the object-bearing LLM-formatted trace (§5.3), so K-means clusters by *object*, not *strategy* — the DIAYN entanglement failure (Eysenbach et al. 2019): clustering in a representation that mixes *what* with *how* fragments along the wrong axis. If this is the case, the prompt fix is a **cover-up** — the scaffold is still tomato-only and only ever selected/updated on tomato tasks, and the object-agnostic phrasing just hides it.
+- **Decision:** tactical storage/embedding stays **as-is** (LLM-formatted with explicit steps; no separate object-agnostic clustering descriptor — that idea is dropped). This **bets on Case 2**. The bet is only safe if §P2.6 diagnostic 2 confirms cluster diversity. If it comes back single-object (Case 1), the strategic prompt fix is cosmetic and object-fragmented consolidation is a **carried-forward known limitation**, not something the prompt spec resolves — revisit at strategic-consolidation level only, without touching tactical storage.
+
+**The abstraction–utility tradeoff (why "just make it general" is wrong).** Too specific ("cool the tomato") → no transfer, $Q^\Omega$ splits across object-specific scaffolds. Too general ("prepare an item and place it") → **vacuous conditioning**, constrains nothing, forfeits the strategy-conditioning lever that is the project's novel contribution. FeUdal (Vezhnevets et al. 2017) avoids the vague end by emitting directional goals in a learned space; our scaffolds are *verbal* so we are maximally exposed to vagueness. Resolution: **structural generality with procedural specificity** — abstract the *object*, keep the *procedure* concrete.
+
+**Prompt instructions (apply to both the §8.2 spawn `summary` field and the §P2.2 reflection revision):**
+
+1. **Object abstraction, procedure retention.** Replace specific object references (tomato, mug, apple) with role descriptors (*the target object*, *the destination receptacle*, *the tool*). Do NOT abstract the procedure — the action sequence, locations, and ordering constraints stay concrete and literal.
+2. **Precondition / verification structure.** Where cluster trajectories share a precondition or failure-prone step (must be holding the object; must be at the correct receptacle; appliance open before insertion), state it as an explicit checkable condition. Highest-value content for a weak backbone.
+3. **Structural, not descriptive, generality.** Generalize over *what* is manipulated, never over *how*. A summary that fits any task ("complete the objective efficiently") is a failure; a summary naming one object ("cool the tomato") is a failure. Target is between: object-agnostic, procedure-specific.
+4. **Length / shape — imperative, precondition-guarded (locked choice).** Short titled strategy + ordered **imperative** procedural outline (3–6 steps), each step carrying a checkable precondition, with an instruction to skip any step whose postcondition already holds. Not a prose paragraph; not a one-liner. (The strategic scaffold is injected once at $t=0$ per §9.1, before any action is taken, so the mid-episode "re-execute step 1" hazard that afflicts imperative *tactical* injection does not apply here — imperative is the right shape for a whole-episode plan. Precondition guards: STRIPS operators, Fikes & Nilsson 1971; LLM form in Guan et al. 2023, NeurIPS.)
+5. **Grounding in shared evidence.** State only procedure elements present across *multiple* cluster members. A step in one trajectory is an instance detail — omit it. This is the actual defense against "tomato" over-anchoring — BUT it only works if the cluster is diverse (Case 2). If the cluster is single-object (Case 1), "state only what's shared" faithfully yields "cooling a tomato." Hence §P2.6 must run first.
+
+**Note on altitude.** Instruction 2 (procedural precondition detail) is the right target *only if* complex-type failures are strategic. If they are grounding/execution failures, a strategic scaffold at $d=1$ is aimed at the wrong level entirely (see §P2.6); state-conditioned tactical lessons (AutoGuide, Fu et al. NeurIPS 2024) would be the correct instrument instead.
+
+**Touches:** §8.2 (summary prompt), §P2.2 (revision prompt). Strategic-only — tactical storage/embedding unchanged.
+
+> **Retracted (was P2.5.1 — storage≠consumption split, imperative *tactical* procedure, hybrid embedding).** Predicated on the reading that tactical `content` is a raw trajectory the agent imitates. Corrected against the implementation: tactical `content` is already **LLM-formatted with explicitly-prompted steps**, not raw storage, and is working — tactical stays as-is. The observed post-retrieval re-query loop is handled by the existing stopping mechanism; it is *not* treated as a content-format bug. The only content-representation problem is **strategic over-specificity**, addressed by the P2.5 prompt spec above. If the re-query loop ever recurs despite the stopping mechanism, the cheap lever is **consumption-side framing** (mark injected memory as a retrospective record, not an available action — Zhou et al. 2023, *Context-faithful Prompting*, EMNLP Findings), a prompt change, not a storage redesign.
+
+---
+
+## P2.6 Open Diagnostics — RESOLVE BEFORE LOCKING P2.2 / P2.5
+
+## P2.6.1 Telemetry Diagnostic Gate — RUN ON CURRENT ARCH, BEFORE ANY P2 CHANGE
+
+**Why this runs first, alone.** The observed run (≈4k steps, 4 scaffolds) produced signals that each have a *reassuring* reading and a *concerning* reading that generate the **identical curve**. Turning on P2.1–P2.4 together would confound which intervention moved which signal — the same aggregate-confound that made the reward sawtooth uninterpretable, one level up. Sequence: (a) add the instruments below, (b) re-run current arch to get clean baselines, (c) introduce P2 changes **one at a time** against those baselines. The diagnostics are a gate, not a companion to the partial P2 run.
+
+**The core ambiguity every strategic chart currently has.** A falling per-type $Q^\Omega$, a falling `q_omega_variance`, a shrinking reward sawtooth — each is produced *both* by convergence (estimate settling under continued updates) *and* by starvation/freeze (pair stops being selected → stops updating → variance flatlines to zero and value freezes by construction). **The disambiguator is always the same: overlay the selection count.** Falling value/variance with *rising* $n_\omega$ = health; with *flat* $n_\omega$ = death. This is the deterministic-$\arg\max$ option-starvation failure (FeUdal, Vezhnevets et al. 2017; Option-Critic, Bacon et al. 2017): a deranked option never re-accrues the experience that would revive it. §9.1's exploration-free argmax is maximally exposed.
+
+**Required instruments (all cheap, all on current arch):**
+
+1. **$n_\omega$ overlay on every strategic value/variance chart.** For each (scaffold, task_type): plot $Q^\Omega$, `q_omega_variance`, and $n_\omega$ on shared step axis. Resolves convergence-vs-starvation for `pick_two` (variance 2e-4 → 0 by ~3.4k: convergence iff $n_\omega$ still rising there; freeze iff $n_\omega$ plateaued). This is the single highest-value instrument.
+
+2. **Raw $G^\Omega$ logged next to advantage.** $Q^\Omega$ stores advantage vs a *rising* baseline $b^\Omega(t_k)$, so a declining advantage (e.g. `look_at_obj` 0.62→0.42) is **ambiguous**: benign if raw return $G^\Omega$ is flat (baseline caught up) vs real regression if both fall. Currently uninterpretable — a reviewer will ask. Log per-(scaffold,type) raw $G^\Omega$ and $b^\Omega(t_k)$ alongside the stored advantage.
+
+3. **Sawtooth-period attribution.** Overlay on `mean_reward`: (i) per-task-type split of reward, (ii) vertical markers at section boundaries, (iii) vertical markers at sleep-consolidation events. Test the ≈170-episode period against section length vs $N_{\text{sleep}}$. `scaffold_count` already shows spawns are *rare and spaced* (0→1→2→3→4 over 4k, long plateaus) → structural churn is NOT the sawtooth source → curriculum/section is the leading hypothesis. Confirm: if per-type curves are individually flat and only the aggregate sawtooths, it's curriculum and says nothing about mechanism (Agarwal et al., *Statistical Precipice*, NeurIPS 2021 — stratify before drawing mechanistic conclusions).
+
+4. **Absorb-vs-spawn event log on `scaffold_count`.** Count only rises (4 spawns observed) — cannot tell whether the *absorb* path ever fires or whether every eligible cluster spawns. Spawn-only = accretion, not consolidation (and every spawn is permanent, §6.1 — no decay on $d=1$). Log each consolidation decision (spawn/absorb/discard) with cluster size and target. If absorb never fires, that is a consolidation-logic finding independent of P2.
+
+5. **Frozen / imbalanced-selection audit.** At run end: `61000032`≈58, `947e5e97`≈26, `1ba086f7`≈22, `d28e4344`≈9 selections — ~6× spread, newest scaffold starved. Rich-get-richer under argmax (Matthew effect in option selection). Cross-check the flat-negative pairs (Image 2: `pick_heat_then_place`/`1ba086f7` ≈ −0.05 flat) against $n_\omega$: flat value + flat $n_\omega$ + negative advantage = a hard type permanently served by a losing scaffold = the §P2.3 cold-start doom loop made empirical, and a permanent trough in every curriculum cycle that type appears in.
+
+**What the current run already shows (not all faults).** Positive, real, report it: 4 scaffolds spawned cleanly at spaced intervals with stable plateaus; clear selection specialization (`61000032` dominant, others carving smaller shares); Image-2 scaffolds dividing the task space along strategy lines (`1ba086f7` wins `look_at_obj`, `61000032` wins heat/clean). The hierarchy **is** forming and dividing labor. The open question is not "does structure form" (yes) but "are low-traffic scaffolds learning or starving" — answerable this afternoon with instrument 1.
+
+**Gate criterion for starting the partial P2 run.** Instruments 1–3 must be live and one clean current-arch baseline logged. Then introduce P2 changes singly: recommended order P2.1 (blend, fixes context-blindness) → measure → P2.3 (warm-start, directly targets the starvation instrument 1/5 expose) → measure → P2.4 (rescue) → measure → P2.2 (reflection, gated on §P2.6 altitude label) last. Never two at once against an un-baselined instrument.
+
+---
+
+## P2.7 Thesis Risk — The Existential Ablation
+
+Reflection + warm-start + failed-episode rescue are all **bypasses around the starved utility graph**. If, on small models / hard types, most of the gain comes from these bypasses, then the two-tier graph (strategic hierarchy + decay + consolidation) is not carrying the weight the abstract claims.
+
+**Required ablation, run early:** *full system* vs *[MemRL + reflection + warm-start, NO strategic hierarchy / NO decay / NO consolidation]*. 
+- If full > bypass-only → the graph earns its place; thesis holds.
+- If full ≈ bypass-only → the contribution is "a good reflection-and-warm-start recipe for weak agents" — a fine paper, but **not** the paper the abstract claims (memory *structure* helps small models).
+
+Let this ablation's result reshape framing rather than defending the graph because it is already built. The graph-starvation-on-hard-types-with-weak-models failure is precisely the kind of critical flaw the Phase-1 lock exempts.
+
+---
+
+## P2.8 New / Changed Hyperparameters (Phase 2)
+
+| Symbol | Role | Start | Status |
+|---|---|---|---|
+| $\lambda_{\text{sim}}$ | Similarity weight in tactical retrieval blend (§P2.1); applied to **normalized** terms | set post normalization-sweep, **not 0.5** | sweep |
+| $\tau_{\text{sq}}$ | Advantage squash temperature if using $\sigma(A/\tau)$ instead of rank-norm (§P2.1) | — | sweep (only if squash chosen) |
+| $N_{\text{reflect}}$ | Failures accumulated under a scaffold before its revision pass considers it (§P2.2) | — | sweep |
+| $N_{\text{fail-sleep}}$ | Per-scaffold failure count triggering early sleep, independent of $N_{\text{sleep}}$ (§P2.2, optional) | — | sweep |
+| $B$ | Mini-batch size — parallel game slots stepped in lockstep, thread-pooled LLM calls (§P2.9) | endpoint-capacity bound | sweep/fix per experiment |
+| decay clock | Global step count advanced at barrier, batch-size-independent (§P2.9) — not physical wall-clock | global-step | fixed choice |
+| $\lambda,\ \epsilon,\ \theta_{\text{prune}}$ | **RE-SWEEP** — Phase-1 values were on a per-episode retrieval-step clock; global-step time-based decay rescales them (§P2.9) | Phase-1 values void | re-sweep |
+
+## P2.9 Parallelism — Lockstep Mini-Batch Rollout (Match MemRL), Global-Step Decay, Sync Batch-Barrier Sleep
+
+**The real bottleneck (diagnosed, not assumed).** "Steps take too long" = **LLM inference latency**, one call per agent step, seconds each; a 50-step episode is 50 sequential LLM calls, and 3,356 tasks sequentially is enormous wall-time. This is **I/O-bound** (waiting on the API / vLLM endpoint), NOT compute-bound. The memory update itself (MC arithmetic + a SQLite write) is trivially cheap.
+
+**Correction — Ape-X was the wrong model, retracted.** An earlier draft here specced an Ape-X actor/drainer split with a Postgres `trajectory_queue`. That is designed for the **inverted** bottleneck: many *cheap fast* actors overwhelming a *slow GPU learner*, decoupled by async queues (Horgan et al. ICLR 2018; Espeholt et al. ICML 2018). Here the actors are *slow* (LLM) and the "learner" is *free* (arithmetic + SQLite) — there is no learner to decouple from. The distributed apparatus solved a problem we do not have and *introduced* the baseline/clock/consolidation races. Dropped entirely: no Postgres, no queue, no drainer, no off-policy staleness correction, no V-trace.
+
+**What MemRL actually does (verified in `memrl/run/alfworld_rl_runner.py`), and what we match:**
+- **Lockstep mini-batch:** `current_bs` games stepped together, `for step in range(max_steps)`; finished games drop out of `active_slots` and the batch ends early when all finish.
+- **Only the LLM calls are parallel** — `ThreadPoolExecutor(max_workers=len(active_slots))` wraps `agent.act()` each step (threads, because LLM calls are I/O-bound → GIL releases on the network wait). Retrieval is likewise thread-pooled per slot at batch start. This is pure **latency-hiding**: `B` concurrent in-flight requests cost ≈ one request of wall-time, up to endpoint capacity — the point of vLLM continuous batching (Kwon et al., *PagedAttention*, SOSP 2023).
+- Env stepping via Gym `AsyncVectorEnv` (subprocess-parallel).
+- **Memory is mutated once, single-threaded, at the batch barrier** — `update_values` / `add_memories` sit *below* the step loop, never inside a thread pool. Retrieval (a read) is parallel; every write is serial.
+- **Storage: SQLite via SQLAlchemy** (`MemoryService`). No concurrent writer → SQLite's single-write-lock is never contended. **Keep SQLite; do not move to Postgres** — Postgres was only motivated by concurrent writes we no longer have, and diverging the backend costs comparability with MemRL (§13).
+
+**Why this dissolves every hazard from the last three iterations:** memory is read at batch start and written single-threaded at the barrier, so there is **no concurrent mutation at all**. The single-writer invariant is free (no drainer needed). Baseline "read-before-update excluding self" holds because the barrier update is sequential over the batch. The sleep race disappears. "Sync sleep at batch end" is the natural shape, not a special case.
+
+**Decay clock — global step count (agreed), advanced at the barrier.** Use a monotonic **global step counter** as the decay clock — this is the logical/simulated time that "simulates wall-clock in the environment" without the pathologies of physical `datetime.now()` (non-reproducible across hardware; inflated by stalls). Continuous-time exponential *form* ($d=e^{-\text{rate}\cdot\Delta t}$) is kept — Ebbinghaus-consistent; cognitive architectures on the same forgetting literature (ACT-R base-level, Anderson & Schooler 1991) also use simulated, not physical, time.
+- **Batch-size independence (important):** advance the clock by a unit **independent of `B`** (e.g. per committed episode, or per lockstep round), NOT by summed env-steps across slots — otherwise a node's decay depends on how many parallel slots ran, coupling retention to the parallelism degree. Fix `B` per experiment regardless.
+- Schema: `last_accessed_step` stays a global step index; $\Delta t$ = global steps elapsed since last retrieval.
+- **⚠ Decay hyperparameters ($\lambda, \epsilon, \theta_{\text{prune}}$) RE-SWEEP** — Phase-1 values were on a per-episode retrieval-step clock; the global-step clock rescales them.
+
+**Sleep consolidation — synchronous, at the batch barrier (chosen, and now trivially safe).** Fires once after the mini-batch finishes and the single-threaded memory update commits — graph quiescent, no concurrent writers by construction (not by locking). Removes the double-spawn race for free.
+- **Accepted cost — stragglers.** Lockstep batch ends only when all slots finish or hit `max_steps`; a 50-step complex task holds its slot to the end (MemRL drops *finished* slots from the thread pool, so idle slots don't cost LLM calls, but the *next* batch still waits). Complex types are the stragglers and the cold-start types — mitigate by batch composition (avoid mixing long-complex with short) or by `max_steps`/wall-time caps, without breaking the barrier. Global-step decay does **not** tick during the wait (it advances on committed work), so stragglers don't inflict a decay burst.
+
+**Intra-batch staleness (inherent, mild, matches MemRL — no correction needed).** All games in a batch use memory as of batch start; a formation from game 1 isn't visible to game 5 until the next batch. Bounded by `B`, no bootstrapping involved, and it is exactly MemRL's behavior — so it is *controlled for* in the comparison rather than a confound. (This is the honest, minimal version of the equivalence concern; a full sequential-vs-batch check on a small split is still worth running once, but there is no V-trace-style correction to build.)
+
+**Scope honesty (thesis / §13).** Parallelism is a **throughput enabler, not a contribution** — and matching MemRL's exact concurrency + storage model is the point: it keeps the comparison clean and the engineering small. Do not let infra scope creep delay the AAMAS submission.
+
+**Touches:** §5.3 (batch-barrier single-threaded flush replaces per-episode flush; **keep SQLite**), §6.2 (Δt = global step count, batch-size-independent), §7.1/§8 (pruning + sleep run at the barrier), §10 (episode loop → lockstep mini-batch loop with thread-pooled `agent.act()`), §12/§P2.8 ($B$, decay re-sweep). MemRL parity: same ThreadPool-over-LLM + lockstep-batch + SQLite model.
+
+---
+
+## P2.10 Deferred Beyond Phase 2 (unchanged from Phase 1 §11 / abstract)
+
+Affect / personalization graph (dual-graph utility⊥affect separation, 50/50 similarity–utility blend, probabilistic consolidation) remains **post-P2**. P2 as scoped here is still single-graph (utility) — it adds retrieval blend, reflection, warm-start, and failed-episode rescue, but does **not** introduce the affect axis. Sequence: land P2 utility-side fixes + the §P2.7 ablation *first*; the affect graph only makes sense once the utility graph is shown to carry weight on small models.

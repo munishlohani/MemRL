@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import copy
 import logging
 from uuid import uuid4
@@ -148,6 +149,14 @@ class EpisodeRunner(BaseEpisodeRunner):
         self._cumulative_nodes_created = 0
         self._cumulative_pruned_count = 0
         self._cumulative_pruned_by_task_type: Dict[str, int] = {}
+        # §P2.6.1 telemetry: section index gives the "vertical marker" for
+        # section boundaries when overlaid on episode/mean_reward (one run()
+        # call == one section/mini-batch in this architecture); cumulative
+        # sleep-action counts answer "has absorb ever fired?" from a single
+        # run-lifetime scalar instead of requiring correlation across rare,
+        # easy-to-miss per-event snapshots.
+        self._section_index = 0
+        self._cumulative_sleep_action_counts: Dict[str, int] = {}
         self._seed_known_task_types()
 
         self.random_seed = getattr(self.experiment_config, "random_seed", None)
@@ -166,6 +175,13 @@ class EpisodeRunner(BaseEpisodeRunner):
 
         batch_size = len(observations)
         self.batch_size = batch_size
+        # One shallow-copied agent per slot: CustomAgent.reset() mutates
+        # instance state (task_description/task_type/episode_id/_trajectory)
+        # that act() reads back implicitly, so slots sharing one agent
+        # instance would race once turn resolution is thread-pooled below.
+        # Shallow copy isolates that per-episode scalar state per slot while
+        # still sharing the (thread-safe) llm/memory_retrieval_skill refs.
+        agent_slots = [copy.copy(self.agent) for _ in range(batch_size)]
         self.episode_histories = [EpisodeHistory() for _ in range(batch_size)]
         self.pending_formations = []
         self.episode_rewards = [0.0 for _ in range(batch_size)]
@@ -248,41 +264,60 @@ class EpisodeRunner(BaseEpisodeRunner):
 
                 actions = ["look"] * batch_size
                 slot_contexts: List[Dict[str, Any]] = [{} for _ in range(batch_size)]
-                for slot_idx in active_slots:
-                    history = self.episode_histories[slot_idx]
-                    history_messages = self._history_to_messages(history)
-                    current_observation = str(observations[slot_idx] or "")
-                    active_strategic_node_id = active_strategic_node_ids[slot_idx]
-                    if active_strategic_node_id is None and has_strategic_scaffolds:
-                        active_strategic_node_id = self._resolve_strategic_node_id(
-                            episode_infos[slot_idx] if slot_idx < len(episode_infos) else {}
+
+                def _process_slot(slot_idx: int) -> None:
+                    # LLM calls are I/O-bound (network latency), so slots run
+                    # concurrently on a thread pool -- one agent.act() /
+                    # memory retrieval per active slot per step, matching the
+                    # base-template runner's per-step ThreadPoolExecutor
+                    # fan-out (spec P2.9). Each slot only reads/writes its own
+                    # index into actions/slot_contexts/active_strategic_node_ids
+                    # and its own agent_slots[slot_idx]/episode_histories[slot_idx],
+                    # so there is no cross-slot mutation to race on.
+                    try:
+                        history = self.episode_histories[slot_idx]
+                        history_messages = self._history_to_messages(history)
+                        current_observation = str(observations[slot_idx] or "")
+                        active_strategic_node_id = active_strategic_node_ids[slot_idx]
+                        if active_strategic_node_id is None and has_strategic_scaffolds:
+                            active_strategic_node_id = self._resolve_strategic_node_id(
+                                episode_infos[slot_idx] if slot_idx < len(episode_infos) else {}
+                            )
+                            active_strategic_node_ids[slot_idx] = active_strategic_node_id
+                        agent_slots[slot_idx].reset(
+                            task_description=task_descriptions[slot_idx],
+                            task_type=task_types[slot_idx],
+                            episode_id=episode_ids[slot_idx],
                         )
-                        active_strategic_node_ids[slot_idx] = active_strategic_node_id
-                    self.agent.reset(
-                        task_description=task_descriptions[slot_idx],
-                        task_type=task_types[slot_idx],
-                        episode_id=episode_ids[slot_idx],
-                    )
-                    action, retrieval_result = self._resolve_agent_turn(
-                        observation=current_observation,
-                        history=history,
-                        first_step=(step_idx == 0 and not history.trajectory),
-                        task_description=task_descriptions[slot_idx],
-                        task_type=task_types[slot_idx],
-                        episode_id=episode_ids[slot_idx],
-                        active_strategic_node_id=active_strategic_node_id,
-                    )
-                    action = action.strip() if isinstance(action, str) else ""
-                    actions[slot_idx] = action or "look"
-                    history.record_action(actions[slot_idx])
-                    slot_contexts[slot_idx] = {
-                        "history_messages": copy.deepcopy(history_messages),
-                        "current_observation": current_observation,
-                        "active_strategic_node_id": active_strategic_node_id,
-                        "retrieval_state": copy.deepcopy(
-                            retrieval_result.to_dict() if retrieval_result is not None else {}
-                        ),
-                    }
+                        action, retrieval_result = self._resolve_agent_turn(
+                            agent=agent_slots[slot_idx],
+                            observation=current_observation,
+                            history=history,
+                            first_step=(step_idx == 0 and not history.trajectory),
+                            task_description=task_descriptions[slot_idx],
+                            task_type=task_types[slot_idx],
+                            episode_id=episode_ids[slot_idx],
+                            active_strategic_node_id=active_strategic_node_id,
+                        )
+                        action = action.strip() if isinstance(action, str) else ""
+                        actions[slot_idx] = action or "look"
+                        history.record_action(actions[slot_idx])
+                        slot_contexts[slot_idx] = {
+                            "history_messages": copy.deepcopy(history_messages),
+                            "current_observation": current_observation,
+                            "active_strategic_node_id": active_strategic_node_id,
+                            "retrieval_state": copy.deepcopy(
+                                retrieval_result.to_dict() if retrieval_result is not None else {}
+                            ),
+                        }
+                    except Exception:
+                        logger.exception("Slot %s turn resolution failed; defaulting to look", slot_idx)
+                        actions[slot_idx] = "look"
+
+                with ThreadPoolExecutor(max_workers=len(active_slots)) as executor:
+                    futures = [executor.submit(_process_slot, slot_idx) for slot_idx in active_slots]
+                    for future in as_completed(futures):
+                        future.result()
 
                 step_result = self.env_adapter.step(actions)
                 next_observations = list(step_result.observations)
@@ -395,7 +430,7 @@ class EpisodeRunner(BaseEpisodeRunner):
                             "observation": next_obs,
                             "reward": reward,
                             "done": done,
-                            "active_strategic_node_id": active_strategic_node_id,
+                            "active_strategic_node_id": active_strategic_node_ids[slot_idx],
                             "info": step_infos[slot_idx] if slot_idx < len(step_infos) else {},
                         }
                     )
@@ -472,6 +507,7 @@ class EpisodeRunner(BaseEpisodeRunner):
                 "sleep_bootstrap_tactical_min": self.sleep_bootstrap_tactical_min,
             }
 
+            self._section_index += 1
             self._report_metrics(
                 {
                     "episode/mean_reward": summary["mean_reward"],
@@ -481,6 +517,11 @@ class EpisodeRunner(BaseEpisodeRunner):
                     "episode/formation_candidates": formation_summary.get("candidates", 0),
                     "episode/formation_approved": formation_summary.get("approved", 0),
                     "episode/tactical_pruned": pruning_summary.get("pruned", 0),
+                    # §P2.6.1 instrument 3: monotonic section counter -- its
+                    # jumps mark section boundaries when this run's scalars
+                    # are compared against episode/mean_reward in the same
+                    # TensorBoard panel.
+                    "sawtooth/section_index": self._section_index,
                 }
             )
             self._report_task_type_metrics(episode_summaries)
@@ -529,6 +570,7 @@ class EpisodeRunner(BaseEpisodeRunner):
     def _act_with_retry(
         self,
         *,
+        agent: BaseAgent,
         observation: str,
         history_messages: List[Dict[str, Any]],
         first_step: bool,
@@ -537,7 +579,7 @@ class EpisodeRunner(BaseEpisodeRunner):
     ) -> AgentDecision:
         for attempt in range(1, MAX_RETRIES + 1):
             try:
-                decision = self.agent.act(
+                decision = agent.act(
                     observation=observation,
                     history_messages=history_messages,
                     first_step=first_step,
@@ -567,6 +609,7 @@ class EpisodeRunner(BaseEpisodeRunner):
     def _resolve_agent_turn(
         self,
         *,
+        agent: BaseAgent,
         observation: str,
         history: EpisodeHistory,
         first_step: bool,
@@ -580,6 +623,7 @@ class EpisodeRunner(BaseEpisodeRunner):
         for _ in range(MAX_SKILL_INVOCATIONS + 1):
             history_messages = self._history_to_messages(history)
             decision = self._act_with_retry(
+                agent=agent,
                 observation=observation,
                 history_messages=history_messages,
                 first_step=first_step,
@@ -628,9 +672,9 @@ class EpisodeRunner(BaseEpisodeRunner):
                     history.append_message(
                         retrieval_result.to_tool_message(skill_name=decision.skill_name)
                     )
-                    if hasattr(self.agent, "record_memory_retrieval"):
+                    if hasattr(agent, "record_memory_retrieval"):
                         try:
-                            self.agent.record_memory_retrieval(retrieval_result)
+                            agent.record_memory_retrieval(retrieval_result)
                         except Exception:
                             logger.debug(
                                 "Agent failed to record memory retrieval result",
@@ -967,13 +1011,22 @@ class EpisodeRunner(BaseEpisodeRunner):
 
         per_task_type_values: Dict[str, List[float]] = {}
         total_selections = sum(self._strategic_selection_counts.values())
+        selection_counts: List[int] = []
         for scaffold in scaffolds:
             short_id = str(scaffold.id)[:8]
             for task_type, value in (scaffold.Q_omega or {}).items():
                 metrics[f"strategic/q_omega/{short_id}/{task_type}"] = float(value)
                 per_task_type_values.setdefault(task_type, []).append(float(value))
 
+            # §P2.6.1 instrument 1: n_omega per (scaffold, task_type) next to
+            # Q_omega/variance on the same step axis -- a falling value or
+            # variance is convergence if n_omega keeps rising, but starvation
+            # (deranked option never re-accrues experience) if n_omega is flat.
+            for task_type, count in (scaffold.n_omega or {}).items():
+                metrics[f"strategic/n_omega/{short_id}/{task_type}"] = int(count)
+
             selection_count = self._strategic_selection_counts.get(scaffold.id, 0)
+            selection_counts.append(selection_count)
             metrics[f"strategic/selection_count/{short_id}"] = selection_count
             if total_selections:
                 metrics[f"strategic/selection_fraction/{short_id}"] = (
@@ -983,6 +1036,15 @@ class EpisodeRunner(BaseEpisodeRunner):
         for task_type, values in per_task_type_values.items():
             if len(values) >= 2:
                 metrics[f"strategic/q_omega_variance/{task_type}"] = float(np.var(values))
+
+        # §P2.6.1 instrument 5: rich-get-richer selection imbalance audit --
+        # a single ratio to watch for one scaffold dominating while a newer
+        # one is starved (observed live: ~6x spread across 4 scaffolds).
+        nonzero_counts = [count for count in selection_counts if count > 0]
+        if nonzero_counts:
+            metrics["strategic/selection_count_spread_ratio"] = float(max(nonzero_counts)) / float(
+                min(nonzero_counts)
+            )
 
         self._report_metrics(metrics)
 
@@ -1027,6 +1089,20 @@ class EpisodeRunner(BaseEpisodeRunner):
         action_counts = sleep_summary.get("action_counts") or {}
         for action_name, count in action_counts.items():
             metrics[f"sleep/action_{action_name}"] = count
+            # §P2.6.1 instrument 4: cumulative per-action count over the
+            # whole run. Sleep events are rare and per-event action_counts
+            # are easy to miss between them -- a run-lifetime "has absorb
+            # ever fired" answer should be readable off one flat-vs-rising
+            # scalar, not require correlating snapshots across events.
+            self._cumulative_sleep_action_counts[action_name] = (
+                self._cumulative_sleep_action_counts.get(action_name, 0) + int(count)
+            )
+        for action_name, cumulative_count in self._cumulative_sleep_action_counts.items():
+            metrics[f"sleep/action_{action_name}_cumulative"] = cumulative_count
+
+        # §P2.6.1 instrument 3: marks sleep-consolidation events when
+        # overlaid against episode/mean_reward on the shared step axis.
+        metrics["sawtooth/sleep_consolidation_marker"] = 1
 
         self._report_metrics({key: value for key, value in metrics.items() if value is not None})
 
@@ -1219,6 +1295,7 @@ class EpisodeRunner(BaseEpisodeRunner):
 
             dirty_nodes[node.id] = node
 
+            short_id = str(node.id)[:8]
             self._report_metrics(
                 {
                     "episode/omega_return": episode_return,
@@ -1226,6 +1303,16 @@ class EpisodeRunner(BaseEpisodeRunner):
                         node,
                         lambda_shrink=float(getattr(self.memory_config, "lambda_shrink", 10.0)),
                     ),
+                    # §P2.6.1 instrument 2: raw G^Omega and the baseline it's
+                    # measured against, scoped per (scaffold, task_type) so
+                    # they can be read alongside the stored advantage
+                    # (strategic/q_omega/.../...) without colliding across
+                    # scaffolds/slots in the same batch -- a declining
+                    # advantage is benign if the raw return is flat (the
+                    # baseline caught up) and concerning if both fall.
+                    f"strategic/g_omega_raw/{short_id}/{task_type}": episode_return,
+                    f"strategic/b_omega/{task_type}": baseline,
+                    f"strategic/advantage/{short_id}/{task_type}": advantage,
                 }
             )
 

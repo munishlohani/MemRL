@@ -75,63 +75,54 @@ class TacticalFormationDecision:
 
 
 @dataclass
-class TacticalEpisodicStep:
-    """One literal (observation, action) pair from the source trajectory."""
-
-    observation: str
-    action: str
-
-
-@dataclass
 class TacticalSummaryDraft:
-    """Episodic tactical memory: goal + literal step trace + outcome.
+    """Reusable tactical procedure: goal + generalized ordered steps + outcome.
 
-    Unlike an abstracted skill summary, this preserves the actual sequence
-    of steps taken rather than compressing them into a generalized rule.
+    Unlike a literal episodic trace, this generalizes over the specific
+    object/receptacle instance so the memory transfers to similar
+    situations instead of replaying one exact past episode. A live run
+    showed the literal-episodic form doing more harm than good -- it
+    over-fits retrieval to the one instance the memory happened to be
+    formed from.
     """
 
     goal: str
-    steps: List[TacticalEpisodicStep] = field(default_factory=list)
+    procedure: List[str] = field(default_factory=list)
     outcome: str = ""
 
     def to_text(self) -> str:
-        """Render the draft into a canonical episodic memory string."""
+        """Render the draft into a canonical procedural memory string."""
         lines: List[str] = []
         if self.goal.strip():
             lines.append(f"GOAL: {self.goal.strip()}")
-        if self.steps:
-            lines.append("STEPS:")
-            for idx, step in enumerate(self.steps, 1):
-                observation = step.observation.strip()
-                action = step.action.strip()
-                if observation or action:
-                    lines.append(f"{idx}. obs: {observation} -> action: {action}")
+        if self.procedure:
+            lines.append("PROCEDURE:")
+            for idx, step in enumerate(self.procedure, 1):
+                step_text = step.strip()
+                if step_text:
+                    lines.append(f"{idx}. {step_text}")
         if self.outcome.strip():
             lines.append(f"OUTCOME: {self.outcome.strip()}")
         return "\n".join(lines).strip()
 
 
-TACTICAL_SUMMARY_PROMPT = """You are converting one successful positive-TD experience into an episodic tactical memory.
+TACTICAL_SUMMARY_PROMPT = """You are converting one admitted tactical experience into a reusable tactical procedure.
 
-The memory will be embedded and retrieved later. Preserve the literal step-by-step trace of what happened -- do not compress, generalize, or abstract it into a rule or lesson. Only describe the successful path that worked; failed attempts are filtered upstream and will not be stored.
+The memory will be embedded and retrieved later. Distill the experience into a short, general, reusable PROCEDURE for handling this kind of situation -- not a literal replay of exactly what happened. Generalize over the specific object/receptacle instance (e.g. "the target object", "the receptacle") while keeping the action sequence itself concrete and actionable. Describe only what actually happened for this experience; do not fabricate a different or more successful outcome, even if the source episode ultimately failed.
 
 Return a single JSON object and nothing else.
 
 Schema:
 {{
   "goal": string,
-  "steps": [
-    {{"observation": string, "action": string}},
-    ...
-  ],
+  "procedure": [string, ...],
   "outcome": string
 }}
 
 Rules:
-- goal: one sentence describing what this episode accomplished.
-- steps: the actual ordered sequence of (observation, action) pairs taken, drawn directly from the source experience below. Do not merge, skip, or paraphrase steps into a shorter abstracted procedure -- one entry per step actually taken.
+- goal: one sentence describing the kind of situation this procedure handles, generalized -- not tied to the one specific object/receptacle in this experience.
+- procedure: an ordered list of short, imperative, reusable instructions for handling this kind of situation. Generalize over the specific object/receptacle (do not name the literal instance), but keep the action sequence itself concrete and literal.
 - outcome: one short sentence stating the result (e.g. success/failure and reward).
-- Do not include a reusable rule, lesson, or generalization -- this memory is episodic, not a distilled skill.
 - Do not include markdown, explanations, or extra keys.
 
 Source experience:
@@ -359,14 +350,14 @@ class TacticalSummaryWriter:
         payload = self._load_json_object(response)
 
         goal = self._coerce_optional_str(payload.get("goal")) or candidate.task_description
-        steps = self._coerce_steps(payload.get("steps"))
-        if not steps:
-            steps = [TacticalEpisodicStep(observation=candidate.observation, action=candidate.action)]
+        procedure = self._coerce_procedure(payload.get("procedure"))
+        if not procedure:
+            procedure = [f"{candidate.action.strip()} (given: {candidate.observation.strip()})"]
         outcome = self._coerce_optional_str(payload.get("outcome")) or f"Reward={candidate.reward:.3f}"
 
         return TacticalSummaryDraft(
             goal=goal,
-            steps=steps,
+            procedure=procedure,
             outcome=outcome,
         )
 
@@ -399,24 +390,15 @@ class TacticalSummaryWriter:
         return stripped or None
 
     @staticmethod
-    def _coerce_steps(value: object) -> List[TacticalEpisodicStep]:
+    def _coerce_procedure(value: object) -> List[str]:
         if not isinstance(value, list):
             return []
-        steps: List[TacticalEpisodicStep] = []
-        for item in value:
-            if not isinstance(item, dict):
-                continue
-            observation = str(item.get("observation") or "").strip()
-            action = str(item.get("action") or "").strip()
-            if observation or action:
-                steps.append(TacticalEpisodicStep(observation=observation, action=action))
-        return steps
+        return [str(item).strip() for item in value if str(item).strip()]
 
 
 __all__ = [
     "TACTICAL_FORMATION_PROMPT",
     "TACTICAL_SUMMARY_PROMPT",
-    "TacticalEpisodicStep",
     "TacticalFormationCandidate",
     "TacticalFormationDecision",
     "TacticalFormationJudge",

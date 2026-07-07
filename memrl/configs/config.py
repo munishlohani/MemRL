@@ -160,6 +160,38 @@ class MemoryConfig(BaseModel):
         description="Minimum Q-salience required for a tactical node to enter sleep consolidation.",
     )
 
+    # Phase 2 hyperparameters from Project.md.
+    lambda_retrieval: float = Field(
+        default=0.5,
+        description=(
+            "Advantage weight in the retrieval blend (spec §P2.1, extended to "
+            "strategic scaffold scoring per explicit instruction): "
+            "score = lambda_retrieval * rank_norm(Q) "
+            "+ (1 - lambda_retrieval) * rank_norm(cos(e_i, e_q)). Both terms "
+            "are rank-normalized over the candidate set before blending, so "
+            "this is a convex combination in comparable units. Shared by "
+            "tactical (Q_i(t_k)) and strategic (Q_omega) retrieval -- one "
+            "coefficient, not two. Default 0.5 mirrors MemRL's own "
+            "similarity-utility blend, which its ablations found optimal at "
+            "lambda=0.5 for the same convex-combination form -- borrowing the "
+            "coefficient is safe here specifically because rank-normalization "
+            "already fixes the raw-scale mismatch (advantage vs. cosine "
+            "similarity) that would otherwise make copying MemRL's lambda "
+            "unsound. Not independently swept on this system."
+        ),
+    )
+    theta_retrieval: float = Field(
+        default=0.0,
+        description=(
+            "Minimum blended tactical retrieval score required to return a "
+            "candidate at all (tactical retrieval only, not strategic). "
+            "Below this, no memory is retrieved for that step -- no memory "
+            "is better than a bad one. Score is bounded to [0, 1] (a convex "
+            "combination of two rank-normalized terms), so 0.0 is a no-op "
+            "gate (current default; not yet swept)."
+        ),
+    )
+
     user_id: str = Field(default="memp_user", description="User ID for memory management")
     skill_db_path: str = Field(
         default="results/memrl/skill_memory.sqlite",
@@ -260,7 +292,7 @@ class ExperimentConfig(BaseModel):
             "game set exactly num_epochs times instead of a raw section count."
         ),
     )
-    batch_size: int = Field(default=32, description="Number of parallel environments for sampling")
+    batch_size: int = Field(default=5, description="Number of parallel environments for sampling (mini-batch)")
     max_steps: int = Field(default=30, description="Max steps per episode during training and evaluation")
     valid_interval: int = Field(default=1, description="Run evaluation on the validation set every N sections. Set to 0 to disable.")
     test_interval: int = Field(default=1, description="Run evaluation on the test set every N sections. Set to 0 to disable.")

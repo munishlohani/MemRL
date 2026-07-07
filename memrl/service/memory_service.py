@@ -1092,10 +1092,12 @@ class MemoryService:
         if depth == 1:
             return self.retriever.strategic_retrieve(
                 query_text=query_text,
+                query_embedding=query_embedding,
                 nodes=nodes,
                 representations=representations,
                 top_k=k,
                 task_type_dominant=task_type_dominant,
+                lambda_retrieval=float(getattr(self.memory_config, "lambda_retrieval", 0.5) or 0.5),
             )
 
         if depth not in (None, 2):
@@ -1127,6 +1129,8 @@ class MemoryService:
                 current_step=resolved_step,
                 lambda_shrink=float(getattr(self.graph, "lambda_shrink", 10.0) or 10.0),
                 cluster_scoped=False,
+                task_type_dominant=task_type_dominant,
+                theta_retrieval=float(getattr(self.memory_config, "theta_retrieval", 0.0) or 0.0),
             )
 
         tactical_node_ids = self.graph.child_ids(active_scaffold.id)
@@ -1147,6 +1151,9 @@ class MemoryService:
             current_step=resolved_step,
             lambda_shrink=float(getattr(self.graph, "lambda_shrink", 10.0) or 10.0),
             cluster_scoped=True,
+            task_type_dominant=task_type_dominant,
+            lambda_retrieval=float(getattr(self.memory_config, "lambda_retrieval", 0.5) or 0.5),
+            theta_retrieval=float(getattr(self.memory_config, "theta_retrieval", 0.0) or 0.0),
         )
         tactical_result["active_strategic_node_id"] = active_scaffold.id
         tactical_result["active_strategic_score"] = float(

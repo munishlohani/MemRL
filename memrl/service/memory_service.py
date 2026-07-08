@@ -82,6 +82,7 @@ class MemoryService:
             lambda_base=memory_config.lambda_base,
             lambda_shrink=getattr(memory_config, "lambda_shrink", 10.0),
             epsilon=memory_config.epsilon_decay,
+            alpha_baseline=getattr(memory_config, "alpha_baseline", 0.1),
         )
         resolved_db_path = db_path or getattr(
             memory_config,

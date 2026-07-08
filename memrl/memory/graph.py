@@ -15,13 +15,17 @@ class SkillGraph:
     lambda_base: Optional[float] = None
     lambda_shrink: float = 10.0
     epsilon: float = 0.01
+    alpha_baseline: float = 0.1
     root_id: str = "root"
     current_step: int = 0
     nodes: Dict[str, SkillNode] = field(default_factory=dict)
     # Per-task-type advantage baselines b(t_k) / b^Omega(t_k) (spec §2.7, §4.1, §3.8):
-    # running mean of the tactical episode return-to-go / strategic episode
-    # return, tracked incrementally per task type. Read before update so an
-    # episode is scored against history excluding itself.
+    # exponential moving average of the tactical episode return-to-go /
+    # strategic episode return, tracked per task type with shared rate
+    # alpha_baseline. Read before update so an episode is scored against
+    # history excluding itself. EMA (not a lifetime mean) so the baseline
+    # stays responsive to recent performance instead of becoming
+    # increasingly sluggish as the episode count for a task type grows.
     baseline_tactical: Dict[str, float] = field(default_factory=dict)
     baseline_tactical_n: Dict[str, int] = field(default_factory=dict)
     baseline_strategic: Dict[str, float] = field(default_factory=dict)
@@ -31,19 +35,25 @@ class SkillGraph:
         return float(self.baseline_tactical.get(task_type, 0.0))
 
     def update_tactical_baseline(self, task_type: str, value: float) -> None:
-        n = int(self.baseline_tactical_n.get(task_type, 0)) + 1
-        prev = float(self.baseline_tactical.get(task_type, 0.0))
-        self.baseline_tactical[task_type] = prev + (float(value) - prev) / n
-        self.baseline_tactical_n[task_type] = n
+        n = int(self.baseline_tactical_n.get(task_type, 0))
+        if n == 0:
+            self.baseline_tactical[task_type] = float(value)
+        else:
+            prev = float(self.baseline_tactical.get(task_type, 0.0))
+            self.baseline_tactical[task_type] = prev + self.alpha_baseline * (float(value) - prev)
+        self.baseline_tactical_n[task_type] = n + 1
 
     def get_strategic_baseline(self, task_type: str) -> float:
         return float(self.baseline_strategic.get(task_type, 0.0))
 
     def update_strategic_baseline(self, task_type: str, value: float) -> None:
-        n = int(self.baseline_strategic_n.get(task_type, 0)) + 1
-        prev = float(self.baseline_strategic.get(task_type, 0.0))
-        self.baseline_strategic[task_type] = prev + (float(value) - prev) / n
-        self.baseline_strategic_n[task_type] = n
+        n = int(self.baseline_strategic_n.get(task_type, 0))
+        if n == 0:
+            self.baseline_strategic[task_type] = float(value)
+        else:
+            prev = float(self.baseline_strategic.get(task_type, 0.0))
+            self.baseline_strategic[task_type] = prev + self.alpha_baseline * (float(value) - prev)
+        self.baseline_strategic_n[task_type] = n + 1
 
     def lambda_for_depth(self, depth: int) -> float:
         if depth == 1:

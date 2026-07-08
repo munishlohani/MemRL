@@ -97,7 +97,7 @@ class MemoryConfig(BaseModel):
         description="Utility floor in the tactical decay denominator.",
     )
     theta_prune: Optional[float] = Field(
-        default=None,
+        default=0.05,
         description="Retention threshold for tactical node pruning.",
     )
     tactical_action_cap: Optional[int] = Field(
@@ -107,6 +107,19 @@ class MemoryConfig(BaseModel):
     alpha: float = Field(
         default=0.1,
         description="Tactical single-step Q-learning rate.",
+    )
+    alpha_baseline: float = Field(
+        default=0.1,
+        description=(
+            "EMA rate for the per-task-type advantage baselines b(t_k) and "
+            "b_omega(t_k) (spec §2.7/§4.1/§3.8), shared by tactical and "
+            "strategic. Replaces the earlier lifetime running mean, which "
+            "grows increasingly sluggish (step size 1/n) as a task type "
+            "accumulates episodes -- an EMA stays responsive to recent "
+            "performance instead. The first observed value for a task type "
+            "is not blended (n=0 sets the baseline directly); the EMA "
+            "applies from the second observation onward."
+        ),
     )
     theta_adv: float = Field(
         default=0.0,

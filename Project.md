@@ -153,7 +153,7 @@ $$G_t = \gamma^{(T-1)-t}R,\qquad A_t = G_t - b(t_k) > \theta_{\text{adv}} \Right
 $b(t_k)$ is the per-task-type EMA baseline (rate $\alpha_{\text{baseline}}$; first observation sets it directly). Under sparse terminal reward, $G_t$ has the **same sign for every step in an episode** — a coarse episode-success signal. Subtracting $b(t_k)$ sharpens it to "this trajectory beat the task-type average," discarding mediocre episodes before any LLM call. The gate **cannot** isolate the load-bearing step, and nothing downstream does either: every above-baseline step is stored, so a successful $T$-step episode can store up to $T$ nodes. Formation volume is therefore high; decay is the counter-pressure that removes what fails to prove out.
 
 ### 4.2 Stage 2 — LLM Summarization (no judgment)
-**There is no LLM approve/reject step.** Every candidate passing Stage 1 is stored unconditionally. The LLM's sole formation-time role is summarizing an admitted candidate into content (`ProceduralizationBuilder`). Decay already removes nodes that turn out low-value, so a judge would be a redundant second quality gate on top of Stage 1 + decay. Summarization and embedding calls are batched at episode end and committed to `skill_representation` in one write.
+**There is no LLM approve/reject step.** Every candidate passing Stage 1 is stored unconditionally. The LLM's sole formation-time role is summarizing an admitted candidate into content (`TacticalSummaryWriter`, `memrl/service/formation_judger.py` — not the legacy `memrl/service/builders.py` classes, which are unused dead code from the base MemRL template). Decay already removes nodes that turn out low-value, so a judge would be a redundant second quality gate on top of Stage 1 + decay. Summarization and embedding calls are batched at episode end and committed to `skill_representation` in one write.
 
 ---
 
@@ -275,7 +275,7 @@ Recompute via `recompute_decay_rate` after any Q-update, on **active nodes only*
 
 ## 7. Memory Management
 
-**Decay-based pruning:** $d_i(\Delta t) < \theta_{\text{prune}} \Rightarrow$ remove (tactical only; task-agnostic, uses `decay_rate` directly). When $\theta_{\text{prune}}$ is unset, pruning is a no-op and the graph grows monotonically under decay — `decay_rate` is still computed and used everywhere else (salience, selection).
+**Decay-based pruning:** $d_i(\Delta t) < \theta_{\text{prune}} \Rightarrow$ remove (tactical only; task-agnostic, uses `decay_rate` directly). Enabled by default ($\theta_{\text{prune}}=0.05$); if explicitly set to `None`, pruning becomes a no-op and the graph grows monotonically under decay — `decay_rate` is still computed and used everywhere else (salience, selection) regardless of whether removal is active.
 
 **Action-space cap:** $|A^\tau| \le N$ — the top-$N$ tactical nodes by score are eligible at retrieval (a hard bound for convergence; the strategic $d=1$ set is small by construction).
 
@@ -408,7 +408,7 @@ for each episode:
     # ---- MAINTENANCE: prune, then update dominant type, then sleep ----
     for node in list(G.tactical_nodes()):
         if exp(-node.decay_rate*(current_step - node.last_accessed_step)) < theta_prune:
-            G.remove(node)                              # no-op if theta_prune unset (§7)
+            G.remove(node)                              # enabled by default (theta_prune=0.05); no-op only if explicitly unset (§7)
     for node, _ in active_skills:
         node.task_type_dominant = argmax(node.n)
     if sum(1 for n in G.tactical_nodes() if not n.consolidated) >= N_sleep:
@@ -449,10 +449,10 @@ Defaults reflect `MemoryConfig` (`memrl/configs/config.py`). Symbols marked "abl
 | $\theta_{\text{adv}}$ (`theta_adv`) | Stage-1 gate: store step if $A_t = G_t - b(t_k) > \theta_{\text{adv}}$ | 0.0 |
 | $b(t_k),\ b^\Omega(t_k)$ | Per-task-type advantage baselines (EMA) | tracked |
 | $\alpha_{\text{baseline}}$ (`alpha_baseline`) | EMA rate for both baselines; first obs sets directly | 0.1 |
-| $\lambda$ (`lambda_base`) | Base decay rate (flat layer); pruning inert while unset | None |
+| $\lambda$ (`lambda_base`) | Base decay rate (flat layer); `decay_rate` computation is degenerate while unset | None |
 | $\lambda_{\text{shrink}}$ (`lambda_shrink`) | Shrinkage pseudocount for $\bar{Q}_{i,w}$, $\bar{Q}^\Omega$, $Q^\Omega$ init | 10 |
 | $\epsilon$ (`epsilon_decay`) | Salience floor in $\max(\bar{Q}_{i,w},0)+\epsilon$ | 0.01 |
-| $\theta_{\text{prune}}$ (`theta_prune`) | Retention threshold; pruning disabled while unset | None |
+| $\theta_{\text{prune}}$ (`theta_prune`) | Retention threshold; pruning is **enabled by default** (was `None`/disabled) | 0.05 |
 | $N$ (`tactical_action_cap`) | Hard tactical action-space cap | None |
 | $\alpha$ (`alpha`) | Tactical advantage learning rate | 0.1 |
 | $\alpha^\Omega$ (`alpha_omega`) | Strategic advantage learning rate (independent) | 0.1 |
@@ -522,7 +522,7 @@ The theory above maps onto the codebase as follows. A coding agent implementing 
 | Utility salience (§3.3) | `memrl/utils/q_utils.py` | `get_q_salience` — shrinkage-weighted mean advantage |
 | Persistence + orchestration (§5.3) | `memrl/service/memory_service.py` | `MemoryService`: two-table SQLite I/O, working-set load/flush, node creation, pruning, sleep entry point, `retrieve_query` |
 | Retrieval blend (§9) | `memrl/service/retrievers.py` | `SkillSimilarityRetriever.tactical_retrieve` / `strategic_retrieve`; `rank_normalize`; `cosine_similarity` |
-| Content builders (§4.2, §5.3) | `memrl/service/builders.py` | `ProceduralizationBuilder` (default), `ScriptBuilder`, `TrajectoryBuilder` via `get_builder` |
+| Tactical summarization (§4.2, §5.3) | `memrl/service/formation_judger.py` | `TacticalSummaryWriter`, `TacticalSummaryDraft`, `TACTICAL_SUMMARY_PROMPT`. Note: `memrl/service/builders.py` (`ProceduralizationBuilder`/`ScriptBuilder`/`TrajectoryBuilder`/`get_builder`) is unused legacy code from the base MemRL template — not the current formation path |
 | Sleep consolidation (§8) | `memrl/service/sleep_consolidation/` | `SleepConsolidationService` (`service.py`), `clustering.py`, `prompts.py`, `types.py`, `checkpoint.py` |
 | Episode loop (§10) | `memrl/episode/agent_runner.py` | `EpisodeRunner.run`: step loop, end-of-episode Q updates, formation commit, strategic selection, maintenance, metrics |
 | Env abstraction | `memrl/episode/env_adapter.py` | `EpisodeEnvAdapter` ABC — `reset`/`step`/`task_type`/`known_task_types`; benchmark adapters implement it |

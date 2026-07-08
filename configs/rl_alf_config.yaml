@@ -30,6 +30,7 @@ memory:
   add_similarity_threshold: 0.90
   n_sleep: 20
   lambda_base: 1e-3  # Base decay rate for tactical nodes (spec sweep range [1e-4, 1e-2] log-scale).
+  theta_prune: 0.01  # Retention threshold for tactical node pruning: nodes whose decay-based retention drops below this are removed. Enabled (was unset/disabled). Not yet swept.
   alpha_baseline: 0.1  # EMA rate for the tactical/strategic advantage baselines b(t_k)/b_omega(t_k), shared. Replaces the lifetime running mean. Not yet swept.
   lambda_retrieval: 0.5  # Advantage weight in the retrieval blend (spec §P2.1, shared by tactical and strategic): score = lambda_retrieval * rank_norm(Q) + (1 - lambda_retrieval) * rank_norm(cos(e_i, e_q)). Reasoned default (MemRL's own blend), not swept.
   theta_retrieval: 0.0  # Tactical-only quality gate: candidates scoring below this are dropped entirely (no memory is better than a bad one). 0.0 = no-op; not yet swept.

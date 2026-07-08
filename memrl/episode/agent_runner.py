@@ -21,7 +21,6 @@ from typing import Any, Dict, List, Optional
 from memrl.service.sleep_consolidation.checkpoint import SleepConsolidationCheckpoint
 from memrl.service.formation_judger import (
     TacticalFormationCandidate,
-    TacticalFormationJudge,
     TacticalSummaryWriter,
 )
 from memrl.skills.memory_retrieval import MemoryRetrievalResult, MemoryRetrievalSkill
@@ -90,9 +89,6 @@ class EpisodeRunner(BaseEpisodeRunner):
             )
         else:
             self.sleep_checkpoint = None
-        self.formation_judge = (
-            TacticalFormationJudge(llm_provider) if llm_provider is not None else None
-        )
         self.tactical_summary_writer = (
             TacticalSummaryWriter(llm_provider) if llm_provider is not None else None
         )
@@ -908,9 +904,12 @@ class EpisodeRunner(BaseEpisodeRunner):
         formation_summary: Dict[str, Any],
     ) -> None:
         """Stage-1 admission rate (overall / by outcome / by step position)
-        and Stage-2 approval rate. The by-outcome split should diverge (if
-        it doesn't, b(t_k) isn't discriminating); the by-position split
-        checks for the recency-skew failure mode."""
+        and the storage rate of queued candidates. The by-outcome split
+        should diverge (if it doesn't, b(t_k) isn't discriminating); the
+        by-position split checks for the recency-skew failure mode. There
+        is no LLM judge anymore -- storage_rate should sit at ~1.0 (every
+        stage-1-admitted candidate is stored); a persistent drop below 1.0
+        would flag a bug, not a judgment call."""
 
         def _rate(admitted_key: str, total_key: str) -> Optional[float]:
             total = formation_gate_stats.get(total_key, 0)
@@ -934,7 +933,7 @@ class EpisodeRunner(BaseEpisodeRunner):
         candidates = formation_summary.get("candidates", 0) or 0
         approved = formation_summary.get("approved", 0) or 0
         if candidates:
-            metrics["formation/stage2_approval_rate"] = float(approved) / float(candidates)
+            metrics["formation/storage_rate"] = float(approved) / float(candidates)
 
         created = len(formation_summary.get("created_nodes") or [])
         self._cumulative_nodes_created += created
@@ -1554,18 +1553,11 @@ class EpisodeRunner(BaseEpisodeRunner):
             raw_candidates=len(candidates_raw),
         )
 
-        if self.formation_judge is None:
-            logger.warning(
-                "Formation judge is unavailable; skipping %s pending tactical candidates",
-                len(candidates_raw),
-            )
-            return {
-                "candidates": len(candidates_raw),
-                "approved": 0,
-                "created_nodes": [],
-                "skipped": True,
-            }
-
+        # No LLM judge anymore: the phase-1 advantage gate is the sole
+        # formation decision. Every candidate that passes it is stored --
+        # the LLM's only remaining role (tactical_summary_writer, below) is
+        # summarizing it into a procedural memory, not deciding whether to
+        # keep it.
         candidates = [
             TacticalFormationCandidate(**candidate)
             for candidate in candidates_raw
@@ -1587,39 +1579,9 @@ class EpisodeRunner(BaseEpisodeRunner):
                 "skipped": True,
                 "filtered": True,
             }
-        try:
-            decisions = self.formation_judge.judge_candidates(candidates)
-        except Exception as exc:
-            logger.warning("Formation judge failed; skipping tactical storage: %s", exc)
-            return {
-                "candidates": len(candidates_raw),
-                "approved": 0,
-                "created_nodes": [],
-                "skipped": True,
-                "error": str(exc),
-            }
-        log_event(
-            logger,
-            "tactical_formation.judge_done",
-            passed_candidates=len(candidates),
-            decision_count=len(decisions),
-            approved_count=sum(1 for decision in decisions if decision.approved),
-        )
 
-        decisions_by_id = {decision.candidate_id: decision for decision in decisions}
         created_nodes: List[str] = []
         for candidate in candidates:
-            decision = decisions_by_id.get(candidate.candidate_id)
-            if decision is None or not decision.approved:
-                log_event(
-                    logger,
-                    "tactical_formation.decision",
-                    candidate_id=candidate.candidate_id,
-                    approved=False,
-                    summary=None,
-                )
-                continue
-
             parent_id = candidate.active_strategic_node_id or self.memory_service.graph.root_id
             node_id = uuid4().hex
             evidence_ids = [candidate.candidate_id]
@@ -1647,7 +1609,7 @@ class EpisodeRunner(BaseEpisodeRunner):
                 )
             )
 
-            summary_content = decision.summary or candidate.fallback_summary()
+            summary_content = candidate.fallback_summary()
             summary_writer = self.tactical_summary_writer
             if summary_writer is not None:
                 try:
@@ -1655,7 +1617,7 @@ class EpisodeRunner(BaseEpisodeRunner):
                     summary_content = summary_writer.format_summary(summary_draft) or summary_content
                 except Exception as exc:
                     logger.warning(
-                        "Tactical summary generation failed; using judge summary instead: %s",
+                        "Tactical summary generation failed; using fallback summary instead: %s",
                         exc,
                     )
             log_event(

@@ -28,7 +28,7 @@ memory:
   confidence_threshold: 0.0
   memory_confidence: 100.0
   add_similarity_threshold: 0.90
-  n_sleep: 10
+  n_sleep: 20
   lambda_base: 1e-3  # Base decay rate for tactical nodes (spec sweep range [1e-4, 1e-2] log-scale).
   lambda_retrieval: 0.5  # Advantage weight in the retrieval blend (spec §P2.1, shared by tactical and strategic): score = lambda_retrieval * rank_norm(Q) + (1 - lambda_retrieval) * rank_norm(cos(e_i, e_q)). Reasoned default (MemRL's own blend), not swept.
   theta_retrieval: 0.0  # Tactical-only quality gate: candidates scoring below this are dropped entirely (no memory is better than a bad one). 0.0 = no-op; not yet swept.

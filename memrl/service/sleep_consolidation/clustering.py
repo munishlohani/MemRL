@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from math import sqrt
+from math import floor, sqrt
 from typing import List, Optional, Sequence
 
 import numpy as np  # type: ignore
@@ -75,10 +75,14 @@ class KMeansClusteringStrategy(ClusteringStrategyBase):
 
     @staticmethod
     def _default_k(n_samples: int) -> int:
-        """Choose a small, stable default cluster count for Phase 1."""
-        if n_samples <= 2:
-            return 1
-        return max(2, int(sqrt(n_samples)))
+        """Default cluster count: max(2, floor(sqrt(eligible_node_count))).
+
+        `cluster()` never calls this with fewer than 2 samples (n_samples==1
+        short-circuits earlier), so the floor of 2 is the only special case
+        needed -- a 2-eligible-node sleep event now gets 2 singleton
+        clusters instead of being forced into one.
+        """
+        return max(2, floor(sqrt(n_samples)))
 
     def _run_kmeans(self, vectors: List[List[float]], k: int) -> List[int]:
         # Let sklearn failures propagate with their original message. Sleep

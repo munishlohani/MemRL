@@ -89,7 +89,7 @@ $$\mathcal{M}_t = (\mathcal{G}_t,\ \{Q_i(t_k)\},\ \{Q^{\Omega}_j(t_k)\},\ \{b(t_
 | $\mathcal{G}_t$ | Unified graph: $d=1$ strategic + flat tactical |
 | $\{Q_i(t_k)\}$ | Tactical mean advantage, per task type; decay reads $\bar{Q}_{i,w}$ floored at 0 |
 | $\{Q^{\Omega}_j(t_k)\}$ | Strategic mean advantage (option-value), per task type; **never merged** with $Q_i$ |
-| $\{b(t_k)\},\{b^\Omega(t_k)\}$ | Per-task-type advantage baselines: terminal reward $R$ (tactical), discounted return $G^\Omega$ (strategic). Tracked as an **EMA** with shared rate $\alpha_{\text{baseline}}$; the first observation sets the baseline directly. An EMA is used rather than a lifetime running mean because a $1/n$ step size grows unresponsive as episodes accumulate. |
+| $\{b(t_k)\},\{b^\Omega(t_k)\}$ | Per-task-type advantage baselines: discounted return-to-go from the episode's first step $G_0=\gamma^{(T-1)}R$ (tactical), discounted whole-episode return $G^\Omega$ (strategic) — both tracked in the same discounted-return units as the targets they're subtracted from (§3.2, §3.8). Tracked as an **EMA** with shared rate $\alpha_{\text{baseline}}$; the first observation sets the baseline directly. An EMA is used rather than a lifetime running mean because a $1/n$ step size grows unresponsive as episodes accumulate. |
 | $\lambda$ | Base decay rate (single value; flat layer) |
 | $\epsilon$ | Salience floor in the decay denominator |
 
@@ -401,6 +401,7 @@ for each episode:
 
     # ============ END OF EPISODE ============
     T = len(episode_rewards); R = episode_rewards[-1] if episode_rewards else 0.0
+    G_0 = (gamma**(T-1))*R if T > 0 else 0.0    # discounted return-to-go from the episode's first step
     G_om = sum((gamma_omega**t)*r for t, r in enumerate(episode_rewards))
     b_tac = baseline_tac.get(t_k, 0.0); b_str = baseline_str.get(t_k, 0.0)   # read before update
 
@@ -418,7 +419,10 @@ for each episode:
         omega.Q_omega[t_k] = omega.Q_omega.get(t_k,0.0) + alpha_omega*(A_om - omega.Q_omega.get(t_k,0.0))
         omega.n_omega[t_k] = omega.n_omega.get(t_k,0) + 1
 
-    baseline_tac.update_ema(t_k, R, alpha_baseline)     # EMA; first obs sets directly
+    # Both baselines track the same discounted-return units as the targets
+    # they're read against (G_t / G^Omega above) -- b_tac is G_0, the whole
+    # episode's return-to-go from its first step, not the raw terminal R.
+    baseline_tac.update_ema(t_k, G_0, alpha_baseline)   # EMA; first obs sets directly
     baseline_str.update_ema(t_k, G_om, alpha_baseline)
 
     # ---- FORMATION: LLM summarizes admitted candidates (NO judgment step, §4.2) ----

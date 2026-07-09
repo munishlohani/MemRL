@@ -7,9 +7,8 @@ from .clustering import (
     get_clustering_strategy,
 )
 from .prompts import (
-    SLEEP_CONSOLIDATION_PROMPT,
-    build_sleep_consolidation_prompt,
-    format_existing_scaffolds,
+    REVISE_STRATEGY_PROMPT,
+    build_revise_strategy_prompt,
     format_cluster_contents,
 )
 from .service import SleepConsolidationService
@@ -32,8 +31,7 @@ __all__ = [
     "SleepConsolidationDecision",
     "SleepConsolidationResult",
     "StrategicScaffoldContext",
-    "SLEEP_CONSOLIDATION_PROMPT",
-    "build_sleep_consolidation_prompt",
-    "format_existing_scaffolds",
+    "REVISE_STRATEGY_PROMPT",
+    "build_revise_strategy_prompt",
     "format_cluster_contents",
 ]

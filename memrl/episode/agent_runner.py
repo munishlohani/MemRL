@@ -460,6 +460,12 @@ class EpisodeRunner(BaseEpisodeRunner):
                 dirty_nodes=dirty_nodes,
             )
 
+            self._queue_failed_episode_reflections(
+                task_descriptions=task_descriptions,
+                success_flags=success_flags,
+                active_strategic_node_ids=active_strategic_node_ids,
+            )
+
             formation_summary = self._commit_pending_formations()
             pruning_summary = self._prune_tactical_nodes()
             self._flush_dirty_nodes(dirty_nodes)
@@ -963,6 +969,21 @@ class EpisodeRunner(BaseEpisodeRunner):
     def _report_graph_snapshot_metrics(self, pruning_summary: Dict[str, Any]) -> None:
         """Tactical graph size, decay-rate distribution, and pruning counts.
 
+        `graph/decay_rate_mean/min/max` are computed over the SURVIVING
+        tactical nodes only -- a pruned node stops contributing to them the
+        moment it's removed (`SkillGraph.remove` pops it from `graph.nodes`,
+        and this method reads `graph.nodes_at_depth(2)` after pruning already
+        ran this batch, §10). That's correct for "current live graph," but it
+        creates the same convergence-vs-survivorship ambiguity the §P2.6.1
+        n_omega overlay was built to resolve for the strategic tier: a
+        falling decay_rate_mean can mean the tactical layer is genuinely
+        getting better, OR it can just mean pruning keeps removing the worst
+        (highest-decay-rate) nodes, leaving only survivors. Always read
+        decay_rate_mean next to tactical_node_count (falling mean + falling
+        count = likely survivorship; falling mean + stable/rising count =
+        likely genuine improvement) -- graph/pruned_fraction_of_created
+        below is a single-scalar version of that same check.
+
         Pruned-count-by-task-type is tracked cumulatively to check for
         differential starvation across easy/hard task types.
         """
@@ -982,6 +1003,15 @@ class EpisodeRunner(BaseEpisodeRunner):
         self._cumulative_pruned_count += pruned_this_epoch
         metrics["graph/pruned_this_epoch"] = pruned_this_epoch
         metrics["graph/pruned_cumulative"] = self._cumulative_pruned_count
+
+        # Survivorship-bias check: what fraction of every tactical node ever
+        # formed has since been pruned. High and rising alongside a falling
+        # decay_rate_mean is the tell that the mean's improvement is mostly
+        # attrition, not genuine skill quality gains.
+        if self._cumulative_nodes_created:
+            metrics["graph/pruned_fraction_of_created"] = float(
+                self._cumulative_pruned_count
+            ) / float(self._cumulative_nodes_created)
 
         pruned_by_task_type = pruning_summary.get("pruned_by_task_type") or {}
         for task_type, count in pruned_by_task_type.items():
@@ -1313,6 +1343,50 @@ class EpisodeRunner(BaseEpisodeRunner):
                     f"strategic/b_omega/{task_type}": baseline,
                     f"strategic/advantage/{short_id}/{task_type}": advantage,
                 }
+            )
+
+    def _queue_failed_episode_reflections(
+        self,
+        *,
+        task_descriptions: List[str],
+        success_flags: List[bool],
+        active_strategic_node_ids: List[Optional[str]],
+    ) -> None:
+        """Buffer failed episodes onto their active scaffold's failure buffer.
+
+        This is the reflection channel's capture side: a condensed trace of
+        each failed episode that had an active strategic scaffold is
+        appended in-memory (`graph.record_failure`). Sleep consolidation
+        Pass 2 later consumes these as negative evidence and flushes them
+        only once a revision succeeds -- nothing here touches SQLite.
+        """
+        graph = getattr(self.memory_service, "graph", None)
+        if graph is None:
+            return
+        for slot_idx, success in enumerate(success_flags):
+            if success:
+                continue
+            node_id = (
+                active_strategic_node_ids[slot_idx]
+                if slot_idx < len(active_strategic_node_ids)
+                else None
+            )
+            if node_id is None:
+                continue
+            history = self.episode_histories[slot_idx]
+            trace = (
+                f"Task: {task_descriptions[slot_idx]}\n"
+                f"{history.get_formatted_history()}\n"
+                f"Outcome: failed (reward={self.episode_rewards[slot_idx]})"
+            )
+            graph.record_failure(node_id, trace)
+            log_event(
+                logger,
+                "reflection.failure_recorded",
+                scaffold_id=node_id,
+                episode_slot_index=slot_idx,
+                task_description=task_descriptions[slot_idx],
+                reward=self.episode_rewards[slot_idx],
             )
 
     def _flush_dirty_nodes(self, dirty_nodes: Dict[str, Any]) -> None:

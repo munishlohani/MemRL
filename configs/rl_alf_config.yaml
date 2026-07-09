@@ -34,6 +34,8 @@ memory:
   alpha_baseline: 0.1  # EMA rate for the tactical/strategic advantage baselines b(t_k)/b_omega(t_k), shared. Replaces the lifetime running mean. Not yet swept.
   lambda_retrieval: 0.5  # Advantage weight in the retrieval blend (spec §P2.1, shared by tactical and strategic): score = lambda_retrieval * rank_norm(Q) + (1 - lambda_retrieval) * rank_norm(cos(e_i, e_q)). Reasoned default (MemRL's own blend), not swept.
   theta_retrieval: 0.0  # Tactical-only quality gate: candidates scoring below this are dropped entirely (no memory is better than a bad one). 0.0 = no-op; not yet swept.
+  theta_absorb: 0.75  # Sleep consolidation Pass 1 (algorithmic): a cluster absorbs into the closest existing scaffold if cosine(cluster_centroid, scaffold.embedding) exceeds this. Not yet swept.
+  n_min_spawn: 3  # Minimum cluster size to spawn a new scaffold when no existing scaffold clears theta_absorb; smaller clusters are discarded. Not yet swept.
   # MemOS configuration
   mos_config_path: "configs/mos_config_final.json"
   user_id: "memrl_user"

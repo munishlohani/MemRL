@@ -87,6 +87,8 @@ class SleepConsolidationCheckpoint:
         sleep_service = SleepConsolidationService(
             llm_provider=self.llm_provider,
             cluster_strategy=cluster_strategy,
+            theta_absorb=float(getattr(self.memory_config, "theta_absorb", 0.75) or 0.75),
+            n_min_spawn=int(getattr(self.memory_config, "n_min_spawn", 3) or 3),
         )
         stats: Dict[str, Any] = {}
         results = self.memory_service.sleep_consolidate(

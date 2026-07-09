@@ -139,6 +139,27 @@ class HDBSCANStrategy(ClusteringStrategyBase):
         raise NotImplementedError("HDBSCAN clustering will be implemented next.")
 
 
+def mean_embedding(embeddings: Sequence[Sequence[float]]) -> List[float]:
+    """Elementwise mean of a list of embeddings (a cluster centroid).
+
+    Truncates to the shortest vector's dimension rather than raising, same
+    tolerance as `cosine_similarity` -- callers here are comparing against
+    stored embeddings that should already be consistent-dimension, but this
+    is defensive against a provider/model change mid-run.
+    """
+    if not embeddings:
+        return []
+    dim = min(len(row) for row in embeddings)
+    if dim <= 0:
+        return []
+    totals = [0.0] * dim
+    for row in embeddings:
+        for idx in range(dim):
+            totals[idx] += float(row[idx])
+    count = float(len(embeddings))
+    return [value / count for value in totals]
+
+
 def compute_davies_bouldin_index(
     embeddings: Sequence[Sequence[float]],
     clusters: Sequence[Sequence[int]],
@@ -187,4 +208,5 @@ __all__ = [
     "HDBSCANStrategy",
     "get_clustering_strategy",
     "compute_davies_bouldin_index",
+    "mean_embedding",
 ]

@@ -288,48 +288,67 @@ Recompute via `recompute_decay_rate` after any Q-update, on **active nodes only*
 
 ## 8. Sleep Consolidation — Strategic Scaffold Formation
 
-The **sole** mechanism creating $d=1$ nodes after bootstrap. It is periodic and batched, running after graph maintenance.
+The **sole** mechanism creating $d=1$ nodes after bootstrap. It is periodic and batched, running after graph maintenance, and runs in **two passes**: Pass 1 decides graph structure algorithmically (no LLM); Pass 2 is the LLM's sole remaining role in this pipeline — authoring or revising a scaffold's `content`, never deciding topology.
 
 ### 8.1 Trigger
 Fires when the unconsolidated tactical count $\ge N_{\text{sleep}}$ (nodes not yet processed by any sleep event). Gating on the unconsolidated count rather than total population means it fires only on genuinely new material — pruning fluctuates the total population independently. A pre-LLM **eligibility filter** admits only nodes with salience $\max(\bar{Q}_{i,w},0) > \theta_{\text{consolidate}}$ to clustering — only skills beating their baseline by a margin. This is cheap arithmetic, no LLM.
 
-### 8.2 Procedure
+### 8.2 Pass 1 — Structural Decision (algorithmic, no LLM)
+Per eligible cluster, absorb into whichever existing scaffold has the highest cosine similarity between the cluster centroid and the scaffold's own embedding, if that similarity clears $\theta_{\text{absorb}}$; otherwise spawn a new scaffold if the cluster is large enough ($n_{\text{min-spawn}}$), else discard:
+$$\text{action(cluster)} = \begin{cases}
+\text{absorb}\big(\arg\max_j \cos(\text{centroid},\ e_{\omega_j})\big) & \max_j \cos(\cdot) > \theta_{\text{absorb}} \\
+\text{spawn} & \text{else, if } |\text{cluster}| \ge n_{\text{min-spawn}} \\
+\text{discard} & \text{otherwise}
+\end{cases}$$
+A spawn writes a **placeholder** representation immediately (empty `content`, embedding = cluster centroid so a later cosine comparison has something to test against) that Pass 2 fills in within the same sleep event — the placeholder is never actually retrievable. `consolidated` is set on every cluster's tactical nodes here (spawn/absorb/discard alike), preventing re-clustering. **Ordering:** consolidation runs strictly *after* decay-pruning in the same pass, so it never reparents a node marked for removal.
 
 ```python
-def sleep_consolidation(graph, theta_consolidate):
-    eligible = [n for n in graph.tactical_nodes()
-                if not n.consolidated and salience(n) > theta_consolidate]
-    if not eligible: return
-
+def pass1_structural_decisions(eligible, scaffolds, theta_absorb, n_min_spawn):
     clusters = cluster_embeddings(eligible, {n.id: graph.get_embedding(n.id) for n in eligible})
     # K-means; k = max(2, floor(sqrt(len(eligible)))), refined by Davies-Bouldin over {k-1,k,k+1}
-
+    decisions = []
     for cluster in clusters:
         centroid = mean_embedding([graph.get_embedding(n.id) for n in cluster])
-        # One LLM call per cluster → strict JSON:
-        #   {"action": "spawn"|"absorb"|"discard",
-        #    "summary": str|null,             # required iff spawn
-        #    "target_scaffold_id": str|null}  # required iff absorb
-        decision = llm_decide_consolidation(
-            [graph.get_content(n.id) for n in cluster],
-            {p.id: graph.get_content(p.id) for p in graph.nodes_at_depth(1)})
-
-        if decision["action"] == "absorb":
-            target = graph.get_node(decision["target_scaffold_id"])
-            for n in cluster: graph.reparent(n, target); n.consolidated = True
-        elif decision["action"] == "discard":
-            for n in cluster: n.consolidated = True          # marked, no d=1 created
-        elif decision["action"] == "spawn":
-            new = SkillNode(id=new_uuid(), task_type_dominant=majority_task_type(cluster),
-                            t_create=graph.current_step, depth=1, parent_id=graph.root_id,
-                            Q_omega=shrinkage_weighted_cluster_advantage(cluster),  # §3.5, no horizon
-                            n_omega={}, decay_rate=0.0)
-            graph.write_representation(new.id, decision["summary"], centroid)
-            graph.insert(new, parent=graph.root_id)
-            for n in cluster: graph.reparent(n, new); n.consolidated = True
+        best = max(scaffolds, key=lambda w: cosine(centroid, graph.get_embedding(w.id)), default=None)
+        best_sim = cosine(centroid, graph.get_embedding(best.id)) if best else float("-inf")
+        if best is not None and best_sim > theta_absorb:
+            decisions.append(("absorb", cluster, best.id))
+        elif len(cluster) >= n_min_spawn:
+            decisions.append(("spawn", cluster, None))
+        else:
+            decisions.append(("discard", cluster, None))
+    return decisions
 ```
 
-There is no cosine-threshold absorb gate — the LLM decides absorb/spawn/discard in one call from the cluster contents plus the existing scaffold summaries. `consolidated` covers all three outcomes, preventing re-clustering. **Ordering:** consolidation runs strictly *after* decay-pruning in the same pass, so it never reparents a node marked for removal.
+### 8.3 Pass 2 — Content Authoring/Revision (the LLM's sole role here)
+One LLM call per **scaffold** with changed evidence this sleep event — not per cluster: a scaffold absorbing two clusters in the same event gets one combined call, not two sequential ones where the second would overwrite the first. The call is `revise_strategy(current_summary, positive_evidence, negative_evidence) -> str`, with inputs varying by trigger:
+
+| Trigger | `current_summary` | `positive_evidence` | `negative_evidence` |
+|---|---|---|---|
+| Spawn | `""` | the new cluster's contents | `[]` |
+| Absorb | scaffold's existing content | the newly absorbed cluster(s)' contents | scaffold's pending failure buffer, if any |
+| Reflection-only (§8.4) | scaffold's existing content | `[]` | scaffold's pending failure buffer |
+
+This is also the fix for a bug the single-call design had: absorb previously left a scaffold's `content` untouched forever (`summary: null`), so a scaffold's text never reflected the evidence it kept absorbing. The prompt (`REVISE_STRATEGY_PROMPT`) revises in place — preserving existing steps unless evidence directly contradicts them, never regenerating from scratch — and requires corrections derived from failures to be written prescriptively ("Retrieve the target object before heating it," not "Avoid heating before retrieving"). The output is re-embedded (a stale embedding would corrupt Pass 1's cosine check in a future sleep event) and upserted; the scaffold's failure buffer is popped only once this call succeeds, so a failed LLM call leaves it intact for retry next sleep event.
+
+```python
+def pass2_content_revision(touched_scaffolds, newly_spawned, positive_evidence, graph):
+    reflect_only = {w.id for w in graph.nodes_at_depth(1)
+                    if w.id not in touched_scaffolds and graph.failure_buffer.get(w.id)}
+    for scaffold_id in touched_scaffolds | reflect_only:
+        current = "" if scaffold_id in newly_spawned else graph.get_content(scaffold_id)
+        new_content = llm_revise_strategy(
+            current_summary=current,
+            positive_evidence=positive_evidence.get(scaffold_id, []),
+            negative_evidence=graph.failure_buffer.get(scaffold_id, []))
+        graph.write_representation(scaffold_id, new_content, embed(new_content))
+        graph.pop_failures(scaffold_id)   # flush only after this call succeeds
+```
+
+### 8.4 Reflection Channel (failure capture)
+At episode end (`EpisodeRunner._queue_failed_episode_reflections`, `memrl/episode/agent_runner.py`), every failed episode with an active strategic scaffold has a condensed trace (task description + recent history + outcome) appended to that scaffold's entry in `SkillGraph.failure_buffer` — an **in-memory, uncapped, per-scaffold** dict (`graph.record_failure` / `graph.pop_failures`). Uncapped by design: a reservoir cap would itself introduce a recency bias into which failures survive to be seen by Pass 2, exactly what this mechanism exists to avoid. The buffer is durable only until the next sleep event's Pass 2 call for that scaffold succeeds — nothing here touches SQLite, mirroring how `pending_formations` is already in-memory-only.
+
+This makes reflection the same mechanism as ordinary content revision, not a bolted-on field: failed episodes are just `negative_evidence` alongside spawn/absorb's `positive_evidence`, both consumed by the one `revise_strategy` prompt. There is no failure-count threshold — every scaffold with any accumulated failures gets a Pass 2 call at every sleep event it is touched by, or has pending failures for. See §17.3 for the original design rationale (TextGrad framing, relationship to CLIN/ExpeL) — this section is the shipped implementation of that proposal.
 
 ---
 
@@ -430,7 +449,7 @@ The architecture makes a small number of decisions that a coding agent should tr
 
 **Known limitations** (each is a direct consequence of the MC/tree design and is addressed by an extension in §17):
 - *Intra-episode credit:* sparse terminal reward gives one advantage sign per episode; the load-bearing step is not isolated (a learned per-step credit / PRM is the principled fix).
-- *Avoidance-skill formation:* below-baseline episodes form no tactical nodes, so failure-derived lessons are not captured in the core.
+- *Avoidance-skill formation:* below-baseline episodes still form no *tactical* nodes — Stage 1 (§4.1) is unchanged. Failure-derived lessons now do reach the **strategic** tier via the reflection channel (§8.4), which revises a scaffold's content from failed episodes' traces; the tactical formation gate itself remains untouched.
 - *Task-dynamic $Q$ normalization:* $\bar{Q}_{i,w}$ conflates task dissimilarity with skill specificity.
 - *Cross-cluster reach:* a mis-parented skill is unreachable under a scaffold that does not parent it (no DAG in the core).
 
@@ -462,6 +481,8 @@ Defaults reflect `MemoryConfig` (`memrl/configs/config.py`). Symbols marked "abl
 | $R$ (`r_evidence`) | Evidence reservoir per node | 50 |
 | $N_{\text{sleep}}$ (`n_sleep`) | Unconsolidated count triggering sleep | None |
 | $\theta_{\text{consolidate}}$ (`theta_consolidate`) | Min salience for consolidation eligibility | None |
+| $\theta_{\text{absorb}}$ (`theta_absorb`) | Pass 1 (§8.2): absorb into the closest scaffold if $\cos(\text{centroid}, e_\omega) > \theta_{\text{absorb}}$ | 0.75 |
+| $n_{\text{min-spawn}}$ (`n_min_spawn`) | Pass 1: min cluster size to spawn when no scaffold clears $\theta_{\text{absorb}}$; smaller clusters discard | 3 |
 | $k$ | K-means cluster count | $\max(2,\lfloor\sqrt{\text{eligible}}\rfloor)$, DB-refined |
 | $\lambda_{\text{retrieval}}$ (`lambda_retrieval`) | Advantage weight in both retrieval blends (rank-normed) | 0.5 |
 | $\theta_{\text{retrieval}}$ (`theta_retrieval`) | Tactical-only quality gate on blended score | 0.0 (ablation knob) |
@@ -478,7 +499,7 @@ The decay parameters $\lambda,\epsilon,\theta_{\text{prune}}$ are defined agains
 | Storage | SQLite/SQLAlchemy | Same; two tables (write-once repr + mutable state) |
 | Formation | All stored | Advantage pre-filter is the **sole** admission; LLM only summarizes admitted candidates |
 | Retention | Recency/frequency | Ebbinghaus decay modulated by $\bar{Q}_{i,w}$ (task-agnostic) |
-| Abstraction | None | Sleep consolidation: cluster → LLM `spawn`/`absorb`/`discard` → $d=1$ |
+| Abstraction | None | Sleep consolidation: cluster → algorithmic `spawn`/`absorb`/`discard` (cosine vs. $\theta_{\text{absorb}}$) → one LLM content-revision call per scaffold → $d=1$ |
 | Retrieval | Flat similarity scan | $\omega$ via blend; tactical scoped to children of $\omega$, same blend |
 | Utility signal | MC terminal-reward EMA | Per-task-type mean **advantage** (return minus baseline) on both tiers |
 | Strategic scaffolds | None | Permanent $d=1$; $Q^\Omega$ advantage; init from cluster mean, not zero |
@@ -518,13 +539,13 @@ The theory above maps onto the codebase as follows. A coding agent implementing 
 | Concern | Module | Notes |
 |---|---|---|
 | Node model (§5.4) | `memrl/memory/skill_node.py` | `SkillNode`, decay-rate recompute, reservoir evidence, `refresh_task_type_dominant` |
-| In-memory graph (§5.1) | `memrl/memory/graph.py` | `SkillGraph`: `parent_id` structure, per-task-type baselines (EMA), `insert`/`reparent`/`remove`, `unabsorbed_tactical_count` |
+| In-memory graph (§5.1) | `memrl/memory/graph.py` | `SkillGraph`: `parent_id` structure, per-task-type baselines (EMA), `insert`/`reparent`/`remove`, `unabsorbed_tactical_count`, `failure_buffer`/`record_failure`/`pop_failures` (§8.4, in-memory, uncapped, per-scaffold) |
 | Utility salience (§3.3) | `memrl/utils/q_utils.py` | `get_q_salience` — shrinkage-weighted mean advantage |
 | Persistence + orchestration (§5.3) | `memrl/service/memory_service.py` | `MemoryService`: two-table SQLite I/O, working-set load/flush, node creation, pruning, sleep entry point, `retrieve_query` |
 | Retrieval blend (§9) | `memrl/service/retrievers.py` | `SkillSimilarityRetriever.tactical_retrieve` / `strategic_retrieve`; `rank_normalize`; `cosine_similarity` |
 | Tactical summarization (§4.2, §5.3) | `memrl/service/formation_judger.py` | `TacticalSummaryWriter`, `TacticalSummaryDraft`, `TACTICAL_SUMMARY_PROMPT`. Note: `memrl/service/builders.py` (`ProceduralizationBuilder`/`ScriptBuilder`/`TrajectoryBuilder`/`get_builder`) is unused legacy code from the base MemRL template — not the current formation path |
-| Sleep consolidation (§8) | `memrl/service/sleep_consolidation/` | `SleepConsolidationService` (`service.py`), `clustering.py`, `prompts.py`, `types.py`, `checkpoint.py` |
-| Episode loop (§10) | `memrl/episode/agent_runner.py` | `EpisodeRunner.run`: step loop, end-of-episode Q updates, formation commit, strategic selection, maintenance, metrics |
+| Sleep consolidation (§8) | `memrl/service/sleep_consolidation/` | `SleepConsolidationService` (`service.py`): `decide_cluster_structure` (Pass 1, algorithmic, §8.2) + `revise_strategy` (Pass 2, the sole LLM call, §8.3); `clustering.py` (adds `mean_embedding` for centroids); `prompts.py` (`REVISE_STRATEGY_PROMPT`); `types.py`; `checkpoint.py` |
+| Episode loop (§10) | `memrl/episode/agent_runner.py` | `EpisodeRunner.run`: step loop, end-of-episode Q updates, formation commit, strategic selection, maintenance, metrics, `_queue_failed_episode_reflections` (reflection-channel capture, §8.4) |
 | Env abstraction | `memrl/episode/env_adapter.py` | `EpisodeEnvAdapter` ABC — `reset`/`step`/`task_type`/`known_task_types`; benchmark adapters implement it |
 | Episodic evidence | `memrl/memory/episodic_bank.py` | `EpisodicMemoryBank`, `EpisodicRecord` — raw traces behind `evidence_ids` |
 | Config (§12) | `memrl/configs/config.py` | `MempConfig` → `MemoryConfig` / `ExperimentConfig` / `RLConfig`; YAML/JSON load |
@@ -554,8 +575,10 @@ The starvation failure has a fixed point: a weak backbone with empty memory on a
 ### 17.2 Failed-episode rescue
 On complex types, most trajectories are failures and are discarded wholesale, keeping the tactical layer empty. The trap is that MC return-to-go cannot do intra-episode credit: storing a rescued good action with its negative episode advantage makes the node simultaneously "worth storing" and "max-decay → pruned," so the fix cannot live in the advantage math. The workable form routes failed episodes to *candidate discovery only*: a rescued node enters with **empty $Q$** (unproven) and must earn positive advantage through future successful retrievals. A principled successor is a real per-step credit signal (PRM, Lightman 2023, with Math-Shepherd-style labeling); hindsight relabeling (HER) does not transfer cleanly to compositional discrete goals.
 
-### 17.3 Reflection channel
-Reflection is the update rule for **strategic content** — a rewrite of a scaffold's own `content`, not a bolted-on field. The framing is textual gradient descent: a failure trajectory is the loss, an NL critique is the gradient, and the rewritten summary is the update (TextGrad, Yuksekgonul, *Nature* 2025). It is **triggered inside sleep consolidation** (batched, decoupled from $Q^\Omega$ selection), not per-failure — per-failure thrashes, and batching gives cross-failure contrast that yields a generalizable lesson (ExpeL, Zhao AAAI 2024) while decoupling from selection avoids a derank-death loop. This extension must state its delta against CLIN (Majumder 2023), which maintains persistent revised causal-abstraction memory on the same task family; the differentiator is the advantage-gated, $Q^\Omega$-selected, decay-curated version.
+### 17.3 Reflection channel — **implemented, see §8.4**
+Reflection is the update rule for **strategic content** — a rewrite of a scaffold's own `content`, not a bolted-on field. The framing is textual gradient descent: a failure trajectory is the loss, an NL critique is the gradient, and the rewritten summary is the update (TextGrad, Yuksekgonul, *Nature* 2025). It is **triggered inside sleep consolidation** (batched, decoupled from $Q^\Omega$ selection), not per-failure — per-failure thrashes, and batching gives cross-failure contrast that yields a generalizable lesson (ExpeL, Zhao AAAI 2024) while decoupling from selection avoids a derank-death loop. The differentiator against CLIN (Majumder 2023), which maintains persistent revised causal-abstraction memory on the same task family, is that this version is advantage-gated, $Q^\Omega$-selected, and decay-curated rather than unconditionally accumulated.
+
+This design shipped as core §8.3–§8.4: `revise_strategy` is the single Pass-2 LLM call (spawn/absorb/reflection all route through it), and `SkillGraph.failure_buffer` is the in-memory, uncapped, per-scaffold accumulator that `EpisodeRunner._queue_failed_episode_reflections` populates and sleep consolidation flushes only on a successful revision.
 
 ### 17.4 Strategic summary altitude
 The abstraction–utility tradeoff governs scaffold content: too specific ("cool the tomato") gives no transfer, too general ("prepare an item") gives vacuous conditioning. The resolution is **structural generality with procedural specificity** — abstract the object into role descriptors, keep the procedure concrete, and state shared preconditions as checkable guards (STRIPS-style; Guan 2023), in 3–6 imperative steps. Whether a $d=1$ scaffold is even the right instrument depends on failure *altitude*: if hard-type failures are grounding/execution rather than strategic, state-conditioned tactical lessons (AutoGuide, Fu NeurIPS 2024) are the better lever, which gates §17.3.

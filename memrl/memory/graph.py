@@ -30,6 +30,21 @@ class SkillGraph:
     baseline_tactical_n: Dict[str, int] = field(default_factory=dict)
     baseline_strategic: Dict[str, float] = field(default_factory=dict)
     baseline_strategic_n: Dict[str, int] = field(default_factory=dict)
+    # Reflection channel: per-scaffold buffer of condensed failed-episode
+    # traces, keyed by strategic node id. In-memory only (no SQL) -- mirrors
+    # EpisodeRunner.pending_formations, which already accepts the same
+    # crash-loses-recent-data tradeoff. Uncapped between sleep events: a
+    # recency-eviction cap would itself bias which failures Pass 2 ever
+    # sees, which is exactly what this is meant to avoid. Fully consumed via
+    # pop_failures() once a scaffold's content-revision call succeeds.
+    failure_buffer: Dict[str, List[str]] = field(default_factory=dict)
+
+    def record_failure(self, scaffold_id: str, trace_text: str) -> None:
+        self.failure_buffer.setdefault(scaffold_id, []).append(trace_text)
+
+    def pop_failures(self, scaffold_id: str) -> List[str]:
+        """Return and clear the buffered failure traces for one scaffold."""
+        return self.failure_buffer.pop(scaffold_id, [])
 
     def get_tactical_baseline(self, task_type: str) -> float:
         return float(self.baseline_tactical.get(task_type, 0.0))

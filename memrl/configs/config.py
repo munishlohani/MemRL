@@ -172,6 +172,25 @@ class MemoryConfig(BaseModel):
         default=None,
         description="Minimum Q-salience required for a tactical node to enter sleep consolidation.",
     )
+    theta_absorb: float = Field(
+        default=0.75,
+        description=(
+            "Sleep-consolidation Pass 1 (structural, algorithmic -- no LLM): "
+            "a cluster absorbs into the existing scaffold with the highest "
+            "cosine similarity between the cluster centroid and the "
+            "scaffold's embedding, if that similarity exceeds theta_absorb; "
+            "otherwise it spawns (if cluster_size >= n_min_spawn) or is "
+            "discarded."
+        ),
+    )
+    n_min_spawn: int = Field(
+        default=3,
+        description=(
+            "Minimum cluster size to spawn a new strategic scaffold when no "
+            "existing scaffold clears theta_absorb (Pass 1); smaller "
+            "clusters are discarded instead."
+        ),
+    )
 
     # Phase 2 hyperparameters from Project.md.
     lambda_retrieval: float = Field(

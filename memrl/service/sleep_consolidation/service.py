@@ -1,19 +1,24 @@
-"""Sleep consolidation orchestration."""
+"""Sleep consolidation orchestration.
+
+Two passes (Project.md "Reflection: Two-Pass Sleep Consolidation"):
+  Pass 1 -- `decide_cluster_structure`: algorithmic, no LLM call. A cosine-
+    similarity threshold against existing scaffold embeddings decides
+    spawn/absorb/discard per cluster.
+  Pass 2 -- `revise_strategy`: the sole LLM call, one per scaffold with
+    changed evidence this sleep event (not per cluster -- `MemoryService.
+    sleep_consolidate` groups by scaffold before calling this).
+"""
 
 from __future__ import annotations
 
-import json
 import logging
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence
 
 from ...providers.base import BaseLLM
+from ..retrievers import cosine_similarity
 from ..strategies import ClusterStrategy
-from .clustering import ClusteringStrategyBase, compute_davies_bouldin_index, get_clustering_strategy
-from .prompts import (
-    build_sleep_consolidation_prompt,
-    format_cluster_contents,
-    format_existing_scaffolds,
-)
+from .clustering import ClusteringStrategyBase, compute_davies_bouldin_index, get_clustering_strategy, mean_embedding
+from .prompts import build_revise_strategy_prompt, format_cluster_contents
 from .types import (
     SleepConsolidationAction,
     SleepConsolidationDecision,
@@ -27,11 +32,7 @@ logger = logging.getLogger(__name__)
 
 
 class SleepConsolidationService:
-    """LLM-backed sleep consolidation service.
-
-    The LLM makes one structured decision per cluster: spawn, absorb, or discard.
-    Structural node creation and Q_omega computation remain in code.
-    """
+    """Clustering + Pass 1 structural decisions + Pass 2 content authoring."""
 
     def __init__(
         self,
@@ -41,6 +42,8 @@ class SleepConsolidationService:
         cluster_strategy: ClusterStrategy = ClusterStrategy.KMEANS,
         n_clusters: Optional[int] = None,
         random_state: int = 0,
+        theta_absorb: float = 0.75,
+        n_min_spawn: int = 3,
     ) -> None:
         self.llm_provider = llm_provider
         self.clustering_strategy = clustering_strategy or get_clustering_strategy(
@@ -48,6 +51,8 @@ class SleepConsolidationService:
             n_clusters=n_clusters,
             random_state=random_state,
         )
+        self.theta_absorb = float(theta_absorb)
+        self.n_min_spawn = int(n_min_spawn)
 
     def cluster_embeddings(
         self,
@@ -56,44 +61,85 @@ class SleepConsolidationService:
         """Group candidate embeddings into clusters."""
         return self.clustering_strategy.cluster(embeddings)
 
-    def decide_cluster(
+    def decide_cluster_structure(
         self,
-        cluster_texts: Sequence[str],
+        cluster_embeddings: Sequence[Sequence[float]],
         *,
         existing_scaffolds: Sequence[StrategicScaffoldContext] = (),
-    ) -> Tuple[SleepConsolidationDecision, str, str]:
-        """Ask the LLM to choose spawn, absorb, or discard for one cluster."""
-        cluster_contents = format_cluster_contents(cluster_texts)
-        scaffold_contents = format_existing_scaffolds(existing_scaffolds)
-        prompt = build_sleep_consolidation_prompt(
-            cluster_contents=cluster_contents,
-            existing_scaffolds=scaffold_contents,
+    ) -> SleepConsolidationDecision:
+        """Pass 1: algorithmic spawn/absorb/discard decision for one cluster.
+
+        Absorbs into whichever existing scaffold has the highest cosine
+        similarity between this cluster's centroid and the scaffold's own
+        embedding, if that similarity clears `theta_absorb`. Otherwise
+        spawns a new scaffold if the cluster is large enough
+        (`n_min_spawn`), else discards it.
+        """
+        cluster_size = len(cluster_embeddings)
+        centroid = mean_embedding(cluster_embeddings)
+
+        best_scaffold: Optional[StrategicScaffoldContext] = None
+        best_similarity = float("-inf")
+        for scaffold in existing_scaffolds:
+            if not scaffold.embedding:
+                continue
+            similarity = cosine_similarity(centroid, scaffold.embedding)
+            if similarity > best_similarity:
+                best_similarity = similarity
+                best_scaffold = scaffold
+
+        if best_scaffold is not None and best_similarity > self.theta_absorb:
+            decision = SleepConsolidationDecision(
+                action=SleepConsolidationAction.ABSORB,
+                target_scaffold_id=best_scaffold.node_id,
+            )
+        elif cluster_size >= self.n_min_spawn:
+            decision = SleepConsolidationDecision(action=SleepConsolidationAction.SPAWN)
+        else:
+            decision = SleepConsolidationDecision(action=SleepConsolidationAction.DISCARD)
+
+        log_event(
+            logger,
+            "sleep_consolidation.structure_decision",
+            cluster_size=cluster_size,
+            best_scaffold_id=best_scaffold.node_id if best_scaffold is not None else None,
+            best_similarity=None if best_scaffold is None else best_similarity,
+            theta_absorb=self.theta_absorb,
+            n_min_spawn=self.n_min_spawn,
+            action=decision.action.value,
+        )
+        return decision
+
+    def revise_strategy(
+        self,
+        *,
+        current_summary: str,
+        positive_evidence: Sequence[str],
+        negative_evidence: Sequence[str],
+    ) -> str:
+        """Pass 2: the sole LLM call. Authors or revises a scaffold's
+        `content` -- never decides structure. One call per scaffold with
+        changed evidence this sleep event, regardless of how many clusters
+        it absorbed (callers group evidence by scaffold before calling)."""
+        prompt = build_revise_strategy_prompt(
+            current_summary=current_summary,
+            positive_evidence=format_cluster_contents(positive_evidence),
+            negative_evidence=format_cluster_contents(negative_evidence),
         )
         log_event(
             logger,
-            "sleep_consolidation.prompt",
-            cluster_size=len(cluster_texts),
-            existing_scaffolds=[scaffold.node_id for scaffold in existing_scaffolds],
+            "sleep_consolidation.revise_prompt",
+            current_summary=current_summary,
+            positive_count=len(positive_evidence),
+            negative_count=len(negative_evidence),
             prompt=prompt,
         )
-        raw_response = self._generate(prompt, temperature=0)
-        decision = self._parse_decision(raw_response)
-        log_event(
-            logger,
-            "sleep_consolidation.response",
-            action=decision.action.value,
-            summary=decision.summary,
-            target_scaffold_id=decision.target_scaffold_id,
-            response=raw_response,
-        )
-        if decision.action == SleepConsolidationAction.ABSORB:
-            scaffold_ids = {scaffold.node_id for scaffold in existing_scaffolds}
-            if decision.target_scaffold_id not in scaffold_ids:
-                raise ValueError(
-                    "Absorb decision referenced an unknown scaffold id: "
-                    f"{decision.target_scaffold_id!r}"
-                )
-        return decision, prompt, raw_response
+        response = self._generate(prompt, temperature=0)
+        content = response.strip()
+        if not content:
+            raise ValueError("Empty strategy revision response")
+        log_event(logger, "sleep_consolidation.revise_response", content=content)
+        return content
 
     def consolidate(
         self,
@@ -103,7 +149,13 @@ class SleepConsolidationService:
         existing_scaffolds: Sequence[StrategicScaffoldContext] = (),
         stats_out: Optional[Dict[str, Any]] = None,
     ) -> List[SleepConsolidationResult]:
-        """Cluster then decide how to consolidate each cluster.
+        """Cluster then decide structure (Pass 1) for each cluster.
+
+        Content authoring (Pass 2) is not done here -- it happens per
+        scaffold, after every cluster's structural decision has been applied
+        (see `MemoryService.sleep_consolidate`), since one scaffold can
+        absorb more than one cluster in the same sleep event and must get a
+        single combined revision, not one overwriting the other.
 
         If `stats_out` is provided, it is populated in place with the RAW
         clustering stats (cluster_count, cluster_sizes, cluster_davies_bouldin)
@@ -127,19 +179,18 @@ class SleepConsolidationService:
         results: List[SleepConsolidationResult] = []
         for indices in clusters:
             texts = [cluster_texts[idx] for idx in indices]
+            cluster_embeds = [embeddings[idx] for idx in indices]
             try:
-                decision, prompt, raw_response = self.decide_cluster(
-                    texts,
+                decision = self.decide_cluster_structure(
+                    cluster_embeds,
                     existing_scaffolds=existing_scaffolds,
                 )
             except Exception as exc:
-                # A malformed/hallucinated LLM decision for one cluster (bad
-                # JSON, unrecognized action, an absorb target that doesn't
-                # match any existing scaffold, a provider error, ...) must
-                # not take down the whole sleep-consolidation event -- and by
-                # extension the whole training run. Skip this cluster; its
-                # nodes stay unconsolidated and are eligible again next time
-                # sleep consolidation fires.
+                # A structural-decision failure (e.g. an embedding-dimension
+                # mismatch) must not take down the whole sleep-consolidation
+                # event -- and by extension the whole training run. Skip
+                # this cluster; its nodes stay unconsolidated and are
+                # eligible again next time sleep consolidation fires.
                 if stats_out is not None:
                     stats_out["cluster_decision_failed_count"] = (
                         stats_out.get("cluster_decision_failed_count", 0) + 1
@@ -161,10 +212,7 @@ class SleepConsolidationService:
                     cluster_indices=list(indices),
                     cluster_texts=texts,
                     action=decision.action,
-                    summary=decision.summary,
                     target_scaffold_id=decision.target_scaffold_id,
-                    prompt=prompt,
-                    raw_response=raw_response,
                 )
             )
         return results
@@ -172,81 +220,3 @@ class SleepConsolidationService:
     def _generate(self, prompt: str, **kwargs: object) -> str:
         messages = [{"role": "user", "content": prompt}]
         return self.llm_provider.generate(messages, **kwargs)
-
-    @staticmethod
-    def _parse_decision(response: str) -> SleepConsolidationDecision:
-        payload = SleepConsolidationService._load_json_object(response)
-
-        action_raw = payload.get("action")
-        if not isinstance(action_raw, str):
-            raise ValueError(f"Missing sleep-consolidation action: {response!r}")
-        try:
-            action = SleepConsolidationAction(action_raw.lower())
-        except ValueError as exc:
-            raise ValueError(f"Unrecognized sleep-consolidation action: {action_raw!r}") from exc
-
-        summary = SleepConsolidationService._coerce_optional_str(payload.get("summary"))
-        target_scaffold_id = SleepConsolidationService._coerce_optional_str(
-            payload.get("target_scaffold_id")
-        )
-
-        if action == SleepConsolidationAction.SPAWN:
-            if summary is None:
-                raise ValueError(
-                    "Spawn decisions must include a non-empty summary: "
-                    f"{response!r}"
-                )
-            return SleepConsolidationDecision(
-                action=action,
-                summary=summary,
-                target_scaffold_id=None,
-            )
-
-        if action == SleepConsolidationAction.ABSORB:
-            if target_scaffold_id is None:
-                raise ValueError(
-                    "Absorb decisions must include target_scaffold_id: "
-                    f"{response!r}"
-                )
-            return SleepConsolidationDecision(
-                action=action,
-                summary=None,
-                target_scaffold_id=target_scaffold_id,
-            )
-
-        if action == SleepConsolidationAction.DISCARD:
-            return SleepConsolidationDecision(
-                action=action,
-                summary=None,
-                target_scaffold_id=None,
-            )
-
-        raise ValueError(f"Unsupported sleep-consolidation action: {action!r}")
-
-    @staticmethod
-    def _load_json_object(response: str) -> dict[str, object]:
-        text = response.strip()
-        if not text:
-            raise ValueError("Empty sleep-consolidation response")
-
-        try:
-            loaded = json.loads(text)
-        except json.JSONDecodeError:
-            start = text.find("{")
-            end = text.rfind("}")
-            if start < 0 or end <= start:
-                raise ValueError(f"Unable to parse sleep-consolidation response: {response!r}")
-            loaded = json.loads(text[start : end + 1])
-
-        if not isinstance(loaded, dict):
-            raise ValueError(f"Sleep-consolidation response must be a JSON object: {response!r}")
-        return loaded
-
-    @staticmethod
-    def _coerce_optional_str(value: object) -> Optional[str]:
-        if value is None:
-            return None
-        if not isinstance(value, str):
-            raise ValueError(f"Expected string or null in sleep-consolidation response: {value!r}")
-        stripped = value.strip()
-        return stripped or None

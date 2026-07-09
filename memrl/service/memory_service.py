@@ -730,10 +730,17 @@ class MemoryService:
     ) -> List[SleepConsolidationResult]:
         """Run sleep consolidation and wire consolidation outcomes into the graph.
 
-        This performs the graph mutation phase only: cluster eligible tactical nodes,
-        ask the LLM for a structured spawn/absorb/discard action, and materialize a
-        strategic scaffold node for clusters judged to spawn one. Tactical nodes
-        processed in any branch are marked consolidated.
+        Two passes. Pass 1 (structural, algorithmic, delegated to
+        `consolidation_service.consolidate()`/`decide_cluster_structure`):
+        cluster eligible tactical nodes and decide spawn/absorb/discard per
+        cluster via a cosine-similarity threshold against existing scaffold
+        embeddings -- no LLM call. Pass 2 (content authoring, one LLM call
+        per *scaffold*, not per cluster): every scaffold touched by a spawn
+        or absorb this event, plus every existing scaffold with a pending
+        failure-buffer entry, gets its content authored/revised via
+        `_revise_scaffold_content`. A scaffold that absorbs two clusters in
+        the same event still gets exactly one Pass-2 call, seeing both
+        clusters' evidence together.
 
         If `stats_out` is provided, it is populated in place with metrics-worthy
         counts (eligible_count, cluster_count, cluster_sizes, cluster_davies_bouldin,
@@ -741,8 +748,8 @@ class MemoryService:
         kept as an optional out-param so the return type/signature stays backward
         compatible for existing callers. cluster_count/cluster_sizes/
         cluster_davies_bouldin reflect the raw clustering (all clusters formed),
-        not just the ones with a successful LLM decision; action_counts only
-        covers successful decisions.
+        not just the ones with a successful structural decision; action_counts
+        only covers successful decisions.
         """
         resolved_threshold = theta_consolidate
         if resolved_threshold is None:
@@ -767,7 +774,40 @@ class MemoryService:
         eligible_nodes.sort(key=lambda node: (int(node.t_create), node.id))
         if stats_out is not None:
             stats_out["eligible_count"] = len(eligible_nodes)
-        if not eligible_nodes:
+
+        eligible_representations = {
+            node.id: self._fetch_representation(node.id) for node in eligible_nodes
+        }
+        eligible_embeddings = [
+            eligible_representations[node.id].embedding for node in eligible_nodes
+        ]
+        eligible_texts = [
+            eligible_representations[node.id].content for node in eligible_nodes
+        ]
+
+        results: List[SleepConsolidationResult] = []
+        if eligible_nodes:
+            existing_scaffolds = self._strategic_scaffold_contexts()
+            # Single source of truth for clustering + Pass 1 decisions:
+            # delegates to SleepConsolidationService.consolidate() instead of
+            # reimplementing the cluster-then-decide loop here. This method
+            # only does the graph-mutation phase (spawn/absorb/discard
+            # wiring) and Pass 2 (content authoring) below.
+            #
+            # stats_out is passed straight into consolidate() so cluster_count/
+            # cluster_sizes/cluster_davies_bouldin reflect the RAW clustering
+            # (computed there before any per-cluster decision can fail and get
+            # skipped) rather than len(results) -- which only counts clusters
+            # whose decision succeeded and would otherwise make "clustering only
+            # formed 1 cluster" indistinguishable from "clustering formed more,
+            # but every other cluster's decision failed and was skipped."
+            results = consolidation_service.consolidate(
+                eligible_embeddings,
+                eligible_texts,
+                existing_scaffolds=existing_scaffolds,
+                stats_out=stats_out,
+            )
+        else:
             log_event(
                 logger,
                 "sleep_consolidation.skip",
@@ -775,40 +815,20 @@ class MemoryService:
                 threshold=threshold,
                 current_step=self.graph.current_step,
             )
-            return []
-
-        eligible_representations = {
-            node.id: self._fetch_representation(node.id) for node in eligible_nodes
-        }
-
-        eligible_embeddings = [
-            eligible_representations[node.id].embedding for node in eligible_nodes
-        ]
-        eligible_texts = [
-            eligible_representations[node.id].content for node in eligible_nodes
-        ]
-        existing_scaffolds = self._strategic_scaffold_contexts()
-
-        # Single source of truth for clustering + LLM decision: delegates to
-        # SleepConsolidationService.consolidate() instead of reimplementing
-        # the cluster-then-decide loop here. This method only does the
-        # graph-mutation phase (spawn/absorb/discard wiring) below.
-        #
-        # stats_out is passed straight into consolidate() so cluster_count/
-        # cluster_sizes/cluster_davies_bouldin reflect the RAW clustering
-        # (computed there before any per-cluster decision can fail and get
-        # skipped) rather than len(results) -- which only counts clusters
-        # whose decision succeeded and would otherwise make "clustering only
-        # formed 1 cluster" indistinguishable from "clustering formed more,
-        # but every other cluster's decision failed and was skipped."
-        results: List[SleepConsolidationResult] = consolidation_service.consolidate(
-            eligible_embeddings,
-            eligible_texts,
-            existing_scaffolds=existing_scaffolds,
-            stats_out=stats_out,
-        )
+            if stats_out is not None:
+                stats_out.setdefault("cluster_count", 0)
+                stats_out.setdefault("cluster_sizes", [])
+                stats_out.setdefault("cluster_davies_bouldin", None)
+                stats_out.setdefault("cluster_decision_failed_count", 0)
 
         action_counts: Counter = Counter()
+        # Grouped by scaffold, not cluster, so a scaffold absorbing two
+        # clusters this event gets one combined Pass-2 call instead of two
+        # sequential ones where the second overwrites the first.
+        new_positive_evidence_by_scaffold: Dict[str, List[str]] = {}
+        spawned_scaffold_ids: set = set()
+        touched_scaffold_ids: set = set()
+
         for result in results:
             cluster_nodes = [eligible_nodes[idx] for idx in result.cluster_indices]
             action_counts[result.action.value] += 1
@@ -818,31 +838,31 @@ class MemoryService:
                 cluster_indices=list(result.cluster_indices),
                 cluster_node_ids=[node.id for node in cluster_nodes],
                 action=result.action.value,
-                summary=result.summary,
                 target_scaffold_id=result.target_scaffold_id,
             )
 
             if result.action == SleepConsolidationAction.SPAWN:
-                if result.summary is None:
-                    raise ValueError("Spawn decisions must include a scaffold summary")
                 scaffold_node = self._spawn_strategic_scaffold(
                     cluster_nodes=cluster_nodes,
                     cluster_embeddings=[
                         eligible_representations[node.id].embedding
                         for node in cluster_nodes
                     ],
-                    scaffold_content=result.summary,
                 )
                 for node in cluster_nodes:
                     self.graph.reparent(node, scaffold_node.id)
                     node.consolidated = True
                     self._upsert_graph_state(node)
+                new_positive_evidence_by_scaffold.setdefault(scaffold_node.id, []).extend(
+                    result.cluster_texts
+                )
+                spawned_scaffold_ids.add(scaffold_node.id)
+                touched_scaffold_ids.add(scaffold_node.id)
                 log_event(
                     logger,
                     "sleep_consolidation.spawn",
                     scaffold_id=scaffold_node.id,
                     cluster_node_ids=[node.id for node in cluster_nodes],
-                    summary=result.summary,
                 )
             elif result.action == SleepConsolidationAction.ABSORB:
                 if result.target_scaffold_id is None:
@@ -857,6 +877,10 @@ class MemoryService:
                     node.consolidated = True
                     self._upsert_graph_state(node)
                 self._upsert_graph_state(target_scaffold)
+                new_positive_evidence_by_scaffold.setdefault(target_scaffold.id, []).extend(
+                    result.cluster_texts
+                )
+                touched_scaffold_ids.add(target_scaffold.id)
                 log_event(
                     logger,
                     "sleep_consolidation.absorb",
@@ -881,6 +905,25 @@ class MemoryService:
         if stats_out is not None:
             stats_out["action_counts"] = dict(action_counts)
 
+        # Pass 2: content authoring/revision, one call per scaffold. Revision
+        # set = every scaffold touched by spawn/absorb above, plus any
+        # existing scaffold with a pending failure-buffer entry that wasn't
+        # already touched (reflection with no structural change).
+        revision_scaffold_ids = set(touched_scaffold_ids)
+        for scaffold in self.graph.nodes_at_depth(1):
+            if scaffold.id in revision_scaffold_ids:
+                continue
+            if self.graph.failure_buffer.get(scaffold.id):
+                revision_scaffold_ids.add(scaffold.id)
+
+        for scaffold_id in revision_scaffold_ids:
+            self._revise_scaffold_content(
+                consolidation_service,
+                scaffold_id=scaffold_id,
+                positive_evidence=new_positive_evidence_by_scaffold.get(scaffold_id, []),
+                is_new=scaffold_id in spawned_scaffold_ids,
+            )
+
         log_event(
             logger,
             "sleep_consolidation.done",
@@ -888,6 +931,65 @@ class MemoryService:
             actions=[result.action.value for result in results],
         )
         return results
+
+    def _revise_scaffold_content(
+        self,
+        consolidation_service: SleepConsolidationService,
+        *,
+        scaffold_id: str,
+        positive_evidence: List[str],
+        is_new: bool,
+    ) -> None:
+        """Pass 2 for one scaffold: author (is_new) or revise its content
+        from whatever positive/negative evidence accumulated this sleep
+        event. Re-embeds on success -- a stale embedding would corrupt Pass
+        1's cosine absorb check in future sleep events. The failure buffer
+        is only popped once this succeeds, so a failed LLM call leaves it
+        intact for the next sleep event instead of losing evidence.
+        """
+        current_representation = self._fetch_representation(scaffold_id)
+        current_summary = "" if is_new else current_representation.content
+        negative_evidence = self.graph.failure_buffer.get(scaffold_id, [])
+
+        try:
+            new_content = consolidation_service.revise_strategy(
+                current_summary=current_summary,
+                positive_evidence=positive_evidence,
+                negative_evidence=negative_evidence,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Strategy revision failed for scaffold %s; content unchanged, "
+                "failure buffer retained: %s",
+                scaffold_id,
+                exc,
+            )
+            log_event(
+                logger,
+                "sleep_consolidation.revise_failed",
+                scaffold_id=scaffold_id,
+                error=str(exc),
+            )
+            return
+
+        new_embedding = (
+            self.embedding_provider.embed_single(new_content)
+            if self.embedding_provider is not None
+            else current_representation.embedding
+        )
+        self._upsert_representation(
+            SkillRepresentation(id=scaffold_id, content=new_content, embedding=new_embedding)
+        )
+        self.graph.pop_failures(scaffold_id)
+        log_event(
+            logger,
+            "sleep_consolidation.content_revised",
+            scaffold_id=scaffold_id,
+            is_new=is_new,
+            positive_count=len(positive_evidence),
+            negative_count=len(negative_evidence),
+            new_content=new_content,
+        )
 
     def _strategic_scaffold_contexts(self) -> List[StrategicScaffoldContext]:
         scaffolds = sorted(
@@ -898,6 +1000,7 @@ class MemoryService:
             StrategicScaffoldContext(
                 node_id=node.id,
                 summary=self._fetch_representation(node.id).content,
+                embedding=self._fetch_representation(node.id).embedding,
             )
             for node in scaffolds
         ]
@@ -913,14 +1016,20 @@ class MemoryService:
         *,
         cluster_nodes: List[SkillNode],
         cluster_embeddings: List[List[float]],
-        scaffold_content: str,
     ) -> SkillNode:
+        """Materialize a new scaffold with placeholder content.
+
+        Content is intentionally empty here -- Pass 2 (`_revise_scaffold_content`,
+        called with `is_new=True` later in the same sleep event) always
+        authors the real content before this scaffold could ever be
+        retrieved. The embedding starts as the cluster centroid so Pass 1's
+        cosine absorb-check has something to compare against even if Pass 2
+        fails; it's refreshed to match the authored content once Pass 2
+        succeeds.
+        """
         scaffold_id = uuid4().hex
         task_type_dominant = self._majority_task_type(cluster_nodes)
-        scaffold_embedding = self._scaffold_embedding(
-            scaffold_content=scaffold_content,
-            cluster_embeddings=cluster_embeddings,
-        )
+        scaffold_embedding = self._mean_embedding(cluster_embeddings)
         scaffold_q_omega = self._spawned_scaffold_q_omega(cluster_nodes)
         scaffold_evidence_ids = self._merged_evidence_ids(cluster_nodes)
 
@@ -938,21 +1047,11 @@ class MemoryService:
 
         representation = SkillRepresentation(
             id=scaffold_id,
-            content=scaffold_content,
+            content="",
             embedding=scaffold_embedding,
         )
         self.add_node(scaffold_node, representation, parent_id=self.graph.root_id)
         return scaffold_node
-
-    def _scaffold_embedding(
-        self,
-        *,
-        scaffold_content: str,
-        cluster_embeddings: List[List[float]],
-    ) -> List[float]:
-        if self.embedding_provider is not None:
-            return self.embedding_provider.embed_single(scaffold_content)
-        return self._mean_embedding(cluster_embeddings)
 
     @staticmethod
     def _mean_embedding(cluster_embeddings: List[List[float]]) -> List[float]:

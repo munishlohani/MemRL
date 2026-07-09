@@ -452,18 +452,24 @@ class EpisodeRunner(BaseEpisodeRunner):
                 dirty_nodes=dirty_nodes,
             )
 
+            # Must run before _update_episode_q_omega: the solvability gate
+            # reads each scaffold's Q_omega(task_type) as it stood BEFORE
+            # this episode's own outcome is blended in (same "read baseline
+            # before updating it" convention as §3.8/§4.1) -- otherwise a
+            # failing episode would deflate its own gate check.
+            self._queue_failed_episode_reflections(
+                task_descriptions=task_descriptions,
+                task_types=task_types,
+                success_flags=success_flags,
+                active_strategic_node_ids=active_strategic_node_ids,
+            )
+
             self._update_episode_q_omega(
                 task_types=task_types,
                 reward_histories=reward_histories,
                 step_infos=episode_infos,
                 active_strategic_node_ids=active_strategic_node_ids,
                 dirty_nodes=dirty_nodes,
-            )
-
-            self._queue_failed_episode_reflections(
-                task_descriptions=task_descriptions,
-                success_flags=success_flags,
-                active_strategic_node_ids=active_strategic_node_ids,
             )
 
             formation_summary = self._commit_pending_formations()
@@ -1349,16 +1355,28 @@ class EpisodeRunner(BaseEpisodeRunner):
         self,
         *,
         task_descriptions: List[str],
+        task_types: List[str],
         success_flags: List[bool],
         active_strategic_node_ids: List[Optional[str]],
     ) -> None:
         """Buffer failed episodes onto their active scaffold's failure buffer.
 
         This is the reflection channel's capture side: a condensed trace of
-        each failed episode that had an active strategic scaffold is
-        appended in-memory (`graph.record_failure`). Sleep consolidation
-        Pass 2 later consumes these as negative evidence and flushes them
-        only once a revision succeeds -- nothing here touches SQLite.
+        each failed episode is appended in-memory (`graph.record_failure`).
+        Sleep consolidation Pass 2 later consumes these as negative evidence
+        and flushes them only once a revision succeeds -- nothing here
+        touches SQLite.
+
+        Solvability gate: only recorded when the active scaffold's own
+        Q_omega(task_type) is positive -- i.e. this scaffold has historically
+        beaten the baseline on this task type, so the failure is a
+        procedural anomaly worth reflecting on (matches the revision
+        prompt's "strategy was appropriate; it still failed" framing, not a
+        sign the scaffold is a bad fit for this task type). Read BEFORE
+        _update_episode_q_omega runs, so a failing episode can't deflate its
+        own gate check. A task type with no prior Q_omega entry (0.0
+        default) does not clear the gate either -- no positive evidence yet
+        that this scaffold solves it.
         """
         graph = getattr(self.memory_service, "graph", None)
         if graph is None:
@@ -1373,6 +1391,13 @@ class EpisodeRunner(BaseEpisodeRunner):
             )
             if node_id is None:
                 continue
+            node = graph.nodes.get(node_id)
+            if node is None:
+                continue
+            task_type = task_types[slot_idx] if slot_idx < len(task_types) else None
+            q_omega = float((node.Q_omega or {}).get(task_type, 0.0))
+            if q_omega <= 0.0:
+                continue
             history = self.episode_histories[slot_idx]
             trace = (
                 f"Task: {task_descriptions[slot_idx]}\n"
@@ -1386,6 +1411,8 @@ class EpisodeRunner(BaseEpisodeRunner):
                 scaffold_id=node_id,
                 episode_slot_index=slot_idx,
                 task_description=task_descriptions[slot_idx],
+                task_type=task_type,
+                q_omega=q_omega,
                 reward=self.episode_rewards[slot_idx],
             )
 

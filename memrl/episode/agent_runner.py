@@ -1076,6 +1076,45 @@ class EpisodeRunner(BaseEpisodeRunner):
             )
 
         self._report_metrics(metrics)
+        self._append_strategic_scaffolds_jsonl(scaffolds)
+
+    def _append_strategic_scaffolds_jsonl(self, scaffolds: List[Any]) -> None:
+        """One JSON line per strategic scaffold, per batch -- id, content
+        (the scaffold's actual strategy text), per-task-type advantage
+        (Q_omega/n_omega), and selection count.
+
+        A structured companion to metrics.jsonl: that file only keeps
+        Q_omega/n_omega keyed by an 8-char truncated id (kept short for TB
+        tag hygiene), so it can't be joined back to a specific scaffold's
+        content or full id. This keeps both, for reading what a scaffold's
+        strategy text says right next to how it's performing.
+        """
+        if not scaffolds:
+            return
+        path = self.local_cache_dir / "strategic_scaffolds.jsonl"
+        with open(path, "a", encoding="utf-8") as f:
+            for scaffold in scaffolds:
+                try:
+                    summary = self.memory_service.get_representation(scaffold.id).content
+                except Exception:
+                    logger.debug(
+                        "Failed to fetch representation for scaffold %s", scaffold.id, exc_info=True
+                    )
+                    summary = None
+                record = {
+                    "run_id": self.run_id,
+                    "global_step": self.current_step,
+                    "section_index": self._section_index,
+                    "scaffold_id": scaffold.id,
+                    "task_type_dominant": scaffold.task_type_dominant,
+                    "t_create": scaffold.t_create,
+                    "summary": summary,
+                    "q_omega": dict(scaffold.Q_omega or {}),
+                    "n_omega": dict(scaffold.n_omega or {}),
+                    "selection_count": self._strategic_selection_counts.get(scaffold.id, 0),
+                    "evidence_ids": list(scaffold.evidence_ids or []),
+                }
+                f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
 
     def _report_sleep_consolidation_metrics(
         self, sleep_summary: Optional[Dict[str, Any]]

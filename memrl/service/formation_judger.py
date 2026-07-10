@@ -73,14 +73,16 @@ class TacticalFormationCandidate:
 
 @dataclass
 class TacticalSummaryDraft:
-    """Reusable tactical procedure: goal + generalized ordered steps + outcome.
+    """Reusable tactical procedure: goal + concrete ordered steps + outcome.
 
-    Unlike a literal episodic trace, this generalizes over the specific
-    object/receptacle instance so the memory transfers to similar
-    situations instead of replaying one exact past episode. A live run
-    showed the literal-episodic form doing more harm than good -- it
-    over-fits retrieval to the one instance the memory happened to be
-    formed from.
+    Unlike the strategic layer (which abstracts over the object, §17.4),
+    tactical content is deliberately object-SPECIFIC -- it names the actual
+    object/receptacle/appliance involved, since that's what makes a d=2
+    node a distinct, retrievable skill rather than a duplicate of every
+    other instance of the same abstract task. It is still a distilled
+    procedure, not a verbatim step-by-step transcript: a live run showed
+    that form doing more harm than good by over-fitting retrieval to the
+    one instance the memory happened to be formed from.
     """
 
     goal: str
@@ -105,7 +107,7 @@ class TacticalSummaryDraft:
 
 TACTICAL_SUMMARY_PROMPT = """You are converting one admitted tactical experience into a reusable tactical procedure.
 
-The memory will be embedded and retrieved later. Distill the experience into a short, general, reusable PROCEDURE for handling this kind of situation -- not a literal replay of exactly what happened. Generalize over the specific object/receptacle instance (e.g. "the target object", "the receptacle") while keeping the action sequence itself concrete and actionable. Describe only what actually happened for this experience; do not fabricate a different or more successful outcome, even if the source episode ultimately failed.
+The memory will be embedded and retrieved later. Distill the experience into a short, concrete PROCEDURE for handling this specific situation -- not a literal, step-by-step replay of every action and observation. Condense repeated or exploratory actions, but keep the actual objects, receptacles, and appliances involved named explicitly (e.g. "the tomato", "the fridge") -- do NOT replace them with generic placeholders like "the target object" or "the receptacle". This is the tactical layer: it should read as a specific, grounded skill, not an abstract strategy. Describe only what actually happened for this experience; do not fabricate a different or more successful outcome, even if the source episode ultimately failed.
 
 Return a single JSON object and nothing else.
 
@@ -117,8 +119,8 @@ Schema:
 }}
 
 Rules:
-- goal: one sentence describing the kind of situation this procedure handles, generalized -- not tied to the one specific object/receptacle in this experience.
-- procedure: an ordered list of short, imperative, reusable instructions for handling this kind of situation. Generalize over the specific object/receptacle (do not name the literal instance), but keep the action sequence itself concrete and literal.
+- goal: one sentence describing this specific situation, naming the actual object/receptacle/appliance involved.
+- procedure: an ordered list of short, imperative instructions for handling this situation, naming the actual objects/receptacles/appliances involved. Condense the trajectory into a distilled procedure -- skip redundant or exploratory steps -- but do not generalize the objects away.
 - outcome: one short sentence stating the result (e.g. success/failure and reward).
 - Do not include markdown, explanations, or extra keys.
 

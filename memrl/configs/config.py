@@ -97,8 +97,8 @@ class MemoryConfig(BaseModel):
         description="Utility floor in the tactical decay denominator.",
     )
     theta_prune: Optional[float] = Field(
-        default=0.05,
-        description="Retention threshold for tactical node pruning.",
+        default=None,
+        description="Retention threshold for tactical node pruning. None disables pruning.",
     )
     tactical_action_cap: Optional[int] = Field(
         default=None,

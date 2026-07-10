@@ -173,9 +173,12 @@ Until the first sleep event, $d=1$ is empty or manually seeded; the agent runs w
 CREATE TABLE skill_representation (          -- write-once at creation
     node_id     TEXT PRIMARY KEY,
     content     TEXT NOT NULL,   -- LLM-formatted memory text (concise for context budget).
-                                 -- Tactical: generalized PROCEDURE (goal + ordered imperative
-                                 --   steps, object/receptacle abstracted away, + outcome).
-                                 -- Strategic: LLM-synthesized abstraction from cluster summaries.
+                                 -- Tactical: distilled but object-SPECIFIC PROCEDURE (goal +
+                                 --   ordered imperative steps naming the actual object/
+                                 --   receptacle/appliance, + outcome) -- not abstracted, not a
+                                 --   verbatim step-by-step transcript.
+                                 -- Strategic: LLM-synthesized object-agnostic abstraction from
+                                 --   cluster summaries (§17.4) -- the inverse altitude of tactical.
     embedding   BLOB NOT NULL    -- np.ndarray.tobytes(); frombuffer() to read.
 );
 
@@ -201,7 +204,7 @@ CREATE INDEX idx_consolidated ON skill_graph_state(consolidated);
 
 **Working set:** load the relevant nodes at episode start, mutate in memory, and flush to `skill_graph_state` in one batch write at episode end.
 
-**Content is procedural, not episodic.** At tactical node creation the LLM distills the experience into a reusable procedure: a goal line generalized over the specific object/receptacle, an ordered list of short object-agnostic imperative steps (the action sequence kept concrete), and an outcome line. A literal episodic step trace over-fits retrieval to the single instance a memory was formed from, so it is not used as content. The raw trace is still stored in `EpisodicMemoryBank` via `evidence_ids` — inspectable but never surfaced at retrieval. Embeddings are computed once at creation over the summary; only the query embedding $e_q$ is computed at inference.
+**Content is a distilled, object-specific procedure, not a verbatim transcript.** At tactical node creation the LLM distills the experience into a reusable procedure: a goal line, an ordered list of short imperative steps, and an outcome line — all naming the actual object/receptacle/appliance involved (unlike the strategic layer, which abstracts the object away, §17.4; tactical is deliberately the concrete/specific end of that altitude tradeoff). A verbatim step-by-step transcript over-fits retrieval to the single instance a memory was formed from, so the content is a condensed procedure, not a raw trace. The raw trace is still stored in `EpisodicMemoryBank` via `evidence_ids` — inspectable but never surfaced at retrieval. Embeddings are computed once at creation over the summary; only the query embedding $e_q$ is computed at inference.
 
 **`task_type_dominant`** is dynamic: $\arg\max_k n_{ik}$, updated at episode end (`SkillNode.refresh_task_type_dominant`). For strategic nodes it is the dominant task type across the absorbed cluster.
 
@@ -275,7 +278,7 @@ Recompute via `recompute_decay_rate` after any Q-update, on **active nodes only*
 
 ## 7. Memory Management
 
-**Decay-based pruning:** $d_i(\Delta t) < \theta_{\text{prune}} \Rightarrow$ remove (tactical only; task-agnostic, uses `decay_rate` directly). Enabled by default ($\theta_{\text{prune}}=0.05$); if explicitly set to `None`, pruning becomes a no-op and the graph grows monotonically under decay — `decay_rate` is still computed and used everywhere else (salience, selection) regardless of whether removal is active.
+**Decay-based pruning:** $d_i(\Delta t) < \theta_{\text{prune}} \Rightarrow$ remove (tactical only; task-agnostic, uses `decay_rate` directly). **Disabled by default** (`theta_prune=None`) while strategic-scaffold formation is being debugged — pruning is a no-op and the graph grows monotonically under decay. `decay_rate` is still computed and used everywhere else (salience, selection) regardless of whether removal is active; setting `theta_prune` to a float re-enables removal.
 
 **Action-space cap:** $|A^\tau| \le N$ — the top-$N$ tactical nodes by score are eligible at retrieval (a hard bound for convergence; the strategic $d=1$ set is small by construction).
 
@@ -346,9 +349,7 @@ def pass2_content_revision(touched_scaffolds, newly_spawned, positive_evidence, 
 ```
 
 ### 8.4 Reflection Channel (failure capture)
-At episode end (`EpisodeRunner._queue_failed_episode_reflections`, `memrl/episode/agent_runner.py`), a failed episode has a condensed trace (task description + recent history + outcome) appended to its active scaffold's entry in `SkillGraph.failure_buffer` — an **in-memory, uncapped, per-scaffold** dict (`graph.record_failure` / `graph.pop_failures`) — but only if it clears a **solvability gate** first: the scaffold's own $Q^\Omega_\omega(t_k)$ for this episode's task type must be positive, read *before* this episode's own $Q^\Omega$ update is applied (same "read baseline before updating it" convention as §3.8/§4.1, so a failing episode can't deflate its own gate check). A task type absent from $Q^\Omega_\omega$ (the 0.0 default) does not clear the gate either — there is no positive evidence yet that this scaffold solves it.
-
-The gate exists to keep the negative-evidence pool aligned with the prompt's own framing (§8.3): *"FAILED ATTEMPTS are cases where this strategy was appropriate and still failed."* Without it, a failure against a scaffold that was never a good fit for this task type would get folded in as if it were a procedural flaw — conflating "the procedure has a bug" with "the wrong scaffold was selected," which is a scaffold-selection problem (§9.1), not something a content revision can fix. Uncapped otherwise by design: a reservoir cap on the buffer itself would introduce a recency bias into which (gate-cleared) failures survive to be seen by Pass 2, exactly what this mechanism exists to avoid. The buffer is durable only until the next sleep event's Pass 2 call for that scaffold succeeds — nothing here touches SQLite, mirroring how `pending_formations` is already in-memory-only.
+At episode end (`EpisodeRunner._queue_failed_episode_reflections`, `memrl/episode/agent_runner.py`), every failed episode with an active strategic scaffold has a condensed trace (task description + recent history + outcome) appended to that scaffold's entry in `SkillGraph.failure_buffer` — an **in-memory, uncapped, per-scaffold** dict (`graph.record_failure` / `graph.pop_failures`), unconditionally: there is no solvability gate on top of "the episode failed and a scaffold was active." Uncapped by design: a reservoir cap on the buffer itself would introduce a recency bias into which failures survive to be seen by Pass 2, exactly what this mechanism exists to avoid. The buffer is durable only until the next sleep event's Pass 2 call for that scaffold succeeds — nothing here touches SQLite, mirroring how `pending_formations` is already in-memory-only.
 
 This makes reflection the same mechanism as ordinary content revision, not a bolted-on field: failed episodes are just `negative_evidence` alongside spawn/absorb's `positive_evidence`, both consumed by the one `revise_strategy` prompt. There is no failure-count threshold — every scaffold with any accumulated failures gets a Pass 2 call at every sleep event it is touched by, or has pending failures for. See §17.3 for the original design rationale (TextGrad framing, relationship to CLIN/ExpeL) — this section is the shipped implementation of that proposal.
 
@@ -433,7 +434,7 @@ for each episode:
     # ---- MAINTENANCE: prune, then update dominant type, then sleep ----
     for node in list(G.tactical_nodes()):
         if exp(-node.decay_rate*(current_step - node.last_accessed_step)) < theta_prune:
-            G.remove(node)                              # enabled by default (theta_prune=0.05); no-op only if explicitly unset (§7)
+            G.remove(node)                              # no-op unless theta_prune is explicitly set (disabled by default, §7)
     for node, _ in active_skills:
         node.task_type_dominant = argmax(node.n)
     if sum(1 for n in G.tactical_nodes() if not n.consolidated) >= N_sleep:
@@ -477,7 +478,7 @@ Defaults reflect `MemoryConfig` (`memrl/configs/config.py`). Symbols marked "abl
 | $\lambda$ (`lambda_base`) | Base decay rate (flat layer); `decay_rate` computation is degenerate while unset | None |
 | $\lambda_{\text{shrink}}$ (`lambda_shrink`) | Shrinkage pseudocount for $\bar{Q}_{i,w}$, $\bar{Q}^\Omega$, $Q^\Omega$ init | 10 |
 | $\epsilon$ (`epsilon_decay`) | Salience floor in $\max(\bar{Q}_{i,w},0)+\epsilon$ | 0.01 |
-| $\theta_{\text{prune}}$ (`theta_prune`) | Retention threshold; pruning is **enabled by default** (was `None`/disabled) | 0.05 |
+| $\theta_{\text{prune}}$ (`theta_prune`) | Retention threshold; pruning is **disabled by default** (`None`) while strategic-scaffold formation is being debugged | None |
 | $N$ (`tactical_action_cap`) | Hard tactical action-space cap | None |
 | $\alpha$ (`alpha`) | Tactical advantage learning rate | 0.1 |
 | $\alpha^\Omega$ (`alpha_omega`) | Strategic advantage learning rate (independent) | 0.1 |

@@ -119,7 +119,7 @@ $$G_t = \gamma^{(T-1)-t}R \quad(\text{update target, §3.2})\qquad A_t = G_t - b
 Both are computed from the buffered trajectory at episode end. There is no reward model and no TD error.
 
 ### 3.5 Initialization
-**Tactical:** `Q` is empty at creation → salience 0 → maximum decay $\lambda/\epsilon$ until first use, so a misjudged node is pruned quickly if never retrieved.
+**Tactical:** `Q` is seeded at creation from the advantage $A_t$ that admitted the node in the first place (Stage 1, §4.1) — $Q(t_k) \leftarrow A_t$, $n(t_k) \leftarrow 1$, for the task type it was formed under. This is not a special case: §3.3's cold-start identity already states that for a node used on only one task type, $\bar{Q}_{i,w} = Q_i(t_{k_0})$, so seeding here just makes the node's initial salience equal to the evidence that justified creating it, rather than discarding that evidence and starting at salience 0 (max decay) until some later episode happens to retrieve and re-update it. Without this, a node could sit at max decay indefinitely and never clear $\theta_{\text{consolidate}}$ (§8.1) despite already having known positive evidence.
 
 **Strategic — spawn** (new $d=1$ via consolidation): initialize per-task-type advantage from the cluster's shrinkage-weighted mean, with **no horizon factor**:
 $$Q^{\Omega}_\omega(t_k) = \frac{\sum_{j\in\text{cluster}} w_j Q_j(t_k)}{\sum_{j\in\text{cluster}} w_j},\qquad w_j = \frac{n_{jk}}{n_{jk}+\lambda_{\text{shrink}}}$$
@@ -305,10 +305,13 @@ $$\text{action(cluster)} = \begin{cases}
 \end{cases}$$
 A spawn writes a **placeholder** representation immediately (empty `content`, embedding = cluster centroid so a later cosine comparison has something to test against) that Pass 2 fills in within the same sleep event — the placeholder is never actually retrievable. `consolidated` is set on every cluster's tactical nodes here (spawn/absorb/discard alike), preventing re-clustering. **Ordering:** consolidation runs strictly *after* decay-pruning in the same pass, so it never reparents a node marked for removal.
 
+$n_{\text{min-spawn}}$ also caps the clustering step's own $k$ (§16.1, `clustering.py`'s `KMeansClusteringStrategy`): $k \leftarrow \min(k, \max(1, \lfloor n_{\text{eligible}}/n_{\text{min-spawn}}\rfloor))$. Without this, `_default_k`'s $\max(2,\lfloor\sqrt{n}\rfloor)$ can fragment a small eligible pool into clusters too small to ever clear $n_{\text{min-spawn}}$ — e.g. 2 eligible nodes always become 2 singleton clusters under the raw formula, which discard forever regardless of how many sleep events fire.
+
 ```python
 def pass1_structural_decisions(eligible, scaffolds, theta_absorb, n_min_spawn):
     clusters = cluster_embeddings(eligible, {n.id: graph.get_embedding(n.id) for n in eligible})
-    # K-means; k = max(2, floor(sqrt(len(eligible)))), refined by Davies-Bouldin over {k-1,k,k+1}
+    # K-means; k = max(2, floor(sqrt(len(eligible)))), refined by Davies-Bouldin over {k-1,k,k+1},
+    # then capped so no cluster is forced smaller than n_min_spawn (see above)
     decisions = []
     for cluster in clusters:
         centroid = mean_embedding([graph.get_embedding(n.id) for n in cluster])
@@ -381,23 +384,32 @@ def adv(node, t_k):                       # stored advantage, else cross-task me
 
 for each episode:
     t_k = classify_task(episode)
-    active_skills, episode_rewards, trajectory_buffer = [], [], []
+    retrieved_visits, episode_rewards, trajectory_buffer = [], [], []
 
     omega = select_strategic_scaffold(G, t_k)          # None during bootstrap (§9.1)
 
     # ---- STEP LOOP: buffer only; advantage undefined until terminal R ----
+    # trajectory_buffer records EVERY step's raw experience unconditionally
+    # -- formation (below) is gated purely on advantage, not on whether a
+    # tactical node happened to be retrieved this step. retrieved_visits
+    # is the separate, retrieval-gated list used only for the Q-update of
+    # EXISTING nodes -- the two must not be conflated (an earlier draft of
+    # this pseudocode did, and reads as a formation-deadlock that the
+    # actual implementation does not have).
     for step t in range(max_steps):
         if omega is not None:
             candidates = tactical_retrieve(G.children(omega), c_t, t_k, N)   # blended, §9.2
         else:
             candidates = recall_tactical_flat(c_t, t_k, N)                   # bootstrap
-        a_t = candidates[0] if candidates else NULL_ACTION
-        r_t, s_next = env.step(a_t)                    # intermediate r_t = 0
+        retrieved = candidates[0] if candidates else None
+        a_t = agent.act(c_t, retrieved)                 # memory conditions reasoning; the agent emits a_t
+        r_t, s_next = env.step(a_t)                     # intermediate r_t = 0
         episode_rewards.append(r_t)
-        if a_t is not NULL_ACTION:
-            a_t.n[t_k] = a_t.n.get(t_k, 0) + 1
-            a_t.last_accessed_step = current_step
-            active_skills.append((a_t, t)); trajectory_buffer.append(StepRecord(a_t, t))
+        trajectory_buffer.append(StepRecord(c_t, a_t, t, s_next))
+        if retrieved is not None:
+            retrieved.n[t_k] = retrieved.n.get(t_k, 0) + 1
+            retrieved.last_accessed_step = current_step
+            retrieved_visits.append((retrieved, t))
         current_step += 1
 
     # ============ END OF EPISODE ============
@@ -406,13 +418,18 @@ for each episode:
     G_om = sum((gamma_omega**t)*r for t, r in enumerate(episode_rewards))
     b_tac = baseline_tac.get(t_k, 0.0); b_str = baseline_str.get(t_k, 0.0)   # read before update
 
-    # ---- TACTICAL: store advantage + collect formations (§3.2 / §4.1) ----
+    # ---- TACTICAL: update Q of RETRIEVED nodes (§3.2) ----
+    for node, step in retrieved_visits:
+        G_t = (gamma**(T-1-step))*R; A_t = G_t - b_tac
+        node.Q[t_k] = node.Q.get(t_k,0.0) + alpha*(A_t - node.Q.get(t_k,0.0))
+        node.recompute_decay_rate(G.lambda_base, G.epsilon, G.lambda_shrink)
+
+    # ---- TACTICAL: Stage-1 admission gate over EVERY step, forming NEW
+    # nodes -- independent of retrieved_visits above (§4.1) ----
     pending_formations = []
     for rec in trajectory_buffer:
         G_t = (gamma**(T-1-rec.step))*R; A_t = G_t - b_tac
-        rec.node.Q[t_k] = rec.node.Q.get(t_k,0.0) + alpha*(A_t - rec.node.Q.get(t_k,0.0))
-        rec.node.recompute_decay_rate(G.lambda_base, G.epsilon, G.lambda_shrink)
-        if A_t > theta_adv: pending_formations.append(rec)
+        if A_t > theta_adv: pending_formations.append((rec, A_t))
 
     # ---- STRATEGIC: store advantage (§3.8) ----
     if omega is not None:
@@ -427,15 +444,16 @@ for each episode:
     baseline_str.update_ema(t_k, G_om, alpha_baseline)
 
     # ---- FORMATION: LLM summarizes admitted candidates (NO judgment step, §4.2) ----
-    for rec in pending_formations:
+    for rec, A_t in pending_formations:
         new_node = create_skill_node(rec)              # LLM summary + embedding; depth = 2
-        G.insert(new_node, parent=G.root_id)           # empty Q → max decay until first use
+        new_node.Q[t_k] = A_t; new_node.n[t_k] = 1     # seed from admitting evidence (§3.5) -- not empty
+        G.insert(new_node, parent=G.root_id)           # refresh_decay_rate() reads the seeded Q here
 
     # ---- MAINTENANCE: prune, then update dominant type, then sleep ----
     for node in list(G.tactical_nodes()):
         if exp(-node.decay_rate*(current_step - node.last_accessed_step)) < theta_prune:
             G.remove(node)                              # no-op unless theta_prune is explicitly set (disabled by default, §7)
-    for node, _ in active_skills:
+    for node, _ in retrieved_visits:
         node.task_type_dominant = argmax(node.n)
     if sum(1 for n in G.tactical_nodes() if not n.consolidated) >= N_sleep:
         sleep_consolidation(G, theta_consolidate)      # §8.2
@@ -489,7 +507,7 @@ Defaults reflect `MemoryConfig` (`memrl/configs/config.py`). Symbols marked "abl
 | $N_{\text{sleep}}$ (`n_sleep`) | Unconsolidated count triggering sleep | None |
 | $\theta_{\text{consolidate}}$ (`theta_consolidate`) | Min salience for consolidation eligibility | None |
 | $\theta_{\text{absorb}}$ (`theta_absorb`) | Pass 1 (§8.2): absorb into the closest scaffold if $\cos(\text{centroid}, e_\omega) > \theta_{\text{absorb}}$ | 0.75 |
-| $n_{\text{min-spawn}}$ (`n_min_spawn`) | Pass 1: min cluster size to spawn when no scaffold clears $\theta_{\text{absorb}}$; smaller clusters discard | 3 |
+| $n_{\text{min-spawn}}$ (`n_min_spawn`) | Pass 1: min cluster size to spawn when no scaffold clears $\theta_{\text{absorb}}$; smaller clusters discard. Also passed to the clustering strategy as a floor on cluster size ($k \leftarrow \min(k, \max(1, \lfloor n_{\text{eligible}}/n_{\text{min-spawn}}\rfloor))$), so a small eligible pool isn't fragmented into clusters too small to ever spawn | 2 |
 | $k$ | K-means cluster count | $\max(2,\lfloor\sqrt{\text{eligible}}\rfloor)$, DB-refined |
 | $\lambda_{\text{retrieval}}$ (`lambda_retrieval`) | Advantage weight in both retrieval blends (rank-normed) | 0.5 |
 | $\theta_{\text{retrieval}}$ (`theta_retrieval`) | Tactical-only quality gate on blended score | 0.0 (ablation knob) |

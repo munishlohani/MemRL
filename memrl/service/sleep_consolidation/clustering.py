@@ -27,9 +27,21 @@ class ClusteringStrategyBase(ABC):
 class KMeansClusteringStrategy(ClusteringStrategyBase):
     """Default clustering strategy for Phase 1 sleep consolidation."""
 
-    def __init__(self, n_clusters: Optional[int] = None, random_state: int = 0):
+    def __init__(
+        self,
+        n_clusters: Optional[int] = None,
+        random_state: int = 0,
+        n_min_spawn: Optional[int] = None,
+    ):
         self.n_clusters = n_clusters
         self.random_state = random_state
+        # Caps k so no cluster can be forced smaller than n_min_spawn on
+        # average -- without this, _default_k's max(2, floor(sqrt(n))) can
+        # fragment a small eligible pool into clusters that structurally
+        # can never clear the sleep-consolidation spawn threshold (e.g. 2
+        # eligible nodes -> 2 singleton clusters, discarded forever if
+        # n_min_spawn >= 2).
+        self.n_min_spawn = n_min_spawn
 
     def cluster(self, embeddings: Sequence[Sequence[float]]) -> List[List[int]]:
         vectors = self._coerce_vectors(embeddings)
@@ -44,6 +56,8 @@ class KMeansClusteringStrategy(ClusteringStrategyBase):
         k = self.n_clusters if self.n_clusters is not None else self._default_k(n_samples)
         if self.n_clusters is None:
             k = self._best_k_local(vectors, k)
+        if self.n_min_spawn is not None and self.n_min_spawn > 0:
+            k = min(k, max(1, n_samples // self.n_min_spawn))
         if k == 1:
             return [list(range(n_samples))]
 
@@ -193,10 +207,13 @@ def get_clustering_strategy(
     *,
     n_clusters: Optional[int] = None,
     random_state: int = 0,
+    n_min_spawn: Optional[int] = None,
 ) -> ClusteringStrategyBase:
     """Factory for sleep-consolidation clustering strategies."""
     if strategy == ClusterStrategy.KMEANS:
-        return KMeansClusteringStrategy(n_clusters=n_clusters, random_state=random_state)
+        return KMeansClusteringStrategy(
+            n_clusters=n_clusters, random_state=random_state, n_min_spawn=n_min_spawn
+        )
     if strategy == ClusterStrategy.HDBSCAN:
         return HDBSCANStrategy()
     raise ValueError(f"Unknown cluster strategy: {strategy}")

@@ -184,11 +184,13 @@ class MemoryConfig(BaseModel):
         ),
     )
     n_min_spawn: int = Field(
-        default=3,
+        default=2,
         description=(
             "Minimum cluster size to spawn a new strategic scaffold when no "
             "existing scaffold clears theta_absorb (Pass 1); smaller "
-            "clusters are discarded instead."
+            "clusters are discarded instead. Also passed to the clustering "
+            "strategy as a floor on cluster size, so a small eligible pool "
+            "isn't fragmented into clusters too small to ever spawn."
         ),
     )
 

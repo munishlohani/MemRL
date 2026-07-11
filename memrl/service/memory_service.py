@@ -559,8 +559,22 @@ class MemoryService:
         embedding: Optional[List[float]] = None,
         evidence_ids: Optional[List[str]] = None,
         last_accessed_step: Optional[int] = None,
+        initial_q: Optional[Dict[str, float]] = None,
+        initial_n: Optional[Dict[str, int]] = None,
     ) -> SkillNode:
-        """Create a node from text and add it to the service."""
+        """Create a node from text and add it to the service.
+
+        `initial_q`/`initial_n` (tactical, depth=2 only) seed the node's
+        advantage from the evidence that admitted it -- e.g. Stage 1's
+        `A_t` (spec §4.1) that just proved this candidate beats the
+        baseline. Without this, a freshly formed node starts with `Q={}`
+        (salience 0, max decay) despite being created *because of* known
+        positive advantage, and stays ineligible for sleep consolidation
+        (§8.1: `salience > theta_consolidate`) until some later episode
+        happens to retrieve and re-update it. Per §3.3's cold-start
+        identity, a node used on only one task type has `Q̄_w = Q(t_k)`,
+        so seeding here is exactly its correct salience, not a hack.
+        """
         log_event(
             logger,
             "skill_creation.start",
@@ -593,6 +607,10 @@ class MemoryService:
                 t_create=t_create,
                 parent_id=parent_id,
             )
+            if initial_q:
+                node.Q = dict(initial_q)
+            if initial_n:
+                node.n = dict(initial_n)
         else:
             raise ValueError("depth must be 1 or 2")
 

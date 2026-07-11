@@ -1753,6 +1753,13 @@ class EpisodeRunner(BaseEpisodeRunner):
                 parent_id=parent_id,
                 evidence_ids=evidence_ids,
                 last_accessed_step=int(self.current_step),
+                # Seed Q from the advantage that admitted this candidate
+                # (spec §4.1/§3.3) -- otherwise the node starts at salience
+                # 0 despite already having known positive evidence, and
+                # stays ineligible for sleep consolidation until some later
+                # episode happens to retrieve and re-update it.
+                initial_q={candidate.task_type: candidate.advantage},
+                initial_n={candidate.task_type: 1},
             )
             created_nodes.append(node_id)
 

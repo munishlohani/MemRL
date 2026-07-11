@@ -53,8 +53,7 @@ class TacticalFormationCandidate:
             f"step_index: {self.step_index}",
             f"observation: {self.observation}",
             f"action: {self.action}",
-            f"reward: {self.reward:.6f}",
-            f"advantage: {self.advantage:.6f}",
+            f"advantage (this step's return-to-go minus the task-type baseline -- why it was admitted): {self.advantage:.6f}",
             f"source_memory_id: {self.source_memory_id or 'none'}",
             f"active_strategic_node_id: {self.active_strategic_node_id or 'none'}",
             f"retrieved_ids: {', '.join(self.retrieved_ids) if self.retrieved_ids else 'none'}",
@@ -67,7 +66,7 @@ class TacticalFormationCandidate:
         """Create a deterministic summary if the judge omits one."""
         return (
             f"{self.task_type}: {self.action.strip()} after {self.observation.strip()}"
-            f" (reward={self.reward:.3f}, advantage={self.advantage:.3f})"
+            f" (advantage={self.advantage:.3f})"
         ).strip()
 
 
@@ -107,7 +106,9 @@ class TacticalSummaryDraft:
 
 TACTICAL_SUMMARY_PROMPT = """You are converting one admitted tactical experience into a reusable tactical procedure.
 
-The memory will be embedded and retrieved later. Distill the experience into a short, concrete PROCEDURE for handling this specific situation -- not a literal, step-by-step replay of every action and observation. Condense repeated or exploratory actions, but keep the actual objects, receptacles, and appliances involved named explicitly (e.g. "the tomato", "the fridge") -- do NOT replace them with generic placeholders like "the target object" or "the receptacle". This is the tactical layer: it should read as a specific, grounded skill, not an abstract strategy. Describe only what actually happened for this experience; do not fabricate a different or more successful outcome, even if the source episode ultimately failed.
+The memory will be embedded and retrieved later. Distill the experience into a short, concrete PROCEDURE for handling this specific situation -- not a literal, step-by-step replay of every action and observation. Condense repeated or exploratory actions, but keep the actual objects, receptacles, and appliances involved named explicitly (e.g. "the tomato", "the fridge") -- do NOT replace them with generic placeholders like "the target object" or "the receptacle". This is the tactical layer: it should read as a specific, grounded skill, not an abstract strategy. Describe only what actually happened for this step; do not fabricate a different action or observation than what is given below.
+
+This candidate was already admitted because its advantage is positive (its return-to-go beat the task-type baseline for this kind of task) -- there is no separate reward figure to check; treat the advantage below as the only signal of how this step performed.
 
 Return a single JSON object and nothing else.
 
@@ -121,7 +122,7 @@ Schema:
 Rules:
 - goal: one sentence describing this specific situation, naming the actual object/receptacle/appliance involved.
 - procedure: an ordered list of short, imperative instructions for handling this situation, naming the actual objects/receptacles/appliances involved. Condense the trajectory into a distilled procedure -- skip redundant or exploratory steps -- but do not generalize the objects away.
-- outcome: one short sentence stating the result (e.g. success/failure and reward).
+- outcome: one short sentence on why this step was worth remembering -- what it contributed toward the positive advantage that got it admitted. Do not state "success"/"failure" -- a single step is not the episode's outcome.
 - Do not include markdown, explanations, or extra keys.
 
 Source experience:

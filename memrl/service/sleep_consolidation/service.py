@@ -46,13 +46,14 @@ class SleepConsolidationService:
         n_min_spawn: int = 3,
     ) -> None:
         self.llm_provider = llm_provider
+        self.n_min_spawn = int(n_min_spawn)
         self.clustering_strategy = clustering_strategy or get_clustering_strategy(
             cluster_strategy,
             n_clusters=n_clusters,
             random_state=random_state,
+            n_min_spawn=self.n_min_spawn,
         )
         self.theta_absorb = float(theta_absorb)
-        self.n_min_spawn = int(n_min_spawn)
 
     def cluster_embeddings(
         self,

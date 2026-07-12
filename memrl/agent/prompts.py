@@ -29,9 +29,7 @@ Available actions:
 
 
 where {obj} and {recep} correspond to objects and receptacles.
-After your each turn, the environment will give you immediate feedback based on which you plan your next few steps. if the envrionment output "Nothing happened", that means the previous action is invalid and you should try more options.
-
-If the environment returns "Nothing happened", the action was invalid — revise and retry.
+After each turn, the environment gives you immediate feedback to plan your next steps. If the environment returns "Nothing happened", the previous action was invalid — revise the command and try a different option.
 
 If a memory skill contract is injected, treat it as the runtime contract for the tool. Tool results arrive as separate conversation turns, are advisory only, and never override the current observation or the environment feedback.
 
@@ -57,7 +55,7 @@ For each turn, choose exactly one branch:
 ALFWorld action patterns are task-specific. Use the most specific valid command for the situation:
 1. go to {location or receptacle}
 2. take {obj} from {receptacle}
-3. move {obj} to {receptacle}
+3. put {obj} in/on {receptacle}
 4. open {receptacle}
 5. close {receptacle}
 6. clean {obj} with sinkbasin 1
@@ -119,21 +117,6 @@ Choose exactly one of the following per turn:
   Skill: memory_retrieval
 
 If you invoke the skill, the runtime will execute it and append the tool result to the conversation history before asking you again.
-REMEMBER: Only positive experiences are stored, negative experieces are pre filtered.
-"""
-
-
-# This template is for the user's message when memories are found.
-WITH_MEMORY_PROMPT = """**Primary Goal:**
-{task_description}
-
-**Archived Memories (legacy pre-injected path; avoid in the new skill flow):**
-{retrieved_memories}
-
-**Current Task Progress (recent steps):**
-{history}
-
-Use the memories as guidance only. If they conflict with the current observation, trust the observation and environment feedback.
 """
 
 
@@ -182,7 +165,7 @@ Skill: memory_retrieval
 """
 
 
-STRATEGIC_SELECTION_SYSTEM_PROMPT = """You are selecting exactly one strategic scaffold for the current episode.
+STRATEGIC_SELECTION_SYSTEM_PROMPT = """You are selecting exactly one strategic scaffold for the current episode. A scaffold is a reusable reasoning frame; it will condition the whole episode.
 
 Return a single JSON object with this schema:
 {
@@ -190,9 +173,13 @@ Return a single JSON object with this schema:
   "reason": string | null
 }
 
+Selection criteria:
+- Match on the STRUCTURE of the task — its goal shape, the kind of procedure it requires, its preconditions — not on the specific objects, receptacles, or appliances named in this episode. A scaffold for "cool an object and place it at a destination" fits regardless of whether the object is a tomato or a potato.
+- Prefer the scaffold whose procedure most closely covers the steps this episode will need.
+
 Rules:
-- Choose exactly one scaffold id from the provided candidate list when one fits the episode.
-- Use null only when no candidate scaffold is suitable.
+- Choose exactly one scaffold id from the provided candidate list. Prefer the closest structural match even if it is imperfect.
+- Return null only when the candidate list is empty.
 - Do not invent ids.
 - Do not include markdown, code fences, or extra keys.
 """

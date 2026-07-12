@@ -104,11 +104,9 @@ class TacticalSummaryDraft:
         return "\n".join(lines).strip()
 
 
-TACTICAL_SUMMARY_PROMPT = """You are converting one admitted tactical experience into a reusable tactical procedure.
+TACTICAL_SUMMARY_PROMPT = """You are converting one tactical step into a reusable, grounded tactical note.
 
-The memory will be embedded and retrieved later. Distill the experience into a short, concrete PROCEDURE for handling this specific situation -- not a literal, step-by-step replay of every action and observation. Condense repeated or exploratory actions, but keep the actual objects, receptacles, and appliances involved named explicitly (e.g. "the tomato", "the fridge") -- do NOT replace them with generic placeholders like "the target object" or "the receptacle". This is the tactical layer: it should read as a specific, grounded skill, not an abstract strategy. Describe only what actually happened for this step; do not fabricate a different action or observation than what is given below.
-
-This candidate was already admitted because its advantage is positive (its return-to-go beat the task-type baseline for this kind of task) -- there is no separate reward figure to check; treat the advantage below as the only signal of how this step performed.
+The note will be embedded and retrieved later when the agent faces a similar situation. Focus on THIS step -- the action taken and the observation it responded to. The prior history is given only as context; do not summarize the whole episode. Keep the actual objects, receptacles, and appliances named explicitly (e.g. "the tomato", "the fridge") -- do NOT replace them with generic placeholders like "the target object" or "the receptacle". This is the tactical layer: it should read as a specific, grounded skill, not an abstract strategy. Describe only what actually happened; do not fabricate a different action or observation than the one given below.
 
 Return a single JSON object and nothing else.
 
@@ -120,9 +118,9 @@ Schema:
 }}
 
 Rules:
-- goal: one sentence describing this specific situation, naming the actual object/receptacle/appliance involved.
-- procedure: an ordered list of short, imperative instructions for handling this situation, naming the actual objects/receptacles/appliances involved. Condense the trajectory into a distilled procedure -- skip redundant or exploratory steps -- but do not generalize the objects away.
-- outcome: one short sentence on why this step was worth remembering -- what it contributed toward the positive advantage that got it admitted. Do not state "success"/"failure" -- a single step is not the episode's outcome.
+- goal: one sentence describing the situation this step handles, naming the actual object/receptacle/appliance involved.
+- procedure: a short ordered list of imperative instructions for handling this situation, grounded in what actually happened at this step (and, where it clarifies the step, the immediately preceding actions). Name the actual objects/receptacles/appliances; do not generalize them away.
+- outcome: one short sentence on what this step accomplished in the environment. Do not state "success"/"failure" -- a single step is not the episode's outcome.
 - Do not include markdown, explanations, or extra keys.
 
 Source experience:

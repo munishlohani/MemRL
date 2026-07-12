@@ -30,10 +30,10 @@ memory:
   add_similarity_threshold: 0.90
   n_sleep: 20
   lambda_base: 1e-3  # Base decay rate for tactical nodes (spec sweep range [1e-4, 1e-2] log-scale).
-  theta_prune: null  # Retention threshold for tactical node pruning. Disabled for now (was 0.01) while debugging strategic scaffold formation.
+  theta_prune: 0.01  # Retention threshold for tactical node pruning. Disabled for now (was 0.01) while debugging strategic scaffold formation.
   alpha_baseline: 0.1  # EMA rate for the tactical/strategic advantage baselines b(t_k)/b_omega(t_k), shared. Replaces the lifetime running mean. Not yet swept.
   lambda_retrieval: 0.5  # Advantage weight in the retrieval blend (spec §P2.1, shared by tactical and strategic): score = lambda_retrieval * rank_norm(Q) + (1 - lambda_retrieval) * rank_norm(cos(e_i, e_q)). Reasoned default (MemRL's own blend), not swept.
-  theta_retrieval: 0.2  # Tactical-only quality gate: candidates scoring below this are dropped entirely (no memory is better than a bad one). 0.0 = no-op; not yet swept.
+  theta_retrieval: 0.3  # Tactical-only ABSOLUTE relevance floor: drop candidates whose raw cosine similarity to the current context is below this (before rank-norm), so a step retrieves nothing when no child of the active scaffold is relevant. Raw cosine scale (not the blended score); tune per embedding model. 0.0 = no-op; not yet swept.
   theta_absorb: 0.85  # Sleep consolidation Pass 1 (algorithmic): a cluster absorbs into the closest existing scaffold if cosine(cluster_centroid, scaffold.embedding) exceeds this. Not yet swept.
   n_min_spawn: 2  # Minimum cluster size to spawn a new scaffold when no existing scaffold clears theta_absorb; smaller clusters are discarded. Also caps clustering's k so small eligible pools aren't fragmented below this size. Lowered from 3 -- with few eligible nodes, default-k was producing clusters too small to ever spawn.
   # MemOS configuration

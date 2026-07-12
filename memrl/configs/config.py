@@ -217,12 +217,17 @@ class MemoryConfig(BaseModel):
     theta_retrieval: float = Field(
         default=0.0,
         description=(
-            "Minimum blended tactical retrieval score required to return a "
-            "candidate at all (tactical retrieval only, not strategic). "
-            "Below this, no memory is retrieved for that step -- no memory "
-            "is better than a bad one. Score is bounded to [0, 1] (a convex "
-            "combination of two rank-normalized terms), so 0.0 is a no-op "
-            "gate (current default; not yet swept)."
+            "Absolute relevance floor for tactical retrieval (tactical only, "
+            "not strategic). In cluster-scoped mode a candidate whose raw "
+            "cosine similarity to the current context is below this is dropped "
+            "before rank-normalization, so a step retrieves nothing when no "
+            "child of the active scaffold is relevant -- no memory is better "
+            "than a bad one. It gates raw similarity, NOT the blended "
+            "rank-normalized score: rank-normalization is set-relative and "
+            "always keeps the top candidate, so a gate on the blend can never "
+            "fire. Scale is raw cosine in [~0, 1]; 0.0 is a no-op, and useful "
+            "values depend on the embedding model (e.g. text-embedding-3-large "
+            "loosely-related text often sits ~0.2-0.4). Not yet swept."
         ),
     )
 

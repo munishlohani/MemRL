@@ -171,10 +171,18 @@ class SkillSimilarityRetriever:
         the decay-weighted pure-similarity score -- newly formed nodes
         rarely have usable per-task-type Q yet.
 
-        theta_retrieval is a tactical-only quality gate applied to the final
-        score: a candidate scoring below it is dropped rather than returned,
-        so a step can legitimately retrieve nothing when every candidate is
-        bad -- no memory is better than a bad one.
+        theta_retrieval is a tactical-only quality gate. In cluster-scoped
+        mode it is an ABSOLUTE cosine-similarity floor applied *before*
+        rank-normalization: a candidate whose raw similarity to the current
+        context is below it is dropped, so a step can legitimately retrieve
+        nothing when no child of the active scaffold is relevant here -- no
+        memory is better than a bad one. It must read raw similarity, not the
+        blended score, because rank-normalization is set-relative and always
+        maps the best candidate to ~1.0 -- a gate on the blended score can
+        never drop the top pick and never fires when every candidate is
+        globally irrelevant. In the bootstrap path the gate applies to the
+        decay-weighted similarity score, which is already an absolute [0, 1]
+        quantity.
         """
         rep_by_id = {getattr(rep, "id", None): rep for rep in representations}
         candidates: List[Dict[str, Any]] = []
@@ -212,6 +220,16 @@ class SkillSimilarityRetriever:
             )
 
         if cluster_scoped:
+            # Absolute relevance floor: drop candidates whose raw cosine
+            # similarity is below theta_retrieval BEFORE rank-normalizing, so
+            # the gate can actually fire (return nothing) when no child of the
+            # active scaffold is relevant to this step. Gating on the blended
+            # rank-normalized score cannot -- the top candidate always ranks
+            # ~1.0 regardless of absolute relevance.
+            candidates = [
+                c for c in candidates
+                if float(c["similarity"]) >= float(theta_retrieval)
+            ]
             lam = float(lambda_retrieval)
             q_norms = rank_normalize([c["q_value"] for c in candidates])
             sim_norms = rank_normalize([c["similarity"] for c in candidates])
@@ -220,8 +238,11 @@ class SkillSimilarityRetriever:
         else:
             for candidate in candidates:
                 candidate["score"] = candidate["similarity"] * candidate["decay_factor"]
-
-        candidates = [c for c in candidates if float(c["score"]) >= float(theta_retrieval)]
+            # Bootstrap path: score = sim * decay_factor is already an
+            # absolute [0, 1] quantity, so the same floor applies to it directly.
+            candidates = [
+                c for c in candidates if float(c["score"]) >= float(theta_retrieval)
+            ]
 
         selected = [
             self._format_selected_payload(

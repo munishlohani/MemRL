@@ -3,8 +3,15 @@
 # Usage:
 #   python run/run_alfworld_ray.py --config configs/rl_alf_config.yaml --ray-config configs/rl_alf_ray.yml
 #
-# The `trials` list can hold one or many override sets. Each trial is merged
-# into the base MemRL YAML config before the runner is constructed.
+# This file controls ONLY Ray execution (parallelism, resources, trial
+# naming). All actual MemRL hyperparameters -- experiment, memory, llm,
+# embedding, rl_config -- live solely in the base MemRL YAML config
+# (rl_alf_config.yaml). Trial `overrides` below are intentionally empty so
+# a Ray run is byte-for-byte the same hyperparameters as running
+# run_alfworld.py directly against the same base config -- there is
+# exactly one source of truth for hyperparameters, not two that can
+# silently diverge. Add per-trial overrides here only for genuine
+# multi-trial sweeps, and keep them minimal.
 
 ray:
   address: local
@@ -16,17 +23,4 @@ ray:
 
 trials:
   - name: alfworld-baseline
-    overrides:
-      experiment:
-        experiment_name: alfworld_memrl_ray
-        mode: train
-        batch_size: 5
-        max_steps: 50
-        num_epochs: 1  # 1 full pass through the collected game set (140 tasks with dataset_ratio=1.0). Explicit here (not just inherited from the base config) so it can't silently fall back to a stale num_sections if the merge ever changes.
-      memory:
-        k_retrieve: 5
-        cluster_strategy: kmeans
-        task_type_mode: explicit
-      rl_config:
-        alpha: 0.3
-        gamma: 0.0
+    overrides: {}

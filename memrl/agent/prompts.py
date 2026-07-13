@@ -29,12 +29,7 @@ Available actions (these are the ONLY valid commands — the environment accepts
 
 where {obj} and {recep} correspond to objects and receptacles, each written with its number as shown in the observation (e.g. "countertop 1", "spraybottle 2").
 
-Use ONLY the 11 templates above, verbatim. There is no "drop", "toggle", "put down", "inventory", "move", or any other verb — if you need to release an object, use "put {obj} in/on {recep}" at a specific receptacle; there is no way to drop an object without naming a receptacle. To place an object you must first be holding it (take it) and be at the receptacle (go to it).
-
-CRITICAL: in the put command, "in/on" is a LITERAL token — type it exactly as "in/on". It is NOT a choice between "in" and "on". Correct: "put cup 1 in/on sidetable 1". WRONG: "put cup 1 in sidetable 1" and "put cup 1 on sidetable 1" (both are invalid and will fail). Always write "in/on".
-
-After each turn, the environment gives you immediate feedback to plan your next steps. If the environment returns "Nothing happened", the command was either invalid syntax or its precondition was not met (you are not holding the object, or not at the receptacle, or it is closed) — do NOT invent a new verb; instead switch to one of the 11 templates above, most often "go to" the right receptacle or "take"/"open" first, then retry.
-
+After each turn, the environment gives you immediate feedback to plan your next steps. If the environment returns "Nothing happened", the command was either invalid syntax or its precondition was not met (you are not holding the object, or not at the receptacle, or it is closed) 
 If a memory skill contract is injected, treat it as the runtime contract for the tool. Tool results arrive as separate conversation turns, are advisory only, and never override the current observation or the environment feedback.
 
 Your response should use one of the following formats:

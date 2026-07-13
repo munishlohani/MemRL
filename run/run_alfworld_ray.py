@@ -17,7 +17,7 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 from memrl.agent.memp_agent import MempAgent
-from memrl.agent.prompts import ALFWORLD_SYSTEM_PROMPT
+from memrl.agent.prompts import SYSTEM_PROMPT
 from memrl.configs.config import MempConfig
 from memrl.episode.agent_runner import EpisodeRunner
 from memrl.envs.alfworld_episode_adapter import AlfWorldEpisodeEnvAdapter
@@ -169,12 +169,12 @@ def _build_runner(cfg: MempConfig, *, config_path: Path, run_root: Path) -> Epis
         with open(few_shot_path, "r", encoding="utf-8") as f:
             few_shot_examples = json.load(f)
     else:
-        few_shot_examples = []
+        raise FileNotFoundError("few shot examples not found")
 
     agent = MempAgent(
         llm_provider=llm_provider,
         few_shot_examples=few_shot_examples,
-        system_prompt=ALFWORLD_SYSTEM_PROMPT,
+        system_prompt=SYSTEM_PROMPT,
     )
     alfworld_config_path = Path(cfg.environment.alfworld_config_path)
     if not alfworld_config_path.is_absolute():

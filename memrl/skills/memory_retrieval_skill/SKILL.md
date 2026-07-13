@@ -43,11 +43,10 @@ Use this skill when the runner has attached archived memories for the current st
 
 - Read the memories as examples of prior behavior.
 - Reuse the pattern only when it still fits the current task state.
+- The object is not guaranteed to be in the same place as the prior experience. 
 
 ## Query Examples
 
-- Good: `Skill: memory_retrieval(query="microwave heat failed")`
-  - Short, keyword-like, and focused on the failure mode.
 - Good: `Skill: memory_retrieval(query="open fridge before take")`
   - Useful when the next action depends on a remembered sequence.
 - Good: `Skill: memory_retrieval(query="desklamp use")`

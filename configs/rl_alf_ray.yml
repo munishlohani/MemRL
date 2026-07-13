@@ -20,10 +20,9 @@ trials:
       experiment:
         experiment_name: alfworld_memrl_ray
         mode: train
-        batch_size: 10
-        num_sections: 355
-        # num_epochs: 1  
-        max_steps: 30
+        batch_size: 5
+        max_steps: 50
+        num_epochs: 1  # 1 full pass through the collected game set (140 tasks with dataset_ratio=1.0). Explicit here (not just inherited from the base config) so it can't silently fall back to a stale num_sections if the merge ever changes.
       memory:
         k_retrieve: 5
         cluster_strategy: kmeans

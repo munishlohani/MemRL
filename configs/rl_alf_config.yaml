@@ -28,7 +28,7 @@ memory:
   confidence_threshold: 0.0
   memory_confidence: 100.0
   add_similarity_threshold: 0.90
-  n_sleep: 20
+  n_sleep: 50  # Unconsolidated tactical count triggering sleep. Estimated for ~1 consolidation per 10 episodes over a 140-task epoch (target ~14 total) from prior observed formation volume (~24 new nodes / 5-episode batch, i.e. ~4.8/episode -> ~48/10 episodes). Node-count-based, not episode-count-based, so this is an approximation that will drift with the actual formation rate -- not a hard target.
   lambda_base: 1e-3  # Base decay rate for tactical nodes (spec sweep range [1e-4, 1e-2] log-scale).
   theta_prune: 0.01  # Retention threshold for tactical node pruning. Disabled for now (was 0.01) while debugging strategic scaffold formation.
   alpha_baseline: 0.1  # EMA rate for the tactical/strategic advantage baselines b(t_k)/b_omega(t_k), shared. Replaces the lifetime running mean. Not yet swept.
@@ -54,8 +54,8 @@ experiment:
   enable_value_driven: true
   experiment_name: 'alfworld_memrl'  # Name for Trail.
   mode: 'train'  # control whether to only test, if set as 'test' won't run on train spilt.
-  num_sections: 10  # Number of sections (re-uses the same training set each section)
-  # num_epochs: 1  # If set, overrides num_sections with num_epochs * ceil(num_games / batch_size)
+  num_sections: 10  # Fallback if num_games can't be resolved (num_epochs below takes priority when set).
+  num_epochs: 1  # 1 full pass through the collected game set (assumes dataset_ratio=1.0 yields 140 games for "1 epoch = 140 tasks"). Overrides num_sections with num_epochs * ceil(num_games / batch_size).
   batch_size: 5  # Number of parallel environments for sampling (mini-batch).
   max_steps: 50  # Max steps per episode.
   dataset_ratio: 1.0  # Proportion of files randomly selected for training (rest used for validation)

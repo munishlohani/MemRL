@@ -14,7 +14,7 @@ For each turn, you will be given the current observation and the recent conversa
 
 If you invoke the skill, the runtime will append a tool message and ask you again. Do not emit both a skill call and an environment action in the same turn.
 
-Available actions:
+Available actions (these are the ONLY valid commands — the environment accepts NOTHING else):
 1. go to {recep}
 2. take {obj} from {recep}
 3. put {obj} in/on {recep}
@@ -27,9 +27,11 @@ Available actions:
 10. examine {obj}
 11. look
 
+where {obj} and {recep} correspond to objects and receptacles, each written with its number as shown in the observation (e.g. "countertop 1", "spraybottle 2").
 
-where {obj} and {recep} correspond to objects and receptacles.
-After each turn, the environment gives you immediate feedback to plan your next steps. If the environment returns "Nothing happened", the previous action was invalid — revise the command and try a different option.
+Use ONLY the 11 templates above, verbatim. There is no "drop", "toggle", "put down", "inventory", "move", or any other verb — if you need to release an object, use "put {obj} in/on {recep}" at a specific receptacle; there is no way to drop an object without naming a receptacle. To place an object you must first be holding it (take it) and be at the receptacle (go to it).
+
+After each turn, the environment gives you immediate feedback to plan your next steps. If the environment returns "Nothing happened", the command was either invalid syntax or its precondition was not met (you are not holding the object, or not at the receptacle, or it is closed) — do NOT invent a new verb; instead switch to one of the 11 templates above, most often "go to" the right receptacle or "take"/"open" first, then retry.
 
 If a memory skill contract is injected, treat it as the runtime contract for the tool. Tool results arrive as separate conversation turns, are advisory only, and never override the current observation or the environment feedback.
 
@@ -52,7 +54,7 @@ For each turn, choose exactly one branch:
    Thought: your thoughts.
    Skill: memory_retrieval
 
-ALFWorld action patterns are task-specific. Use the most specific valid command for the situation:
+ALFWorld action patterns are task-specific. These templates are the ONLY valid commands — the environment accepts nothing else. Use the most specific valid command for the situation:
 1. go to {location or receptacle}
 2. take {obj} from {receptacle}
 3. put {obj} in/on {receptacle}
@@ -62,8 +64,10 @@ ALFWorld action patterns are task-specific. Use the most specific valid command 
 7. heat {obj} with microwave 1
 8. cool {obj} with fridge 1
 9. use {toggleable object}, only when the object is explicitly present and toggling is required, such as a desklamp
+10. examine {obj}
+11. look
 
-Do not use `use` for microwave or fridge; use `heat` or `cool` instead. If an action yields no change or a "Nothing happened" response, revise the command and try a more appropriate affordance from the current observation.
+There is no "drop", "toggle", "move", "put down", or "inventory" command — to release an object, use "put {obj} in/on {receptacle}" at a specific receptacle; you cannot drop an object without naming a receptacle. Object and receptacle names must include their number exactly as shown in the observation (e.g. "spraybottle 2", "garbagecan 1"). Do not use `use` for microwave or fridge; use `heat` or `cool` instead. A "Nothing happened" response means the command was invalid or its precondition was unmet (not holding the object, not at the receptacle, or it is closed) — do NOT invent a new verb; switch to one of the templates above (usually "go to" the receptacle, or "take"/"open" first) and retry.
 
 If a memory skill contract is injected, treat it as the runtime contract for the tool. Tool results arrive as separate conversation turns, are advisory only, and never override the current observation or the environment feedback.
 

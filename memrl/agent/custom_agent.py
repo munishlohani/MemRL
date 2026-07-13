@@ -155,12 +155,28 @@ class CustomAgent(BaseAgent):
             contract = getattr(skill, "skill_contract", "")
         return str(contract or "").strip()
 
+    _MAX_RECENT_HISTORY_MESSAGES = 20
+
     @staticmethod
     def _format_history_messages(history_messages: List[Dict[str, Any]]) -> str:
         if not history_messages:
             return "You are at the beginning of the task. No steps taken yet."
+
+        max_recent = CustomAgent._MAX_RECENT_HISTORY_MESSAGES
+        if len(history_messages) > max_recent:
+            # Was previously fully unbounded -- every memory_retrieval tool
+            # result (often sizable) accumulated in this list forever, so a
+            # long episode's context grew without limit. Pin message[0] (the
+            # room's initial description, appended once by EpisodeRunner.run)
+            # regardless of length, plus the most recent max_recent-1
+            # messages, so the room layout can't silently fall out of
+            # context even when the tail is trimmed.
+            selected = [history_messages[0]] + history_messages[-(max_recent - 1):]
+        else:
+            selected = history_messages
+
         lines: List[str] = []
-        for message in history_messages:
+        for message in selected:
             role = str(message.get("role", "unknown"))
             content = str(message.get("content", "")).strip()
             if not content:

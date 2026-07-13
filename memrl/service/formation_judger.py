@@ -108,7 +108,7 @@ TACTICAL_SUMMARY_PROMPT = """You are converting one tactical step into a reusabl
 
 The note will be embedded and retrieved later when the agent faces a similar situation. Focus on THIS step -- the action taken and the observation it responded to. The prior history is given only as context; do not summarize the whole episode. Keep the actual objects, receptacles, and appliances named explicitly (e.g. "the tomato", "the fridge") -- do NOT replace them with generic placeholders like "the target object" or "the receptacle". This is the tactical layer: it should read as a specific, grounded skill, not an abstract strategy. Describe only what actually happened; do not fabricate a different action or observation than the one given below.
 
-The `procedure` steps must be the EXACT, LITERAL environment commands as they were issued -- copy the `action` string (and any immediately preceding actions from history that set it up) verbatim, character for character, including object/receptacle ids and any fixed syntax like "in/on". These notes are replayed directly as commands, so a paraphrase (e.g. "place the knife on the counter" instead of "put butterknife 1 in/on countertop 1") is useless -- it will not match a valid command and the step will fail. Do not rephrase, normalize, or "clean up" the command text.
+The `procedure` steps must be the EXACT, LITERAL environment commands as they were issued -- copy the `action` string (and any immediately preceding actions from history that set it up) verbatim, character for character, including object/receptacle ids. These notes are replayed directly as commands, so a paraphrase (e.g. "place the knife on the counter" instead of "move butterknife 1 to countertop 1") is useless -- it will not match a valid command and the step will fail. Do not rephrase, normalize, or "clean up" the command text.
 
 Return a single JSON object and nothing else.
 
@@ -119,7 +119,7 @@ Schema:
   "outcome": string
 }}
 
-Every step here comes from a positive experience -- an action that worked. So write ONLY affirmative commands the agent should DO ("use the microwave", "put butterknife 1 in/on countertop 1"). Never write a negation, prohibition, or warning ("cannot use the microwave", "do not open the fridge", "avoid the sink") -- those are not valid commands, cannot be replayed, and have no place in a positive skill.
+Every step here comes from a positive experience -- an action that worked. So write ONLY affirmative commands the agent should DO ("use the microwave", "move butterknife 1 to countertop 1"). Never write a negation, prohibition, or warning ("cannot use the microwave", "do not open the fridge", "avoid the sink") -- those are not valid commands, cannot be replayed, and have no place in a positive skill.
 
 Rules:
 - goal: one sentence describing the situation this step handles, naming the actual object/receptacle/appliance involved.

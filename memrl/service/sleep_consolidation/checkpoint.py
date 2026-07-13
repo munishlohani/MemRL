@@ -33,10 +33,18 @@ class SleepConsolidationCheckpoint:
         self.graph = memory_service.graph
 
     def check_and_trigger(self) -> Optional[Dict[str, Any]]:
-        """Check whether sleep consolidation should fire."""
+        """Check whether sleep consolidation should fire.
+
+        Every call logs its verdict at INFO -- both run_alfworld.py and
+        run_alfworld_ray.py set the root logger to INFO, and the previous
+        "not triggered"/"disabled" messages were DEBUG-only, so a checkpoint
+        that ran every batch and correctly decided not to fire yet was
+        silently indistinguishable in the logs from one that was never
+        being called at all.
+        """
         n_sleep = getattr(self.memory_config, "n_sleep", None)
         if n_sleep is None:
-            logger.debug("Sleep consolidation disabled: n_sleep is unset")
+            logger.info("Sleep consolidation checkpoint: disabled (n_sleep is unset)")
             return None
 
         unconsolidated_count = sum(
@@ -47,9 +55,9 @@ class SleepConsolidationCheckpoint:
 
         n_sleep = int(n_sleep)
         if unconsolidated_count < n_sleep:
-            logger.debug(
-                "Sleep consolidation not triggered: "
-                "unconsolidated_count=%s < n_sleep=%s",
+            logger.info(
+                "Sleep consolidation checkpoint: not triggered "
+                "(unconsolidated_count=%s < n_sleep=%s)",
                 unconsolidated_count,
                 n_sleep,
             )

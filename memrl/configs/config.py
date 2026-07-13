@@ -164,6 +164,19 @@ class MemoryConfig(BaseModel):
         default=50,
         description="Reservoir size for evidence IDs stored on a node.",
     )
+    build_strategic: bool = Field(
+        default=True,
+        description=(
+            "Master switch for sleep consolidation (strategic-scaffold "
+            "formation), independent of experiment.mode. experiment.mode "
+            "only selects the ALFWorld data split (train / "
+            "eval_in_distribution / eval_out_of_distribution) -- it does "
+            "not mean 'is this a training run', so gating consolidation on "
+            "mode=='train' silently disabled it on any other split. This "
+            "flag lets an ablation toggle strategic-tier formation on or "
+            "off independently of which split is being sampled."
+        ),
+    )
     n_sleep: Optional[int] = Field(
         default=None,
         description="Sleep-consolidation trigger threshold for unabsorbed d=2 nodes.",

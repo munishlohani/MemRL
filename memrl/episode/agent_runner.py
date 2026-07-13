@@ -143,6 +143,7 @@ class EpisodeRunner(BaseEpisodeRunner):
         self._task_type_length_failure: Dict[str, List[int]] = {}
         self._strategic_selection_counts: Dict[str, int] = {}
         self._cumulative_nodes_created = 0
+        self._episodes_completed_cumulative = 0
         self._cumulative_pruned_count = 0
         self._cumulative_pruned_by_task_type: Dict[str, int] = {}
         # §P2.6.1 telemetry: section index gives the "vertical marker" for
@@ -179,6 +180,23 @@ class EpisodeRunner(BaseEpisodeRunner):
         # still sharing the (thread-safe) llm/memory_retrieval_skill refs.
         agent_slots = [copy.copy(self.agent) for _ in range(batch_size)]
         self.episode_histories = [EpisodeHistory() for _ in range(batch_size)]
+        # Pin the room's initial description into history explicitly --
+        # env.reset()'s observation (which includes the room's receptacle
+        # listing, e.g. "Looking quickly around you, you see...") is
+        # otherwise shown only once, as the first turn's "Current
+        # Observation", then never persisted anywhere: EpisodeHistory.
+        # add_step() only pairs a NEW observation with the PRECEDING action,
+        # so the reset observation itself never enters history.messages or
+        # .trajectory. Without this, the room layout silently vanishes from
+        # the agent's context after turn 1 unless it happens to re-issue
+        # "look" (spec: agent flailing on receptacle names it invented).
+        for slot_idx in range(batch_size):
+            self.episode_histories[slot_idx].append_message(
+                {
+                    "role": "system",
+                    "content": f"Initial Room Description: {observations[slot_idx]}",
+                }
+            )
         self.pending_formations = []
         self.episode_rewards = [0.0 for _ in range(batch_size)]
         episode_numbers = [self._next_episode_number() for _ in range(batch_size)]
@@ -470,7 +488,13 @@ class EpisodeRunner(BaseEpisodeRunner):
             pruning_summary = self._prune_tactical_nodes()
             self._flush_dirty_nodes(dirty_nodes)
 
-            if self.sleep_checkpoint is not None and self.mode == "train":
+            # build_strategic is a master switch independent of self.mode --
+            # mode only selects the ALFWorld data split (train /
+            # eval_in_distribution / eval_out_of_distribution), it is not a
+            # "is this training" flag, so gating consolidation on
+            # mode == "train" silently disabled it on every other split.
+            build_strategic = bool(getattr(self.memory_config, "build_strategic", True))
+            if self.sleep_checkpoint is not None and build_strategic:
                 sleep_summary = self.sleep_checkpoint.check_and_trigger()
             else:
                 sleep_summary = None
@@ -510,12 +534,18 @@ class EpisodeRunner(BaseEpisodeRunner):
             }
 
             self._section_index += 1
+            self._episodes_completed_cumulative += int(sum(done_flags))
             self._report_metrics(
                 {
                     "episode/mean_reward": summary["mean_reward"],
                     "episode/mean_steps": summary["mean_steps"],
                     "episode/success_rate": summary["success_rate"],
                     "episode/completed": int(sum(done_flags)),
+                    # Running total across the whole run -- rises toward the
+                    # planned episode count (e.g. num_epochs * num_games) as
+                    # sections progress, unlike episode/completed above which
+                    # resets to this batch's count (<= batch_size) every call.
+                    "episode/completed_cumulative": self._episodes_completed_cumulative,
                     "episode/formation_candidates": formation_summary.get("candidates", 0),
                     "episode/formation_approved": formation_summary.get("approved", 0),
                     "episode/tactical_pruned": pruning_summary.get("pruned", 0),

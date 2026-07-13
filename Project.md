@@ -296,6 +296,8 @@ The **sole** mechanism creating $d=1$ nodes after bootstrap. It is periodic and 
 ### 8.1 Trigger
 Fires when the unconsolidated tactical count $\ge N_{\text{sleep}}$ (nodes not yet processed by any sleep event). Gating on the unconsolidated count rather than total population means it fires only on genuinely new material — pruning fluctuates the total population independently. A pre-LLM **eligibility filter** admits only nodes with salience $\max(\bar{Q}_{i,w},0) > \theta_{\text{consolidate}}$ to clustering — only skills beating their baseline by a margin. This is cheap arithmetic, no LLM.
 
+**`build_strategic`** is a separate master switch, independent of the run mode (`train` / `eval_in_distribution` / `eval_out_of_distribution` — which only selects the ALFWorld data split, not whether this is "a training run"). Gating the trigger on the run mode instead of this flag silently disables consolidation on any non-`train` split, since tactical formation and Q-updates already run regardless of mode — consolidation was the only thing behaving inconsistently. Set `build_strategic=False` to ablate the strategic tier entirely on any split.
+
 ### 8.2 Pass 1 — Structural Decision (algorithmic, no LLM)
 Per eligible cluster, absorb into whichever existing scaffold has the highest cosine similarity between the cluster centroid and the scaffold's own embedding, if that similarity clears $\theta_{\text{absorb}}$; otherwise spawn a new scaffold if the cluster is large enough ($n_{\text{min-spawn}}$), else discard:
 $$\text{action(cluster)} = \begin{cases}
@@ -504,6 +506,7 @@ Defaults reflect `MemoryConfig` (`memrl/configs/config.py`). Symbols marked "abl
 | $\gamma^\Omega$ (`gamma_omega`) | Strategic discount (separate; §14) | 0.95 |
 | `strategic_discount_mode` | `separate` (default) vs. `shared` (single-discount ablation, §14) | separate |
 | $R$ (`r_evidence`) | Evidence reservoir per node | 50 |
+| `build_strategic` | Master switch for sleep consolidation, independent of run mode (§8.1) — an ablation knob for disabling the strategic tier entirely regardless of data split | True |
 | $N_{\text{sleep}}$ (`n_sleep`) | Unconsolidated count triggering sleep | None |
 | $\theta_{\text{consolidate}}$ (`theta_consolidate`) | Min salience for consolidation eligibility | None |
 | $\theta_{\text{absorb}}$ (`theta_absorb`) | Pass 1 (§8.2): absorb into the closest scaffold if $\cos(\text{centroid}, e_\omega) > \theta_{\text{absorb}}$ | 0.75 |

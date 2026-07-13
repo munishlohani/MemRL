@@ -28,7 +28,8 @@ memory:
   confidence_threshold: 0.0
   memory_confidence: 100.0
   add_similarity_threshold: 0.90
-  n_sleep: 50  
+  build_strategic: true  # Master switch for sleep consolidation, independent of experiment.mode -- mode only selects the ALFWorld data split (train/eval_in_distribution/eval_out_of_distribution), not whether this is a training run. Set false to ablate the strategic tier entirely regardless of mode.
+  n_sleep: 50
   lambda_base: 1e-3  # Base decay rate for tactical nodes (spec sweep range [1e-4, 1e-2] log-scale).
   theta_prune: 0.01  # Retention threshold for tactical node pruning. Disabled for now (was 0.01) while debugging strategic scaffold formation.
   alpha_baseline: 0.1  # EMA rate for the tactical/strategic advantage baselines b(t_k)/b_omega(t_k), shared. Replaces the lifetime running mean. Not yet swept.

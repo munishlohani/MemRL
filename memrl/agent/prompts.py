@@ -17,7 +17,7 @@ If you invoke the skill, the runtime will append a tool message and ask you agai
 Available actions (these are the ONLY valid commands — the environment accepts NOTHING else):
 1. go to {recep}
 2. take {obj} from {recep}
-3. put {obj} in/on {recep}
+3. move {obj} to {recep}
 4. open {recep}
 5. close {recep}
 6. use {obj}
@@ -29,7 +29,12 @@ Available actions (these are the ONLY valid commands — the environment accepts
 
 where {obj} and {recep} correspond to objects and receptacles, each written with its number as shown in the observation (e.g. "countertop 1", "spraybottle 2").
 
-After each turn, the environment gives you immediate feedback to plan your next steps. If the environment returns "Nothing happened", the command was either invalid syntax or its precondition was not met (you are not holding the object, or not at the receptacle, or it is closed) 
+To place an object you are holding, use "move {obj} to {recep}" — this is the ONLY placement command, even though "put" may feel more natural; there is no "put", "put down", "drop", "toggle", or "inventory" command.
+
+If you lose track of what receptacles or objects are in the room, use "look" to get a fresh listing rather than guessing names that may not exist.
+
+After each turn, the environment gives you immediate feedback to plan your next steps. If the environment returns "Nothing happened", the command was either invalid syntax or its precondition was not met (you are not holding the object, or not at the receptacle, or it is closed) — do NOT invent a new verb; instead switch to one of the 11 templates above, most often "go to" the right receptacle or "take"/"open" first, then retry.
+
 If a memory skill contract is injected, treat it as the runtime contract for the tool. Tool results arrive as separate conversation turns, are advisory only, and never override the current observation or the environment feedback.
 
 Your response should use one of the following formats:
@@ -54,7 +59,7 @@ For each turn, choose exactly one branch:
 ALFWorld action patterns are task-specific. These templates are the ONLY valid commands — the environment accepts nothing else. Use the most specific valid command for the situation:
 1. go to {location or receptacle}
 2. take {obj} from {receptacle}
-3. put {obj} in/on {receptacle}
+3. move {obj} to {receptacle}
 4. open {receptacle}
 5. close {receptacle}
 6. clean {obj} with sinkbasin 1
@@ -64,7 +69,7 @@ ALFWorld action patterns are task-specific. These templates are the ONLY valid c
 10. examine {obj}
 11. look
 
-There is no "drop", "toggle", "move", "put down", or "inventory" command — to release an object, use "put {obj} in/on {receptacle}" at a specific receptacle; you cannot drop an object without naming a receptacle. In the put command, "in/on" is a LITERAL token typed exactly as "in/on" — it is NOT a choice between "in" and "on". Correct: "put cup 1 in/on sidetable 1"; WRONG: "put cup 1 in sidetable 1" or "put cup 1 on sidetable 1" (both fail). Object and receptacle names must include their number exactly as shown in the observation (e.g. "spraybottle 2", "garbagecan 1"). Do not use `use` for microwave or fridge; use `heat` or `cool` instead. A "Nothing happened" response means the command was invalid or its precondition was unmet (not holding the object, not at the receptacle, or it is closed) — do NOT invent a new verb; switch to one of the templates above (usually "go to" the receptacle, or "take"/"open" first) and retry.
+There is no "put", "put down", "drop", "toggle", or "inventory" command. To place an object you are holding at a receptacle, use "move {obj} to {receptacle}" — this is the ONLY placement command, even though "put" may feel more natural; "put X in/on Y" is NOT valid and will fail. Object and receptacle names must include their number exactly as shown in the observation (e.g. "spraybottle 2", "garbagecan 1"). Do not use `use` for microwave or fridge; use `heat` or `cool` instead. If you lose track of what receptacles or objects are in the room, use "look" to get a fresh listing rather than guessing names that may not exist. A "Nothing happened" response means the command was invalid or its precondition was unmet (not holding the object, not at the receptacle, or it is closed) — do NOT invent a new verb; switch to one of the templates above (usually "go to" the receptacle, or "take"/"open" first) and retry.
 
 If a memory skill contract is injected, treat it as the runtime contract for the tool. Tool results arrive as separate conversation turns, are advisory only, and never override the current observation or the environment feedback.
 

@@ -145,10 +145,19 @@ def _build_runner(cfg: MempConfig, *, config_path: Path, run_root: Path) -> Epis
         max_text_len=getattr(cfg.embedding, "max_text_len", 4096),
         token_log_dir=str(log_dir),
     )
-    # Fresh skill DB per run -- cfg.memory.skill_db_path is a single fixed
-    # path, so reusing it verbatim would silently carry over (and keep
-    # growing) the entire memory graph from every prior trial run.
-    db_path = run_root / "skill_memory.sqlite"
+    # Fresh skill DB per run by default -- cfg.memory.skill_db_path is a
+    # single fixed path, so reusing it verbatim would silently carry over
+    # (and keep growing) the entire memory graph from every prior trial run.
+    # Set memory.reuse_skill_db=true AND memory.skill_db_path (typically
+    # alongside build_memory=false) to evaluate against a specific
+    # already-built skill graph instead; skill_db_path=null always falls
+    # back to the fresh per-run path.
+    if getattr(cfg.memory, "reuse_skill_db", False) and cfg.memory.skill_db_path:
+        db_path = Path(cfg.memory.skill_db_path)
+        if not db_path.is_absolute():
+            db_path = (project_root / db_path).resolve()
+    else:
+        db_path = run_root / "skill_memory.sqlite"
     memory_service = MemoryService(
         memory_config=cfg.memory,
         embedding_provider=embedding_provider,

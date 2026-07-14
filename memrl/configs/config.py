@@ -164,17 +164,22 @@ class MemoryConfig(BaseModel):
         default=50,
         description="Reservoir size for evidence IDs stored on a node.",
     )
-    build_strategic: bool = Field(
+    build_memory: bool = Field(
         default=True,
         description=(
-            "Master switch for sleep consolidation (strategic-scaffold "
-            "formation), independent of experiment.mode. experiment.mode "
-            "only selects the ALFWorld data split (train / "
-            "eval_in_distribution / eval_out_of_distribution) -- it does "
-            "not mean 'is this a training run', so gating consolidation on "
-            "mode=='train' silently disabled it on any other split. This "
-            "flag lets an ablation toggle strategic-tier formation on or "
-            "off independently of which split is being sampled."
+            "Master switch for the whole 'write' side of memory, "
+            "independent of experiment.mode. experiment.mode only selects "
+            "the ALFWorld data split (train / eval_in_distribution / "
+            "eval_out_of_distribution) -- it does not mean 'is this a "
+            "training run', so gating memory mutation on mode=='train' "
+            "silently disabled it on any other split. When True (default), "
+            "memory is built: tactical formation, Q-value/baseline "
+            "updates, pruning, and sleep consolidation all run. When "
+            "False, memory is only used: retrieval/selection still run "
+            "every step, but the graph is read-only for the whole episode "
+            "-- nothing is formed, updated, pruned, or consolidated. "
+            "Needed for evaluation against a fixed, already-built skill "
+            "graph (see also skill_db_path / reuse_skill_db)."
         ),
     )
     n_sleep: Optional[int] = Field(
@@ -245,9 +250,28 @@ class MemoryConfig(BaseModel):
     )
 
     user_id: str = Field(default="memp_user", description="User ID for memory management")
-    skill_db_path: str = Field(
-        default="results/memrl/skill_memory.sqlite",
-        description="Path to the persistent SQLite database for skill representation.",
+    skill_db_path: Optional[str] = Field(
+        default=None,
+        description=(
+            "Path to a persistent SQLite database for skill representation, "
+            "used only when reuse_skill_db is True. If null (default), run "
+            "scripts fall back to a fresh per-run path regardless of "
+            "reuse_skill_db."
+        ),
+    )
+    reuse_skill_db: bool = Field(
+        default=False,
+        description=(
+            "If False (default), or if True but skill_db_path is null, run "
+            "scripts use a fresh per-run skill db path (e.g. "
+            "<run_dir>/skill_memory.sqlite) -- reusing a fixed path verbatim "
+            "across unrelated runs would silently carry over (and keep "
+            "growing) the whole memory graph. If True and skill_db_path is "
+            "set, run scripts use skill_db_path directly instead of a fresh "
+            "path -- needed for evaluation against a specific already-built "
+            "skill graph (typically combined with build_memory=False so the "
+            "eval run doesn't also mutate it)."
+        ),
     )
     sim_norm_mean: float = Field(default=0, description="Mean for similarity normalization")
     sim_norm_std: float = Field(default=0, description="Standard deviation for similarity normalization")

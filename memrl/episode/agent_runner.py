@@ -449,52 +449,73 @@ class EpisodeRunner(BaseEpisodeRunner):
                         }
                     )
 
+            # build_memory is the master switch for the whole "write" side of
+            # memory, independent of self.mode -- mode only selects the
+            # ALFWorld data split (train / eval_in_distribution /
+            # eval_out_of_distribution), it is not a "is this training run"
+            # flag. When False, memory is used (retrieval/selection still
+            # run every step, unaffected) but never built: no tactical
+            # formation, no Q-value/baseline updates, no pruning, no sleep
+            # consolidation -- the graph is read-only for the whole episode.
+            # This is what an evaluation run against a fixed, already-built
+            # skill graph needs (see also memory.reuse_skill_db).
+            build_memory = bool(getattr(self.memory_config, "build_memory", True))
+
             # Stage-1 gate (§4.1) must read the tactical baseline b(t_k)
             # before this episode's own return updates it, so it runs before
             # _update_episode_tactical_q (which performs that update).
-            formation_gate_stats = self._queue_episode_tactical_candidates(
-                reward_histories=reward_histories,
-                candidate_buffers=episode_candidate_buffers,
-                success_flags=success_flags,
-            )
+            if build_memory:
+                formation_gate_stats = self._queue_episode_tactical_candidates(
+                    reward_histories=reward_histories,
+                    candidate_buffers=episode_candidate_buffers,
+                    success_flags=success_flags,
+                )
+            else:
+                formation_gate_stats = self._new_formation_gate_stats()
 
             # Working-set protocol (§5.3): step-level Q-updates mutate nodes
             # in memory only; touched nodes are collected here and flushed
             # to SQLite once, after pruning, instead of one transaction per
             # node per step.
             dirty_nodes: Dict[str, Any] = {}
-            self._update_episode_tactical_q(
-                task_types=task_types,
-                reward_histories=reward_histories,
-                active_tactical_visits=active_tactical_visits,
-                dirty_nodes=dirty_nodes,
-            )
+            if build_memory:
+                self._update_episode_tactical_q(
+                    task_types=task_types,
+                    reward_histories=reward_histories,
+                    active_tactical_visits=active_tactical_visits,
+                    dirty_nodes=dirty_nodes,
+                )
 
-            self._update_episode_q_omega(
-                task_types=task_types,
-                reward_histories=reward_histories,
-                step_infos=episode_infos,
-                active_strategic_node_ids=active_strategic_node_ids,
-                dirty_nodes=dirty_nodes,
-            )
+                self._update_episode_q_omega(
+                    task_types=task_types,
+                    reward_histories=reward_histories,
+                    step_infos=episode_infos,
+                    active_strategic_node_ids=active_strategic_node_ids,
+                    dirty_nodes=dirty_nodes,
+                )
 
-            self._queue_failed_episode_reflections(
-                task_descriptions=task_descriptions,
-                success_flags=success_flags,
-                active_strategic_node_ids=active_strategic_node_ids,
-            )
+                self._queue_failed_episode_reflections(
+                    task_descriptions=task_descriptions,
+                    success_flags=success_flags,
+                    active_strategic_node_ids=active_strategic_node_ids,
+                )
 
+            # Skipping _queue_episode_tactical_candidates above already
+            # leaves self.pending_formations empty, so this is naturally a
+            # no-op when build_memory is False -- no separate branch needed.
             formation_summary = self._commit_pending_formations()
-            pruning_summary = self._prune_tactical_nodes()
+            if build_memory:
+                pruning_summary = self._prune_tactical_nodes()
+            else:
+                pruning_summary = {
+                    "pruned": 0,
+                    "pruned_node_ids": [],
+                    "theta_prune": None,
+                    "pruned_by_task_type": {},
+                }
             self._flush_dirty_nodes(dirty_nodes)
 
-            # build_strategic is a master switch independent of self.mode --
-            # mode only selects the ALFWorld data split (train /
-            # eval_in_distribution / eval_out_of_distribution), it is not a
-            # "is this training" flag, so gating consolidation on
-            # mode == "train" silently disabled it on every other split.
-            build_strategic = bool(getattr(self.memory_config, "build_strategic", True))
-            if self.sleep_checkpoint is not None and build_strategic:
+            if self.sleep_checkpoint is not None and build_memory:
                 sleep_summary = self.sleep_checkpoint.check_and_trigger()
             else:
                 sleep_summary = None

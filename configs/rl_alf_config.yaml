@@ -28,7 +28,9 @@ memory:
   confidence_threshold: 0.0
   memory_confidence: 100.0
   add_similarity_threshold: 0.90
-  build_strategic: true  # Master switch for sleep consolidation, independent of experiment.mode -- mode only selects the ALFWorld data split (train/eval_in_distribution/eval_out_of_distribution), not whether this is a training run. Set false to ablate the strategic tier entirely regardless of mode.
+  build_memory: true  # Master switch for the whole write side of memory (formation, Q-updates, pruning, sleep consolidation), independent of experiment.mode -- mode only selects the ALFWorld data split (train/eval_in_distribution/eval_out_of_distribution), not whether this is a training run. Set false for evaluation: memory is retrieved/used but never mutated.
+  reuse_skill_db: false  # If true AND skill_db_path is set, run scripts use skill_db_path directly instead of a fresh per-run path -- set true (typically with build_memory: false) to evaluate against a specific already-built skill graph.
+  skill_db_path: null  # Path to reuse when reuse_skill_db is true. If null, run scripts always fall back to a fresh per-run path regardless of reuse_skill_db.
   n_sleep: 50
   lambda_base: 1e-3  # Base decay rate for tactical nodes (spec sweep range [1e-4, 1e-2] log-scale).
   theta_prune: 0.01  # Retention threshold for tactical node pruning. Disabled for now (was 0.01) while debugging strategic scaffold formation.
@@ -56,8 +58,8 @@ experiment:
   experiment_name: 'alfworld_memrl'  # Name for Trail.
   mode: 'train'  # control whether to only test, if set as 'test' won't run on train spilt.
   num_sections: 10  # Fallback if num_games can't be resolved (num_epochs below takes priority when set).
-  num_epochs: 1  # 1 full pass through the collected game set (assumes dataset_ratio=1.0 yields 140 games for "1 epoch = 140 tasks"). Overrides num_sections with num_epochs * ceil(num_games / batch_size).
-  batch_size: 5  # Number of parallel environments for sampling (mini-batch).
+  num_epochs: 1  # 1 full pass through the collected game set (train split has 3553 tasks). Overrides num_sections with num_epochs * ceil(num_games / batch_size).
+  batch_size: 10  # Number of parallel environments for sampling (mini-batch).
   max_steps: 50  # Max steps per episode.
   dataset_ratio: 1.0  # Proportion of files randomly selected for training (rest used for validation)
   few_shot_path: 'data/alfworld/alfworld_examples.json' # path for alfworld examples

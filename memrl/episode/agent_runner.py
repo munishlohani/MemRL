@@ -61,6 +61,7 @@ class EpisodeRunner(BaseEpisodeRunner):
         experiment_name: str,
         mode: str = "train",
         run_id: Optional[str] = None,
+        run_dir: Optional[Path] = None,
         retrieve_k: int = 1,
         batch_size: int = 1,
         max_steps: int = 1,
@@ -114,7 +115,16 @@ class EpisodeRunner(BaseEpisodeRunner):
         self.retrieve_k = max(1, int(retrieve_k))
         self.strategic_k = max(1, int(strategic_k))
 
-        self.run_dir = self.output_dir / "episode" / f"exp_{self.experiment_name}_{self.run_id}"
+        # run_dir defaults to a generic "episode" subtree (benchmark-neutral,
+        # since this runner is shared across ALFWorld/BabyAI/HLE/etc.), but a
+        # caller that already computed its own benchmark-specific run
+        # directory (e.g. run_alfworld.py's results/alfworld/exp_.../) can
+        # pass it directly so episodes.jsonl/metrics.jsonl/etc. land
+        # alongside that run's skill DB, tensorboard events, and token logs
+        # instead of in a separate, run_id-mismatched tree.
+        self.run_dir = Path(run_dir) if run_dir is not None else (
+            self.output_dir / "episode" / f"exp_{self.experiment_name}_{self.run_id}"
+        )
         self.run_dir.mkdir(parents=True, exist_ok=True)
         self.local_cache_dir = self.run_dir / "local_cache"
         self.local_cache_dir.mkdir(parents=True, exist_ok=True)

@@ -61,7 +61,7 @@ experiment:
   num_sections: 10  # Fallback if num_games can't be resolved (num_epochs below takes priority when set).
   num_epochs: 1  # 1 full pass through the collected game set (train split has 3553 tasks). Overrides num_sections with num_epochs * ceil(num_games / batch_size).
   batch_size: 10  # Number of parallel environments for sampling (mini-batch).
-  max_steps: 50  # Max steps per episode.
+  max_steps: 30  # Max steps per episode. SkillPyramid (arXiv:2606.03692v1) Table 1 doesn't state its step cap, but every reported ALFWorld average-step figure across all methods/models tops out around 21 -- 30 gives headroom above their observed behavior without granting our agent a materially larger step budget than theirs implies. Lowered from 50 (the ReAct/Reflexion field-standard cap) for a fair comparison.
   dataset_ratio: 1.0  # Proportion of files randomly selected for training (rest used for validation)
   few_shot_path: 'data/alfworld/alfworld_examples.json' # path for alfworld examples
   baseline_mode: none   # passk

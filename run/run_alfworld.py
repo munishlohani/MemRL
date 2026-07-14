@@ -174,6 +174,8 @@ def main():
             output_dir=out_dir,
             experiment_name=cfg.experiment.experiment_name,
             mode=cfg.experiment.mode,
+            run_id=run_id,
+            run_dir=run_dir,
             retrieve_k=int(cfg.memory.k_retrieve),
             batch_size=int(cfg.experiment.batch_size),
             max_steps=int(cfg.experiment.max_steps),

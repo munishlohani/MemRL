@@ -124,7 +124,7 @@ def _write_resolved_config(
     return resolved_path
 
 
-def _build_runner(cfg: MempConfig, *, config_path: Path, run_root: Path) -> EpisodeRunner:
+def _build_runner(cfg: MempConfig, *, config_path: Path, run_root: Path, run_id: str) -> EpisodeRunner:
     log_dir = run_root / "local_cache"
     log_dir.mkdir(parents=True, exist_ok=True)
     tb_dir = run_root / "tensorboard"
@@ -211,6 +211,8 @@ def _build_runner(cfg: MempConfig, *, config_path: Path, run_root: Path) -> Epis
         output_dir=run_root.parent.parent,
         experiment_name=cfg.experiment.experiment_name,
         mode=cfg.experiment.mode,
+        run_id=run_id,
+        run_dir=run_root,
         retrieve_k=int(cfg.memory.k_retrieve),
         batch_size=int(cfg.experiment.batch_size),
         max_steps=int(cfg.experiment.max_steps),
@@ -330,7 +332,7 @@ def _run_trial(
         run_id = f"{time.strftime('%Y%m%d-%H%M%S')}-{uuid4().hex[:8]}"
         run_root = Path(cfg.experiment.output_dir) / "alfworld" / f"{trial_name}_{run_id}"
         run_root.mkdir(parents=True, exist_ok=True)
-        runner = _build_runner(cfg, config_path=resolved_config_path, run_root=run_root)
+        runner = _build_runner(cfg, config_path=resolved_config_path, run_root=run_root, run_id=run_id)
         num_episodes = max(1, int(cfg.experiment.num_sections))
         logger = logging.getLogger(__name__)
         if cfg.experiment.num_epochs is not None:

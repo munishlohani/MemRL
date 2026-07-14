@@ -1,0 +1,105 @@
+# Evaluation config: ALFWorld eval_out_of_distribution ("unseen") split, 134 tasks.
+# Matches the unseen-split protocol used by SkillPyramid (arXiv:2606.03692v1) and
+# the SkillNet protocol it follows -- run this against a skill DB already
+# built by a train-mode run (rl_alf_config.yaml), not a fresh one.
+#
+# Before running: set memory.skill_db_path below to the skill_memory.sqlite
+# produced by that train run (e.g.
+# results/alfworld/exp_alfworld_memrl_<run_id>/skill_memory.sqlite).
+
+# LLM provider configuration
+llm:
+  provider: "openai"
+  api_key: ""
+  base_url: ""
+  model: "deepseek-v3.2"  # Matches SkillPyramid's DeepSeek-V3.2 backbone.
+  temperature: 0  # Matches SkillPyramid: deterministic, temperature 0 for all models.
+  max_tokens: 4096
+
+# Embedding provider configuration
+embedding:
+  provider: "openai"
+  api_key: "sk-REPLACE_ME"
+  base_url: "https://api.openai.com/v1"
+  model: "text-embedding-3-large"
+  max_text_len: 4096
+
+# Memory system configuration
+memory:
+  # Strategy configuration (main combination from paper)
+  build_strategy: "proceduralization"
+  retrieve_strategy: "query"
+  update_strategy: "adjustment"
+
+  # Memory parameters
+  k_retrieve: 5
+  max_keywords: 8
+  confidence_threshold: 0.0
+  memory_confidence: 100.0
+  add_similarity_threshold: 0.90
+  build_memory: false  # Eval run: graph is read-only -- retrieved/used, never mutated.
+  reuse_skill_db: true  # Point at the skill DB built by the train run instead of a fresh one.
+  skill_db_path: null  # REQUIRED: set to the trained run's skill_memory.sqlite path before launching.
+  n_sleep: 50
+  lambda_base: 1e-3
+  theta_prune: 0.01
+  alpha_baseline: 0.1
+  lambda_retrieval: 0.5
+  theta_retrieval: 0.3
+  ucb_c: 1.0
+  theta_absorb: 0.85
+  n_min_spawn: 2
+  # MemOS configuration
+  mos_config_path: "configs/mos_config_final.json"
+  user_id: "memrl_user"
+  sim_norm_mean: 0.5187
+  sim_norm_std: 0.1203
+
+# Environment-specific settings
+environment:
+  # ALFWorld settings
+  alfworld_config_path: "configs/envs/alfworld.yaml"
+  alfworld_env_type: "AlfredTWEnv"
+
+# Experiment configuration
+experiment:
+  random_seed: 42
+  enable_value_driven: true
+  experiment_name: 'alfworld_memrl_eval_unseen'
+  mode: 'eval_out_of_distribution'  # SkillPyramid's "unseen" split -- 134 tasks.
+  num_sections: 14  # Fallback if num_games can't be resolved (num_epochs below takes priority when set).
+  num_epochs: 1  # Single deterministic pass over all 134 unseen-split tasks, matching SkillPyramid's single-run eval protocol (no repeats, no tuning on test splits).
+  batch_size: 10
+  max_steps: 30  # SkillPyramid's Table 1 never states its step cap, but every reported ALFWorld average-step figure across all methods/models tops out around 21 -- 30 gives headroom above that without granting a materially larger step budget than theirs implies.
+  dataset_ratio: 1.0  # Eval split is fixed and used in full; this field only affects train-split file selection.
+  few_shot_path: 'data/alfworld/alfworld_examples.json'
+  baseline_mode: none
+  baseline_k: 10
+
+  # Output settings
+  output_dir: "./results"
+  save_trajectories: true
+  save_memories: true
+  ckpt_eval_enabled: false
+  ckpt_eval_path: ""
+  ckpt_resume_enabled: false
+  ckpt_resume_path: ""
+  ckpt_resume_epoch: null
+
+# RL Configs
+rl_config:
+  epsilon: 0
+  tau: 0.62
+  alpha: 0.3
+  gamma: 0.0
+  q_init_pos: 0
+  q_init_neg: 0
+  success_reward: 1.0
+  failure_reward: -1.0
+  topk: 3
+  novelty_threshold: 0.85
+  recency_boost: 0.0
+  reward_merge_gain: 0.1
+  q_min_threshold: -10
+  weight_sim: 0.5
+  weight_q: 0.5

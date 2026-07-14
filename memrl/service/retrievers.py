@@ -279,14 +279,30 @@ class SkillSimilarityRetriever:
         top_k: int = 5,
         task_type_dominant: Optional[str] = None,
         lambda_retrieval: float = 0.5,
+        ucb_c: float = 0.0,
     ) -> Tuple[Dict[str, Any], List[Tuple[str, float]]]:
         """Strategic scaffold scoring uses the same convex blend as tactical
         retrieval (spec §P2.1, extended to §9.1 per explicit instruction),
         with the same lambda_retrieval -- one shared coefficient, not a
         second one:
 
-            score = lambda_retrieval * rank_norm(Q_omega)
+            score = lambda_retrieval * rank_norm(q_i)
                     + (1 - lambda_retrieval) * rank_norm(cos(e_i, e_q))
+
+        where q_i is Q_omega optionally boosted by a UCB1-style exploration
+        term (guards against deterministic-argmax option starvation, spec
+        §16, FeUdal/Option-Critic):
+
+            q_i = Q_omega(t_k) + ucb_c * sqrt(ln(N + 1) / (n_i + 1))
+
+        n_i is this scaffold's n_omega[t_k] (falling back to its total
+        cross-task visit count when t_k is cold, mirroring Q_omega's own
+        fallback); N is the sum of n_i over the candidate set. ucb_c=0.0
+        (default) makes q_i == Q_omega exactly, recovering the prior
+        pure-Q ranking. The +1 smoothing on both the log and the
+        denominator avoids a div-by-zero / log(0) special case for a
+        never-visited scaffold while still giving it the largest bonus
+        in the set.
 
         No quality gate here (theta_retrieval is tactical-only) -- an
         episode must always end up with an active scaffold or explicit
@@ -306,10 +322,31 @@ class SkillSimilarityRetriever:
                 if rep is not None
                 else 0.0
             )
-            candidates.append({"node": node, "rep": rep, "q_value": q_estimate, "similarity": similarity})
+            n_omega = getattr(node, "n_omega", None) or {}
+            if task_type_dominant is not None and task_type_dominant in n_omega:
+                visit_count = float(n_omega[task_type_dominant])
+            else:
+                visit_count = float(sum(n_omega.values())) if n_omega else 0.0
+            candidates.append(
+                {
+                    "node": node,
+                    "rep": rep,
+                    "q_value": q_estimate,
+                    "similarity": similarity,
+                    "visit_count": visit_count,
+                }
+            )
+
+        total_visits = sum(c["visit_count"] for c in candidates)
+        for candidate in candidates:
+            ucb_bonus = float(ucb_c) * sqrt(
+                math.log(total_visits + 1.0) / (candidate["visit_count"] + 1.0)
+            )
+            candidate["ucb_bonus"] = ucb_bonus
+            candidate["ranking_q"] = candidate["q_value"] + ucb_bonus
 
         lam = float(lambda_retrieval)
-        q_norms = rank_normalize([c["q_value"] for c in candidates])
+        q_norms = rank_normalize([c["ranking_q"] for c in candidates])
         sim_norms = rank_normalize([c["similarity"] for c in candidates])
         for candidate, q_norm, sim_norm in zip(candidates, q_norms, sim_norms):
             candidate["score"] = lam * q_norm + (1.0 - lam) * sim_norm
@@ -322,6 +359,7 @@ class SkillSimilarityRetriever:
                 score=candidate["score"],
                 q_estimate=candidate["q_value"],
                 decay_factor=1.0,
+                ucb_bonus=candidate["ucb_bonus"],
             )
             for candidate in candidates
         ]
@@ -347,6 +385,7 @@ class SkillSimilarityRetriever:
         score: float,
         q_estimate: float,
         decay_factor: float,
+        ucb_bonus: float = 0.0,
     ) -> Dict[str, Any]:
         payload: Dict[str, Any] = {
             "memory_id": getattr(node, "id", None),
@@ -362,6 +401,7 @@ class SkillSimilarityRetriever:
             "similarity": float(similarity),
             "score": float(score),
             "q_estimate": float(q_estimate),
+            "ucb_bonus": float(ucb_bonus),
             "consolidated": bool(getattr(node, "consolidated", False)),
             "Q": dict(getattr(node, "Q", {}) or {}),
             "n": dict(getattr(node, "n", {}) or {}),

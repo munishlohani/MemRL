@@ -248,6 +248,25 @@ class MemoryConfig(BaseModel):
             "loosely-related text often sits ~0.2-0.4). Not yet swept."
         ),
     )
+    ucb_c: float = Field(
+        default=0.0,
+        description=(
+            "UCB1-style exploration coefficient for strategic scaffold "
+            "selection (§9.1, strategic only -- tactical retrieval is "
+            "unaffected). Guards against deterministic-argmax option "
+            "starvation (Project.md §16, FeUdal/Option-Critic): a scaffold "
+            "that wins the shortlist early can otherwise be reinforced "
+            "forever while its siblings never accumulate enough visits to "
+            "compete. Adds an exploration bonus to Q_omega BEFORE "
+            "rank-normalization: "
+            "q_i = Q_omega(t_k) + ucb_c * sqrt(ln(N + 1) / (n_i + 1)), where "
+            "n_i is the scaffold's n_omega[t_k] (falling back to its total "
+            "cross-task visit count when t_k is cold, mirroring Q_omega's "
+            "own fallback) and N is the sum of n_i over the candidate set. "
+            "0.0 (default) is a no-op, recovering pure-Q ranking exactly. "
+            "Not yet swept."
+        ),
+    )
 
     user_id: str = Field(default="memp_user", description="User ID for memory management")
     skill_db_path: Optional[str] = Field(

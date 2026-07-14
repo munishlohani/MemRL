@@ -1216,6 +1216,7 @@ class MemoryService:
                 top_k=k,
                 task_type_dominant=task_type_dominant,
                 lambda_retrieval=float(getattr(self.memory_config, "lambda_retrieval", 0.5) or 0.5),
+                ucb_c=float(getattr(self.memory_config, "ucb_c", 0.0) or 0.0),
             )
 
         if depth not in (None, 2):

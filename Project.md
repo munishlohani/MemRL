@@ -369,6 +369,10 @@ $$\text{score}(s_i) = \lambda_{\text{retrieval}}\cdot\text{rank\_norm}(Q(t_k)) +
 ### 9.1 Strategic (once per episode, $d=1$)
 Score a top-$k$ shortlist (`strategic_k`) by the blend on $Q^\Omega_{\omega_j}(t_k)$; the LLM then chooses among the shortlist. $\omega$ (1) conditions reasoning and (2) defines the tactical retrieval boundary. There is **no quality gate** on this path — an episode must always end with an active scaffold or an explicit bootstrap-null. An empty $d=1$ falls back to a flat tactical scan (bootstrap only). A cold task type ($Q^\Omega(t_k)$ undefined everywhere) falls back to the highest cross-task $\bar{Q}^\Omega_{\omega_j}$ (§3.8).
 
+An optional UCB1-style exploration bonus guards against deterministic-argmax option starvation (§16, FeUdal/Option-Critic) — a scaffold that wins the shortlist early can otherwise be reinforced forever while siblings never accumulate enough visits to compete. Before rank-normalization, $Q^\Omega_{\omega_j}(t_k)$ is replaced by
+$$q_j = Q^\Omega_{\omega_j}(t_k) + c_{\text{ucb}}\cdot\sqrt{\frac{\ln(N+1)}{n_j+1}}$$
+where $n_j$ is $\omega_j$'s selection count at $t_k$ ($n^\Omega_{\omega_j}(t_k)$, falling back to its total cross-task visit count when $t_k$ is cold, mirroring $Q^\Omega$'s own fallback) and $N=\sum_j n_j$ over the shortlist candidates. $c_{\text{ucb}}=0$ (default) recovers pure-$Q^\Omega$ ranking exactly. Strategic-only — tactical retrieval (§9.2) is unaffected.
+
 ### 9.2 Tactical (every step, within $\omega$'s children)
 Candidates are drawn exclusively from the children of $\omega$, scored by the blend. $e_q$ is recomputed **per step**, supplying temporal discrimination across steps that $Q$ (constant in $t$) structurally cannot — pure-$Q$ selection is context-blind and returns the same skill every step. A tactical-only **quality gate** $\theta_{\text{retrieval}}$ drops any candidate below it, so a step can legitimately retrieve nothing rather than a bad memory.
 $$a_t^\tau = \arg\max_{s_i \in \text{children}(\omega),\ |A^\tau|\le N,\ \text{score}\ge\theta_{\text{retrieval}}} \text{score}(s_i)$$
@@ -515,6 +519,7 @@ Defaults reflect `MemoryConfig` (`memrl/configs/config.py`). Symbols marked "abl
 | $k$ | K-means cluster count | $\max(2,\lfloor\sqrt{\text{eligible}}\rfloor)$, DB-refined |
 | $\lambda_{\text{retrieval}}$ (`lambda_retrieval`) | Advantage weight in both retrieval blends (rank-normed) | 0.5 |
 | $\theta_{\text{retrieval}}$ (`theta_retrieval`) | Tactical-only quality gate on blended score | 0.0 (ablation knob) |
+| $c_{\text{ucb}}$ (`ucb_c`) | Strategic-only (§9.1) UCB1 exploration coefficient added to $Q^\Omega$ before rank-norm; 0.0 recovers pure-$Q^\Omega$ ranking | 0.0 (ablation knob) |
 
 The decay parameters $\lambda,\epsilon,\theta_{\text{prune}}$ are defined against the global-step clock (§16.2). Any values tuned on a per-episode retrieval-step clock must be re-scaled to that clock before they transfer.
 

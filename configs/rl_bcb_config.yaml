@@ -79,6 +79,7 @@ experiment:
   bcb_run_validation: false
   random_seed: 42
   mode: "train"
+  max_steps: 1  # BCB is framed as a 1-step episode (submit code, evaluate, done) -- default of 30 would let the runner keep re-prompting after the episode should have ended.
 
 
   dataset_ratio: 0.7

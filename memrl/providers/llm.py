@@ -215,6 +215,11 @@ class OpenAILLM(BaseLLM):
             "model": self.model,
             "messages": messages,
             "temperature": kwargs.get("temperature", self.default_temperature),
+            "extra_body":{
+                "chat_template_kwargs": {
+                    "enable_thinking": False
+                }
+            },
         }
 
         # Accept either OpenAI-style `max_tokens` or LLB-style `max_completion_tokens`.

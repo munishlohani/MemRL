@@ -113,6 +113,18 @@ class AlfWorldEpisodeEnvAdapter(EpisodeEnvAdapter):
         self._batch_size = max(1, int(batch_size))
         self._alf_env = alf_env
         self._last_reset_infos: List[Dict[str, Any]] = []
+        # Tracks gamefiles already dispatched this epoch (spec: exact-count
+        # eval coverage). The underlying batched env has a fixed batch_size
+        # for its whole lifetime, so once total games isn't evenly divisible
+        # by batch_size, the final section of an epoch must wrap around and
+        # re-dispatch a few already-seen games to fill the batch -- callers
+        # (run_alfworld.py/run_alfworld_ray.py) mark those slots duplicate
+        # via this set so EpisodeRunner can exclude them from aggregated
+        # metrics instead of double-counting. reset_epoch_tracking() clears
+        # this at each new epoch boundary; without that call, every game
+        # after the first full pass would be (correctly, for train mode
+        # revisiting games across epochs) marked duplicate forever.
+        self._seen_gamefiles: set = set()
 
     @property
     def alf_env(self) -> Any:
@@ -126,6 +138,16 @@ class AlfWorldEpisodeEnvAdapter(EpisodeEnvAdapter):
                 batch_size=self._batch_size,
             )
         return self._alf_env
+
+    def reset_epoch_tracking(self) -> None:
+        """Clear the seen-gamefiles set at each new epoch boundary.
+
+        Must be called once per epoch by the orchestrator (run_alfworld.py /
+        run_alfworld_ray.py) -- without it, games revisited across epochs of
+        a multi-epoch train run would stay marked duplicate forever after
+        the first epoch, silently zeroing out all later epochs' metrics.
+        """
+        self._seen_gamefiles = set()
 
     def reset(self, **kwargs: Any) -> EpisodeResetResult:
         raw = self.alf_env.reset()
@@ -143,6 +165,10 @@ class AlfWorldEpisodeEnvAdapter(EpisodeEnvAdapter):
             task_description = _task_description_from_observation(info.get("obs") or entry.get("obs"))
             if task_description is not None:
                 info.setdefault("task_description", task_description)
+            is_duplicate = gamefile is not None and gamefile in self._seen_gamefiles
+            if gamefile is not None and not is_duplicate:
+                self._seen_gamefiles.add(gamefile)
+            info["duplicate"] = is_duplicate
             infos.append(info)
         self._last_reset_infos = infos
         self._log_reset_output(observations, infos)
@@ -165,8 +191,8 @@ class AlfWorldEpisodeEnvAdapter(EpisodeEnvAdapter):
                 else {}
             )
             # Carry forward reset-time identity so the runner can resolve
-            # episode_id / task_type on every step, not just at reset.
-            for key in ("gamefile", "task_type"):
+            # episode_id / task_type / duplicate on every step, not just at reset.
+            for key in ("gamefile", "task_type", "duplicate"):
                 if key not in info and key in reset_info:
                     info[key] = reset_info[key]
             if "task_description" not in info:

@@ -333,28 +333,36 @@ def _run_trial(
         run_root = Path(cfg.experiment.output_dir) / "alfworld" / f"{trial_name}_{run_id}"
         run_root.mkdir(parents=True, exist_ok=True)
         runner = _build_runner(cfg, config_path=resolved_config_path, run_root=run_root, run_id=run_id)
-        num_episodes = max(1, int(cfg.experiment.num_sections))
         logger = logging.getLogger(__name__)
+        # Sections-per-epoch is the minimum number needed to touch every
+        # game in the split at least once; when num_games isn't evenly
+        # divisible by batch_size, the last section of each epoch wraps
+        # around and re-dispatches a few already-seen games to fill the
+        # batch. env_adapter.reset_epoch_tracking() (once per epoch, below)
+        # plus EpisodeRunner's duplicate-slot exclusion keeps those repeats
+        # out of the reported metrics.
+        num_epochs = int(cfg.experiment.num_epochs or 1)
+        sections_per_epoch = max(1, int(cfg.experiment.num_sections))
         if cfg.experiment.num_epochs is not None:
             num_games = runner.env_adapter.num_games()
             if num_games:
-                num_episodes = int(cfg.experiment.num_epochs) * math.ceil(
-                    num_games / int(cfg.experiment.batch_size)
-                )
+                sections_per_epoch = math.ceil(num_games / int(cfg.experiment.batch_size))
                 logger.info(
-                    "num_epochs=%s resolved to num_sections=%s (num_games=%s, batch_size=%s)",
-                    cfg.experiment.num_epochs, num_episodes, num_games, cfg.experiment.batch_size,
+                    "num_epochs=%s -> %s section(s)/epoch (num_games=%s, batch_size=%s)",
+                    cfg.experiment.num_epochs, sections_per_epoch, num_games, cfg.experiment.batch_size,
                 )
             else:
                 logger.warning(
                     "num_epochs=%s set but env_adapter.num_games() returned nothing; "
-                    "falling back to num_sections=%s",
-                    cfg.experiment.num_epochs, num_episodes,
+                    "falling back to num_sections=%s per epoch",
+                    cfg.experiment.num_epochs, sections_per_epoch,
                 )
+        num_episodes = num_epochs * sections_per_epoch
         logger.info(
-            "Starting Ray trial %s for %s episode section(s) with batch_size=%s max_steps=%s, output=%s",
+            "Starting Ray trial %s for %s epoch(s) x %s section(s) with batch_size=%s max_steps=%s, output=%s",
             trial_name,
-            num_episodes,
+            num_epochs,
+            sections_per_epoch,
             cfg.experiment.batch_size,
             cfg.experiment.max_steps,
             run_root,
@@ -362,14 +370,20 @@ def _run_trial(
 
         episode_summaries: List[Dict[str, Any]] = []
         try:
-            for episode_idx in range(num_episodes):
-                logger.info(
-                    "Ray trial %s running section %s/%s",
-                    trial_name,
-                    episode_idx + 1,
-                    num_episodes,
-                )
-                episode_summaries.append(runner.run())
+            section_counter = 0
+            for epoch_idx in range(num_epochs):
+                runner.env_adapter.reset_epoch_tracking()
+                for _ in range(sections_per_epoch):
+                    section_counter += 1
+                    logger.info(
+                        "Ray trial %s running epoch %s section %s (overall %s/%s)",
+                        trial_name,
+                        epoch_idx + 1,
+                        section_counter,
+                        section_counter,
+                        num_episodes,
+                    )
+                    episode_summaries.append(runner.run())
         finally:
             # Close once after the whole outer loop, not per run() call --
             # closing the env adapter between sections forces ALFWorld to

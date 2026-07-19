@@ -530,8 +530,21 @@ class EpisodeRunner(BaseEpisodeRunner):
             else:
                 sleep_summary = None
 
+            # A slot is "duplicate" when the env_adapter had to wrap around
+            # and re-dispatch an already-seen game this epoch to fill a
+            # fixed batch_size that doesn't evenly divide the split size
+            # (see AlfWorldEpisodeEnvAdapter.reset_epoch_tracking). Excluded
+            # here from both the aggregated scalars and episodes.jsonl so a
+            # handful of repeated games at the tail of an epoch don't get
+            # double-counted in eval metrics.
+            duplicate_flags = [
+                bool((episode_infos[slot_idx] if slot_idx < len(episode_infos) else {}).get("duplicate", False))
+                for slot_idx in range(batch_size)
+            ]
+            counted_slots = [slot_idx for slot_idx in range(batch_size) if not duplicate_flags[slot_idx]]
+
             episode_summaries = []
-            for slot_idx in range(batch_size):
+            for slot_idx in counted_slots:
                 episode_summaries.append(
                     {
                         "episode_index": episode_numbers[slot_idx],
@@ -548,6 +561,10 @@ class EpisodeRunner(BaseEpisodeRunner):
                     }
                 )
 
+            counted_rewards = [self.episode_rewards[i] for i in counted_slots]
+            counted_steps = [step_counts[i] for i in counted_slots]
+            counted_success = [success_flags[i] for i in counted_slots]
+
             summary = {
                 "run_id": self.run_id,
                 "experiment_name": self.experiment_name,
@@ -555,9 +572,10 @@ class EpisodeRunner(BaseEpisodeRunner):
                 "batch_size": batch_size,
                 "max_steps": self.max_steps,
                 "episodes": episode_summaries,
-                "mean_reward": float(np.mean(self.episode_rewards)) if self.episode_rewards else 0.0,
-                "mean_steps": float(np.mean(step_counts)) if step_counts else 0.0,
-                "success_rate": float(np.mean(success_flags)) if success_flags else 0.0,
+                "mean_reward": float(np.mean(counted_rewards)) if counted_rewards else 0.0,
+                "mean_steps": float(np.mean(counted_steps)) if counted_steps else 0.0,
+                "success_rate": float(np.mean(counted_success)) if counted_success else 0.0,
+                "duplicate_slots": batch_size - len(counted_slots),
                 "formation": formation_summary,
                 "pruning": pruning_summary,
                 "sleep_consolidation": sleep_summary,
@@ -565,7 +583,7 @@ class EpisodeRunner(BaseEpisodeRunner):
             }
 
             self._section_index += 1
-            self._episodes_completed_cumulative += int(sum(done_flags))
+            self._episodes_completed_cumulative += int(sum(done_flags[i] for i in counted_slots))
             self._report_metrics(
                 {
                     "episode/mean_reward": summary["mean_reward"],

@@ -7,7 +7,10 @@ against), not a config toggle on top of the memory system.
 """
 
 import argparse
+import json
 import logging
+import math
+import os
 import sys
 import time
 from pathlib import Path
@@ -16,6 +19,11 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 from memrl.envs.alfworld_env import AlfWorldEnv
+from memrl.envs.alfworld_episode_adapter import (
+    _extract_gamefile,
+    _task_description_from_observation,
+    _task_type_from_gamefile,
+)
 from memrl.providers.llm import OpenAILLM
 
 from agent import BarebonAgent
@@ -57,7 +65,15 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--batch_size", type=int, default=10)
     p.add_argument("--max_steps", type=int, default=50)
-    p.add_argument("--num_sections", type=int, default=10)
+    p.add_argument("--num_epochs", type=int, default=1)
+    p.add_argument(
+        "--num_sections",
+        type=int,
+        default=10,
+        help="Fallback sections-per-epoch if env.num_games can't be resolved. "
+        "Normally auto-computed as ceil(num_games / batch_size) so every task "
+        "in the split runs exactly once per epoch, no more.",
+    )
     p.add_argument("--model", type=str, required=True)
     p.add_argument("--api_key", type=str, default=None, help="Falls back to OPENAI_API_KEY env var.")
     p.add_argument("--base_url", type=str, default=None)
@@ -69,8 +85,6 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
-    import os
-
     args = parse_args()
     setup_logging("alfworld_barebone")
 
@@ -95,61 +109,104 @@ def main() -> None:
     agents = [BarebonAgent(llm_provider) for _ in range(args.batch_size)]
 
     episodes_path = run_dir / "episodes.jsonl"
-    num_sections = 1 if args.smoke else args.num_sections
+
+    # Sections-per-epoch is the minimum number of full batch_size sections
+    # needed to touch every game in the split at least once. When num_games
+    # isn't evenly divisible by batch_size, the last section of an epoch
+    # necessarily wraps around and re-dispatches a few already-seen games
+    # to fill the batch -- seen_gamefiles (reset each epoch, below) tracks
+    # this so those repeats are excluded from reported metrics and from
+    # episodes.jsonl instead of being double-counted.
+    num_games = env.num_games
+    if args.smoke:
+        num_epochs, sections_per_epoch = 1, 1
+    elif num_games:
+        num_epochs = args.num_epochs
+        sections_per_epoch = math.ceil(num_games / args.batch_size)
+        logger.info(
+            "num_games=%s batch_size=%s -> %s section(s)/epoch",
+            num_games, args.batch_size, sections_per_epoch,
+        )
+    else:
+        logger.warning("env.num_games returned nothing; falling back to --num_sections=%s per epoch", args.num_sections)
+        num_epochs, sections_per_epoch = args.num_epochs, args.num_sections
 
     try:
-        for section_idx in range(num_sections):
-            reset_results = env.reset()
-            for agent in agents:
-                agent.reset()
+        section_counter = 0
+        for epoch_idx in range(num_epochs):
+            seen_gamefiles: set = set()
+            for _ in range(sections_per_epoch):
+                section_counter += 1
+                reset_results = env.reset()
+                for agent in agents:
+                    agent.reset()
 
-            batch_size = len(reset_results)
-            observations = [r["obs"] for r in reset_results]
-            done_flags = [False] * batch_size
-            rewards = [0.0] * batch_size
-            step_counts = [0] * batch_size
+                batch_size = len(reset_results)
+                observations = [r["obs"] for r in reset_results]
+                done_flags = [False] * batch_size
+                rewards = [0.0] * batch_size
+                step_counts = [0] * batch_size
+                task_types = [None] * batch_size
+                task_descriptions = [None] * batch_size
+                duplicate_flags = [False] * batch_size
 
-            for _ in range(args.max_steps):
-                if all(done_flags):
+                for i, entry in enumerate(reset_results):
+                    info = entry.get("info") or {}
+                    gamefile = _extract_gamefile(info)
+                    task_types[i] = _task_type_from_gamefile(gamefile)
+                    task_descriptions[i] = _task_description_from_observation(entry.get("obs"))
+                    is_duplicate = gamefile is not None and gamefile in seen_gamefiles
+                    if gamefile is not None and not is_duplicate:
+                        seen_gamefiles.add(gamefile)
+                    duplicate_flags[i] = is_duplicate
+
+                for _ in range(args.max_steps):
+                    if all(done_flags):
+                        break
+
+                    actions = []
+                    for i in range(batch_size):
+                        if done_flags[i]:
+                            actions.append("look")
+                            continue
+                        actions.append(agents[i].act(observations[i]))
+
+                    step_results = env.step(actions)
+                    for i, result in enumerate(step_results):
+                        if done_flags[i]:
+                            continue
+                        observations[i] = result["obs"]
+                        rewards[i] += float(result.get("reward", 0.0) or 0.0)
+                        done_flags[i] = bool(result.get("done", False))
+                        step_counts[i] += 1
+
+                counted_slots = [i for i in range(batch_size) if not duplicate_flags[i]]
+                success_count = sum(1 for i in counted_slots if done_flags[i] and rewards[i] > 0)
+                mean_reward = sum(rewards[i] for i in counted_slots) / len(counted_slots) if counted_slots else 0.0
+                mean_steps = sum(step_counts[i] for i in counted_slots) / len(counted_slots) if counted_slots else 0.0
+                success_rate = success_count / len(counted_slots) if counted_slots else 0.0
+
+                logger.info(
+                    "Epoch %s section %s done: mean_reward=%.4f success_rate=%.4f mean_steps=%.1f duplicate_slots=%s",
+                    epoch_idx + 1, section_counter, mean_reward, success_rate, mean_steps,
+                    batch_size - len(counted_slots),
+                )
+
+                with open(episodes_path, "a", encoding="utf-8") as f:
+                    for i in counted_slots:
+                        f.write(json.dumps({
+                            "epoch": epoch_idx + 1,
+                            "section": section_counter,
+                            "slot": i,
+                            "task_type": task_types[i],
+                            "task_name": task_descriptions[i],
+                            "reward": rewards[i],
+                            "success": bool(done_flags[i] and rewards[i] > 0),
+                            "steps": step_counts[i],
+                        }) + "\n")
+
+                if args.smoke:
                     break
-
-                actions = []
-                for i in range(batch_size):
-                    if done_flags[i]:
-                        actions.append("look")
-                        continue
-                    actions.append(agents[i].act(observations[i]))
-
-                step_results = env.step(actions)
-                for i, result in enumerate(step_results):
-                    if done_flags[i]:
-                        continue
-                    observations[i] = result["obs"]
-                    rewards[i] += float(result.get("reward", 0.0) or 0.0)
-                    done_flags[i] = bool(result.get("done", False))
-                    step_counts[i] += 1
-
-            success_count = sum(1 for i in range(batch_size) if done_flags[i] and rewards[i] > 0)
-            mean_reward = sum(rewards) / batch_size if batch_size else 0.0
-            mean_steps = sum(step_counts) / batch_size if batch_size else 0.0
-            success_rate = success_count / batch_size if batch_size else 0.0
-
-            logger.info(
-                "Section %s done: mean_reward=%.4f success_rate=%.4f mean_steps=%.1f",
-                section_idx + 1, mean_reward, success_rate, mean_steps,
-            )
-
-            import json
-            with open(episodes_path, "a", encoding="utf-8") as f:
-                for i in range(batch_size):
-                    f.write(json.dumps({
-                        "section": section_idx + 1,
-                        "slot": i,
-                        "reward": rewards[i],
-                        "success": bool(done_flags[i] and rewards[i] > 0),
-                        "steps": step_counts[i],
-                    }) + "\n")
-
             if args.smoke:
                 break
     finally:

@@ -189,37 +189,60 @@ def main():
             return
 
         try:
-            num_episodes = 1 if args.smoke else (args.episodes or cfg.experiment.num_sections)
-            if not args.smoke and args.episodes is None and cfg.experiment.num_epochs is not None:
-                num_games = env_adapter.num_games()
-                if num_games:
-                    num_episodes = int(cfg.experiment.num_epochs) * math.ceil(
-                        num_games / int(cfg.experiment.batch_size)
-                    )
+            # Sections-per-epoch is the minimum number of full batch_size
+            # sections needed to touch every game in the split at least
+            # once; when num_games isn't evenly divisible by batch_size,
+            # the last section of each epoch necessarily wraps around and
+            # re-dispatches a few already-seen games to fill the batch.
+            # env_adapter.reset_epoch_tracking() (called once per epoch,
+            # below) plus EpisodeRunner's duplicate-slot exclusion keeps
+            # those repeats out of the reported metrics.
+            if args.smoke:
+                num_epochs, sections_per_epoch = 1, 1
+            elif args.episodes is not None:
+                num_epochs, sections_per_epoch = 1, int(args.episodes)
+            else:
+                num_epochs = int(cfg.experiment.num_epochs or 1)
+                sections_per_epoch = int(cfg.experiment.num_sections)
+                if cfg.experiment.num_epochs is not None:
+                    num_games = env_adapter.num_games()
+                    if num_games:
+                        sections_per_epoch = math.ceil(num_games / int(cfg.experiment.batch_size))
+                        logger.info(
+                            "num_epochs=%s -> %s section(s)/epoch (num_games=%s, batch_size=%s)",
+                            cfg.experiment.num_epochs, sections_per_epoch, num_games, cfg.experiment.batch_size,
+                        )
+                    else:
+                        logger.warning(
+                            "num_epochs=%s set but env_adapter.num_games() returned nothing; "
+                            "falling back to num_sections=%s per epoch",
+                            cfg.experiment.num_epochs, sections_per_epoch,
+                        )
+            logger.info(
+                "Running %s epoch(s) x %s section(s) on ALFWorld via EpisodeRunner.",
+                num_epochs, sections_per_epoch,
+            )
+            section_counter = 0
+            for epoch_idx in range(num_epochs):
+                env_adapter.reset_epoch_tracking()
+                for _ in range(sections_per_epoch):
+                    summary = runner.run()
+                    section_counter += 1
                     logger.info(
-                        "num_epochs=%s resolved to num_sections=%s (num_games=%s, batch_size=%s)",
-                        cfg.experiment.num_epochs, num_episodes, num_games, cfg.experiment.batch_size,
+                        "Epoch %s section %s done: mean_reward=%.4f success_rate=%.4f steps=%.1f "
+                        "duplicate_slots=%s formation=%s pruning=%s sleep=%s",
+                        epoch_idx + 1,
+                        section_counter,
+                        float(summary.get("mean_reward", 0.0)),
+                        float(summary.get("success_rate", 0.0)),
+                        float(summary.get("mean_steps", 0.0)),
+                        summary.get("duplicate_slots", 0),
+                        summary.get("formation"),
+                        summary.get("pruning"),
+                        summary.get("sleep_consolidation"),
                     )
-                else:
-                    logger.warning(
-                        "num_epochs=%s set but env_adapter.num_games() returned nothing; "
-                        "falling back to num_sections=%s",
-                        cfg.experiment.num_epochs, num_episodes,
-                    )
-            logger.info("Running %s episode(s) on ALFWorld via EpisodeRunner.", num_episodes)
-            for episode_idx in range(int(num_episodes)):
-                summary = runner.run()
-                logger.info(
-                    "Episode %s done: mean_reward=%.4f success_rate=%.4f steps=%.1f "
-                    "formation=%s pruning=%s sleep=%s",
-                    episode_idx + 1,
-                    float(summary.get("mean_reward", 0.0)),
-                    float(summary.get("success_rate", 0.0)),
-                    float(summary.get("mean_steps", 0.0)),
-                    summary.get("formation"),
-                    summary.get("pruning"),
-                    summary.get("sleep_consolidation"),
-                )
+                    if args.smoke:
+                        break
                 if args.smoke:
                     break
         finally:

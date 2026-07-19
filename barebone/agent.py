@@ -32,7 +32,7 @@ class BarebonAgent:
         action, thought = self._parse_response(response)
 
         self._history.append(user_turn)
-        self._history.append({"role": "assistant", "content": response or f"Thought: {thought}\nAction: {action}"})
+        self._history.append({"role": "assistant", "content": response or f"Action: {action}"})
         return action
 
     @staticmethod
@@ -41,13 +41,10 @@ class BarebonAgent:
         if not text:
             return "look", ""
 
-        thought = ""
         action = ""
         for line in text.splitlines():
             stripped = line.strip()
-            if stripped.lower().startswith("thought:"):
-                thought = stripped[len("thought:") :].strip()
-            elif stripped.lower().startswith("action:"):
+            if stripped.lower().startswith("action:"):
                 action = stripped[len("action:") :].strip()
 
         if not action:
@@ -55,7 +52,7 @@ class BarebonAgent:
             # response so a malformed reply doesn't silently no-op forever.
             action = text.splitlines()[-1].strip()
 
-        return action or "look", thought
+        return action or "look"
 
 
 __all__ = ["BarebonAgent"]

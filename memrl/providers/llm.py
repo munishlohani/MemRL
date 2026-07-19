@@ -211,15 +211,30 @@ class OpenAILLM(BaseLLM):
         # - LLB may not pass max_tokens per-call.
         # - In that case we must honor the configured default_max_tokens from YAML,
         #   otherwise the backend's implicit default can truncate generations.
+        #
+        # extra_body defaults to disabling vLLM/Qwen3 "thinking" via
+        # chat_template_kwargs -- unconditional for every model for now (not
+        # yet scoped to Qwen3 specifically). A caller-supplied extra_body is
+        # deep-merged on top rather than replacing this default outright, so
+        # per-call overrides (e.g. barebone/agent.py) actually take effect
+        # instead of being silently dropped by the "additional kwargs" loop
+        # below (which only sets a key if it is not already present).
+        default_chat_template_kwargs = {"enable_thinking": False}
+        caller_extra_body = kwargs.get("extra_body")
+        if isinstance(caller_extra_body, dict):
+            extra_body = dict(caller_extra_body)
+            extra_body["chat_template_kwargs"] = {
+                **default_chat_template_kwargs,
+                **(caller_extra_body.get("chat_template_kwargs") or {}),
+            }
+        else:
+            extra_body = {"chat_template_kwargs": dict(default_chat_template_kwargs)}
+
         generation_kwargs = {
             "model": self.model,
             "messages": messages,
             "temperature": kwargs.get("temperature", self.default_temperature),
-            "extra_body":{
-                "chat_template_kwargs": {
-                    "enable_thinking": False
-                }
-            },
+            "extra_body": extra_body,
         }
 
         # Accept either OpenAI-style `max_tokens` or LLB-style `max_completion_tokens`.
@@ -230,7 +245,7 @@ class OpenAILLM(BaseLLM):
             generation_kwargs["max_tokens"] = kwargs.get("max_tokens")
         elif self.default_max_tokens is not None:
             generation_kwargs["max_tokens"] = self.default_max_tokens
-        
+
         # Add any additional kwargs
         for key, value in kwargs.items():
             if key not in generation_kwargs:

@@ -28,7 +28,7 @@ class BarebonAgent:
         user_turn = {"role": "user", "content": f"Observation: {observation}"}
         messages = [{"role": "system", "content": self.system_prompt}, *self._history, user_turn]
 
-        response = self.llm.generate(messages=messages)
+        response = self.llm.generate(messages=messages,extra_body={"chat_template_kwargs": {"enable_thinking": False}} )
         action, thought = self._parse_response(response)
 
         self._history.append(user_turn)

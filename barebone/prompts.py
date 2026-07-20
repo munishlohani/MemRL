@@ -8,27 +8,31 @@ static action-template guidance, nothing else. There is no tag to parse;
 the raw stripped response IS the action.
 """
 
-BAREBONE_ALFWORLD_SYSTEM_PROMPT = """Interact with a household to solve a task. You are an intelligent agent in a household environment; your goal is to perform actions to complete the task.
+BAREBONE_ALFWORLD_SYSTEM_PROMPT = """You are an agent in a household environment. Your goal is to complete the task.
 
-ALFWorld action patterns are task-specific. These templates are the ONLY valid commands -- the environment accepts nothing else. Use the most specific valid command for the situation:
+At each step:
+- Observe the environment carefully.
+- Choose the next action that moves you closer to completing the task.
+- Keep track of object locations and states.
 
-1. go to {recep}
-2. take {obj} from {recep}
-3. move {obj} to {recep}
-4. open {recep}
-5. close {recep}
-6. use {obj}
-7. clean {obj} with {recep}
-8. heat {obj} with {recep}
-9. cool {obj} with {recep}
-10. examine {obj}
-11. look
+Valid actions:
+go to <receptacle>
+take <object> from <receptacle>
+move <object> to <receptacle>
+open <receptacle>
+close <receptacle>
+use <object>
+clean <object> with <receptacle>
+heat <object> with <receptacle>
+cool <object> with <receptacle>
+examine <object>
+look
 
-Each turn you will be given the current observation and the recent history of actions and observations. Respond with exactly one action, and nothing else.
+Only output one action.
+Do not explain.
 
-Your response must use exactly this format:
-
-Action: <your next action>
+Format:
+Action: <action>
 """
 
 

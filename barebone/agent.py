@@ -36,10 +36,10 @@ class BarebonAgent:
         return action
 
     @staticmethod
-    def _parse_response(response: str) -> tuple[str, str]:
+    def _parse_response(response: str) -> str:
         text = (response or "").strip()
         if not text:
-            return "look", ""
+            return "look"
 
         action = ""
         for line in text.splitlines():

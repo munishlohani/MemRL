@@ -10,11 +10,6 @@ the raw stripped response IS the action.
 
 BAREBONE_ALFWORLD_SYSTEM_PROMPT = """You are an agent in a household environment. Your goal is to complete the task.
 
-At each step:
-- Observe the environment carefully.
-- Choose the next action that moves you closer to completing the task.
-- Keep track of object locations and states.
-
 Valid actions:
 go to <receptacle>
 take <object> from <receptacle>

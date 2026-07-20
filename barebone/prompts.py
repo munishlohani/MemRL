@@ -1,34 +1,26 @@
 """Standalone system prompt for the barebone ALFWorld runner.
 
-Plain LLM baseline: no ReAct, no reasoning step, no memory, no skill
-invocation, no retrieval mechanism, and no per-turn admissible-commands
-list -- deliberately matching what the main agent's prompt
-(memrl/agent/prompts.py) actually gives the model: the observation plus
-static action-template guidance, nothing else. There is no tag to parse;
-the raw stripped response IS the action.
+Plain LLM baseline: no ReAct, no memory, no skill invocation, no retrieval
+mechanism. Exactly two messages per turn (system + user) -- the user
+message is built fresh each call from Task/Interaction-history/Current
+observation/Admissible actions fields (see agent.py), not an accumulating
+chat message list. "Interaction history so far" is rendered as plain text
+inside that single user message.
 """
 
-BAREBONE_ALFWORLD_SYSTEM_PROMPT = """You are an agent in a household environment. Your goal is to complete the task.
+BAREBONE_ALFWORLD_SYSTEM_PROMPT = (
+    "You are controlling a text-based ALFWorld environment. Choose the "
+    "NEXT action as ONE admissible command string. Output only the "
+    "command, copied verbatim from the admissible list."
+)
 
-Valid actions:
-go to <receptacle>
-take <object> from <receptacle>
-move <object> to <receptacle>
-open <receptacle>
-close <receptacle>
-use <object>
-clean <object> with <receptacle>
-heat <object> with <receptacle>
-cool <object> with <receptacle>
-examine <object>
-look
-
-Only output one action.
-Do not explain.
-
-Format:
-Action: <action>
-"""
+BAREBONE_ALFWORLD_USER_TEMPLATE = (
+    "Task: {objective}\n"
+    "Interaction history so far: {history}\n"
+    "Current observation: {current_obs}\n"
+    "Admissible actions: {admissible}\n"
+    "Action:"
+)
 
 
-__all__ = ["BAREBONE_ALFWORLD_SYSTEM_PROMPT"]
+__all__ = ["BAREBONE_ALFWORLD_SYSTEM_PROMPT", "BAREBONE_ALFWORLD_USER_TEMPLATE"]

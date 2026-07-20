@@ -138,8 +138,6 @@ def main() -> None:
             for _ in range(sections_per_epoch):
                 section_counter += 1
                 reset_results = env.reset()
-                for agent in agents:
-                    agent.reset()
 
                 batch_size = len(reset_results)
                 observations = [r["obs"] for r in reset_results]
@@ -149,16 +147,21 @@ def main() -> None:
                 task_types = [None] * batch_size
                 task_descriptions = [None] * batch_size
                 duplicate_flags = [False] * batch_size
+                admissible_commands_list = [[] for _ in range(batch_size)]
 
                 for i, entry in enumerate(reset_results):
                     info = entry.get("info") or {}
                     gamefile = _extract_gamefile(info)
                     task_types[i] = _task_type_from_gamefile(gamefile)
                     task_descriptions[i] = _task_description_from_observation(entry.get("obs"))
+                    admissible_commands_list[i] = list(info.get("admissible_commands") or [])
                     is_duplicate = gamefile is not None and gamefile in seen_gamefiles
                     if gamefile is not None and not is_duplicate:
                         seen_gamefiles.add(gamefile)
                     duplicate_flags[i] = is_duplicate
+
+                for i, agent in enumerate(agents):
+                    agent.reset(task_descriptions[i] or "")
 
                 for _ in range(args.max_steps):
                     if all(done_flags):
@@ -169,7 +172,7 @@ def main() -> None:
                         if done_flags[i]:
                             actions.append("look")
                             continue
-                        actions.append(agents[i].act(observations[i]))
+                        actions.append(agents[i].act(observations[i], admissible_commands_list[i]))
 
                     step_results = env.step(actions)
                     for i, result in enumerate(step_results):
@@ -179,6 +182,7 @@ def main() -> None:
                         rewards[i] += float(result.get("reward", 0.0) or 0.0)
                         done_flags[i] = bool(result.get("done", False))
                         step_counts[i] += 1
+                        admissible_commands_list[i] = list((result.get("info") or {}).get("admissible_commands") or [])
 
                 counted_slots = [i for i in range(batch_size) if not duplicate_flags[i]]
                 success_count = sum(1 for i in counted_slots if done_flags[i] and rewards[i] > 0)

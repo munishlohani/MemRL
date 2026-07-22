@@ -165,6 +165,7 @@ class AlfWorldEpisodeEnvAdapter(EpisodeEnvAdapter):
             task_description = _task_description_from_observation(info.get("obs") or entry.get("obs"))
             if task_description is not None:
                 info.setdefault("task_description", task_description)
+            info.setdefault("admissible_commands", [])
             is_duplicate = gamefile is not None and gamefile in self._seen_gamefiles
             if gamefile is not None and not is_duplicate:
                 self._seen_gamefiles.add(gamefile)
@@ -199,6 +200,7 @@ class AlfWorldEpisodeEnvAdapter(EpisodeEnvAdapter):
                 task_description = _task_description_from_observation(observations[-1] if observations else entry.get("obs"))
                 if task_description is not None:
                     info["task_description"] = task_description
+            info.setdefault("admissible_commands", [])
             infos.append(info)
         self._log_step_output(actions, observations, rewards, dones, infos)
         return EpisodeStepResult(

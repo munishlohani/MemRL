@@ -26,8 +26,12 @@ class CustomAgent(BaseAgent):
         system_prompt: str = prompts.SYSTEM_PROMPT,
         memory_retrieval_skill: Optional[MemoryRetrievalSkill] = None,
     ) -> None:
+        # few_shot_examples is accepted-but-discarded: kept in the signature
+        # so existing callers (run_alfworld.py/run_bcb.py/run_alfworld_ray.py)
+        # don't break, but the mechanism was removed -- it only ever
+        # rendered via the now-removed few-shot system message.
+        del few_shot_examples
         self.llm = llm_provider
-        self.few_shot_examples = list(few_shot_examples or [])
         self.system_prompt = system_prompt
         self.memory_retrieval_skill = memory_retrieval_skill
         self.task_description = ""
@@ -61,6 +65,7 @@ class CustomAgent(BaseAgent):
             observation=observation,
             history_messages=history_messages,
             first_step=first_step,
+            admissible_commands=kwargs.get("admissible_commands") or [],
         )
         response = self._generate_response(messages)
         decision = self._parse_decision(response)
@@ -91,31 +96,21 @@ class CustomAgent(BaseAgent):
         observation: str,
         history_messages: List[Dict[str, Any]],
         first_step: bool,
+        admissible_commands: Sequence[str] = (),
     ) -> List[Dict[str, str]]:
-        messages = [{"role": "system", "content": self.system_prompt}]
+        admissible_text = (
+            "\n".join(f"- {command}" for command in admissible_commands)
+            if admissible_commands
+            else "(none available)"
+        )
 
         skill_contract = self._render_memory_retrieval_contract()
-        if skill_contract:
-            messages.append(
-                {
-                    "role": "system",
-                    "content": prompts.MEMORY_RETRIEVAL_SKILL_PROMPT.format(
-                        skill_contract=skill_contract
-                    ),
-                }
-            )
-
-        if self.few_shot_examples:
-            rendered_examples = self._render_few_shot_examples(self.few_shot_examples)
-            if rendered_examples:
-                messages.append(
-                    {
-                        "role": "system",
-                        "content": prompts.FEW_SHOT_PROMPT_SYSTEM.format(
-                            few_shot_examples=rendered_examples,
-                        ),
-                    }
-                )
+        system_content = (
+            self.system_prompt.format(skill_contract=skill_contract)
+            if "{skill_contract}" in self.system_prompt
+            else self.system_prompt
+        )
+        messages = [{"role": "system", "content": system_content}]
 
         history_text = self._format_history_messages(history_messages)
         if skill_contract:
@@ -123,18 +118,14 @@ class CustomAgent(BaseAgent):
                 task_description=self.task_description,
                 observation=observation,
                 history=history_text,
-            )
-        elif self.few_shot_examples:
-            user_prompt = prompts.FEW_SHOT_PROMPT_USER.format(
-                task_description=self.task_description,
-                observation=observation,
-                history=history_text,
+                admissible=admissible_text,
             )
         else:
             user_prompt = prompts.ZERO_SHOT_PROMPT.format(
                 task_description=self.task_description,
                 observation=observation,
                 history=history_text,
+                admissible=admissible_text,
             )
         messages.append({"role": "user", "content": user_prompt})
         return messages
@@ -187,36 +178,6 @@ class CustomAgent(BaseAgent):
             else:
                 lines.append(f"{role}: {content}")
         return "\n".join(lines) if lines else "You are at the beginning of the task. No steps taken yet."
-
-    @staticmethod
-    def _render_few_shot_examples(examples: Sequence[Any]) -> str:
-        rendered: List[str] = []
-        for item in examples:
-            if isinstance(item, dict):
-                if "messages" in item and isinstance(item["messages"], list):
-                    rendered.append(CustomAgent._render_message_sequence(item["messages"]))
-                    continue
-                if "example" in item:
-                    example = item["example"]
-                    if isinstance(example, list):
-                        rendered.append(CustomAgent._render_message_sequence(example))
-                        continue
-                    rendered.append(str(example))
-                    continue
-            rendered.append(str(item))
-        return "\n\n".join(part for part in rendered if part.strip())
-
-    @staticmethod
-    def _render_message_sequence(messages: Sequence[Any]) -> str:
-        lines: List[str] = []
-        for message in messages:
-            if not isinstance(message, dict):
-                continue
-            role = str(message.get("role", "unknown"))
-            content = str(message.get("content", "")).strip()
-            if content:
-                lines.append(f"{role}: {content}")
-        return "\n".join(lines)
 
     def _generate_response(self, messages: List[Dict[str, str]]) -> str:
         try:

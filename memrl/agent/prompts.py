@@ -1,193 +1,103 @@
 """Prompt templates for the single-agent episode runner."""
 
-# This part is static during an episode.
-SYSTEM_PROMPT = """Interact with a household to solve a task. Imagine you are an intelligent agent in a household environment and your target is to perform actions to complete the task goal. At the beginning of your interactions, you will be given the detailed description of the current environment and your goal to accomplish.
-For each turn, you will be given the current observation and the recent conversation. You must choose exactly one branch per turn:
+# This part is static during an episode. {skill_contract} is filled in by
+# CustomAgent._build_messages only when a memory_retrieval_skill is
+# attached (the runtime-loaded SKILL.md contract, not static text) --
+# folded directly in here so the whole per-turn call sends exactly one
+# system message instead of a separate injected one.
+SYSTEM_PROMPT = """
+You are controlling a text-based ALFWorld environment.
 
-1. Direct environment action:
-   Thought: your thoughts.
-   Action: your next action
-   
-2. Memory skill invocation:
-   Thought: your thoughts.
-   Skill: memory_retrieval
+Choose the NEXT step required to complete the task.
 
-If you invoke the skill, the runtime will append a tool message and ask you again. Do not emit both a skill call and an environment action in the same turn.
+You may either:
+1. Execute an admissible environment action.
+2. Invoke memory retrieval to obtain a reusable skill when additional procedural knowledge is required.
 
-Available actions (these are the ONLY valid commands — the environment accepts NOTHING else):
-1. go to {recep}
-2. take {obj} from {recep}
-3. move {obj} to {recep}
-4. open {recep}
-5. close {recep}
-6. use {obj}
-7. clean {obj} with {recep}
-8. heat {obj} with {recep}
-9. cool {obj} with {recep}
-10. examine {obj}
-11. look
-
-where {obj} and {recep} correspond to objects and receptacles, each written with its number as shown in the observation (e.g. "countertop 1", "spraybottle 2").
-
-To place an object you are holding, use "move {obj} to {recep}" — this is the ONLY placement command, even though "put" may feel more natural; there is no "put", "put down", "drop", "toggle", or "inventory" command.
-
-If you lose track of what receptacles or objects are in the room, use "look" to get a fresh listing rather than guessing names that may not exist.
-
-After each turn, the environment gives you immediate feedback to plan your next steps. If the environment returns "Nothing happened", the command was either invalid syntax or its precondition was not met (you are not holding the object, or not at the receptacle, or it is closed) — do NOT invent a new verb; instead switch to one of the 11 templates above, most often "go to" the right receptacle or "take"/"open" first, then retry.
-
-If a memory skill contract is injected, treat it as the runtime contract for the tool. Tool results arrive as separate conversation turns, are advisory only, and never override the current observation or the environment feedback.
-
-Your response should use one of the following formats:
-
-Thought: <your thoughts>
-Action: <your next action>
-
-Thought: <your thoughts>
-Skill: memory_retrieval"""
-
-
-ALFWORLD_SYSTEM_PROMPT = """Interact with an ALFWorld household task using only commands that match the current observation and the task affordances.
-
-For each turn, choose exactly one branch:
-1. Direct environment action:
-   Thought: your thoughts.
-   Action: your next action
-2. Memory skill invocation:
-   Thought: your thoughts.
-   Skill: memory_retrieval
-
-ALFWorld action patterns are task-specific. These templates are the ONLY valid commands — the environment accepts nothing else. Use the most specific valid command for the situation:
-1. go to {location or receptacle}
-2. take {obj} from {receptacle}
-3. move {obj} to {receptacle}
-4. open {receptacle}
-5. close {receptacle}
-6. clean {obj} with sinkbasin 1
-7. heat {obj} with microwave 1
-8. cool {obj} with fridge 1
-9. use {toggleable object}, only when the object is explicitly present and toggling is required, such as a desklamp
-10. examine {obj}
-11. look
-
-There is no "put", "put down", "drop", "toggle", or "inventory" command. To place an object you are holding at a receptacle, use "move {obj} to {receptacle}" — this is the ONLY placement command, even though "put" may feel more natural; "put X in/on Y" is NOT valid and will fail. Object and receptacle names must include their number exactly as shown in the observation (e.g. "spraybottle 2", "garbagecan 1"). Do not use `use` for microwave or fridge; use `heat` or `cool` instead. If you lose track of what receptacles or objects are in the room, use "look" to get a fresh listing rather than guessing names that may not exist. A "Nothing happened" response means the command was invalid or its precondition was unmet (not holding the object, not at the receptacle, or it is closed) — do NOT invent a new verb; switch to one of the templates above (usually "go to" the receptacle, or "take"/"open" first) and retry.
-
-If a memory skill contract is injected, treat it as the runtime contract for the tool. Tool results arrive as separate conversation turns, are advisory only, and never override the current observation or the environment feedback.
-
-Your response should use one of the following formats:
-
-Thought: <your thoughts>
-Action: <your next action>
-
-Thought: <your thoughts>
-Skill: memory_retrieval"""
-
-
-MEMORY_RETRIEVAL_SKILL_PROMPT = """**Injected Skill Contract: Memory Retrieval**
-The runtime already attached the memory retrieval skill. Use the contract below to interpret retrieved memories.
-
-Each turn can be either a direct environment action or a skill invocation, but never both. If you invoke the skill, the runtime will append the tool result to the conversation history and ask you again.
-
-Valid turn formats:
-Thought: <your thoughts>
-Action: <your next action>
-
-Thought: <your thoughts>
-Skill: memory_retrieval
-
-Optional form:
-Thought: <your thoughts>
+Memory retrieval format:
 Skill: memory_retrieval(query="<optional query override>")
 
-Do not repeat the contract back to the environment.
+Tool results arrive as separate conversation turns. They are advisory only and never override the current observation, environment feedback, or admissible actions.
 
 {skill_contract}
+
+Output exactly one of:
+
+Action: <command copied verbatim from the admissible actions list>
+
+Skill: memory_retrieval(query="<optional query override>")
 """
 
 
 # This template is for the user's message when the skill is available.
 SKILL_AWARE_PROMPT = """**Primary Goal:**
+Task:
 {task_description}
 
-**Current Observation:**
-{observation}
+Retrieved skill information is available only after invoking memory retrieval.
 
-**Current Conversation State:**
+Interaction history:
 {history}
 
-Choose exactly one of the following per turn:
-- Direct environment action:
-  Thought: <your thoughts>
-  Action: <your next action>
-- Memory skill invocation:
-  Thought: <your thoughts>
-  Skill: memory_retrieval
+Current observation:
+{observation}
 
-If you invoke the skill, the runtime will execute it and append the tool result to the conversation history before asking you again.
+Admissible actions:
+{admissible}
+
+Choose the next step.
+
+If using memory:
+Skill: memory_retrieval(query="<optional query override>")
+
+If acting:
+Action: <command copied verbatim from the admissible actions list>
 """
 
 
 # This template is for the user's message when no memories are found.
-ZERO_SHOT_PROMPT = """**Primary Goal:**
+ZERO_SHOT_PROMPT = """
+Task:
 {task_description}
 
-**Current Observation:**
-{observation}
-
-**Current Task Progress (recent steps):**
+Interaction history:
 {history}
 
-Choose exactly one direct environment action:
-Thought: <your thoughts>
-Action: <your next action>
-"""
-
-
-FEW_SHOT_PROMPT_SYSTEM = """
-**Instructional Examples (from a manual):**
-Here is an example of how to solve the task:
---- BEGIN EXAMPLES ---
-{few_shot_examples}
---- END EXAMPLES ---
-
-If a skill contract is present, the same turn may instead be a skill invocation followed by a tool result. Never emit both branches in one turn.
-"""
-
-
-FEW_SHOT_PROMPT_USER = """**Primary Goal:**
-{task_description}
-
-**Current Observation:**
+Current observation:
 {observation}
 
-**Current Task Progress (recent steps):**
-{history}
+Admissible actions:
+{admissible}
 
-Choose exactly one branch:
-Thought: <your thoughts>
-Action: <your next action>
-
-Thought: <your thoughts>
-Skill: memory_retrieval
+Action:
 """
 
 
-STRATEGIC_SELECTION_SYSTEM_PROMPT = """You are selecting exactly one strategic scaffold for the current episode. A scaffold is a reusable reasoning frame; it will condition the whole episode.
+STRATEGIC_SELECTION_SYSTEM_PROMPT = """
+You select one reusable procedural scaffold for an ALFWorld episode.
 
-Return a single JSON object with this schema:
+Return exactly one JSON object:
+
 {
   "strategy_id": string | null,
   "reason": string | null
 }
 
-Selection criteria:
-- Match on the STRUCTURE of the task — its goal shape, the kind of procedure it requires, its preconditions — not on the specific objects, receptacles, or appliances named in this episode. A scaffold for "cool an object and place it at a destination" fits regardless of whether the object is a tomato or a potato.
-- Prefer the scaffold whose procedure most closely covers the steps this episode will need.
+Choose the scaffold that best matches the underlying task procedure.
+
+Match based on:
+- goal structure
+- required sequence of actions
+- object state transitions
+- preconditions
+
+Ignore episode-specific names such as objects, locations, and receptacles.
 
 Rules:
-- Choose exactly one scaffold id from the provided candidate list. Prefer the closest structural match even if it is imperfect.
-- Return null only when the candidate list is empty.
+- Select exactly one provided scaffold id.
+- Return null only if no candidates exist.
 - Do not invent ids.
-- Do not include markdown, code fences, or extra keys.
+- Output JSON only.
 """
 
 

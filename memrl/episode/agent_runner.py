@@ -17,7 +17,7 @@ from memrl.agent.history import EpisodeHistory
 from memrl.configs.config import MempConfig
 from memrl.memory.episodic_bank import EpisodicRecord
 from memrl.service.memory_service import MemoryService
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 from memrl.service.sleep_consolidation.checkpoint import SleepConsolidationCheckpoint
 from memrl.service.formation_judger import (
     TacticalFormationCandidate,
@@ -313,6 +313,12 @@ class EpisodeRunner(BaseEpisodeRunner):
                             task_type=task_types[slot_idx],
                             episode_id=episode_ids[slot_idx],
                         )
+                        admissible_commands = list(
+                            (episode_infos[slot_idx] if slot_idx < len(episode_infos) else {}).get(
+                                "admissible_commands"
+                            )
+                            or []
+                        )
                         action, retrieval_result = self._resolve_agent_turn(
                             agent=agent_slots[slot_idx],
                             observation=current_observation,
@@ -322,6 +328,7 @@ class EpisodeRunner(BaseEpisodeRunner):
                             task_type=task_types[slot_idx],
                             episode_id=episode_ids[slot_idx],
                             active_strategic_node_id=active_strategic_node_id,
+                            admissible_commands=admissible_commands,
                         )
                         action = action.strip() if isinstance(action, str) else ""
                         actions[slot_idx] = action or "look"
@@ -657,6 +664,7 @@ class EpisodeRunner(BaseEpisodeRunner):
         first_step: bool,
         active_strategic_node_id: Optional[str],
         current_step: int,
+        admissible_commands: Optional[Sequence[str]] = None,
     ) -> AgentDecision:
         for attempt in range(1, MAX_RETRIES + 1):
             try:
@@ -666,6 +674,7 @@ class EpisodeRunner(BaseEpisodeRunner):
                     first_step=first_step,
                     active_strategic_node_id=active_strategic_node_id,
                     current_step=current_step,
+                    admissible_commands=admissible_commands or [],
                 )
                 if isinstance(decision, (EnvActionDecision, SkillInvocationDecision)):
                     return decision
@@ -698,6 +707,7 @@ class EpisodeRunner(BaseEpisodeRunner):
         task_type: str,
         episode_id: str,
         active_strategic_node_id: Optional[str],
+        admissible_commands: Optional[Sequence[str]] = None,
     ) -> tuple[str, Optional[MemoryRetrievalResult]]:
         latest_retrieval_result: Optional[MemoryRetrievalResult] = None
 
@@ -710,6 +720,7 @@ class EpisodeRunner(BaseEpisodeRunner):
                 first_step=first_step,
                 active_strategic_node_id=active_strategic_node_id,
                 current_step=self.current_step,
+                admissible_commands=admissible_commands,
             )
             history.append_message(decision.as_message())
 

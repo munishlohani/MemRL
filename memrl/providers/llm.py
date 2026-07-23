@@ -224,7 +224,17 @@ class OpenAILLM(BaseLLM):
             generation_kwargs["max_tokens"] = kwargs.get("max_tokens")
         elif self.default_max_tokens is not None:
             generation_kwargs["max_tokens"] = self.default_max_tokens
-        
+
+        # Disabled by default: vLLM/Qwen3-style servers read this out of
+        # extra_body.chat_template_kwargs, not a top-level param. Thinking
+        # output otherwise burns tokens (and budget) we don't parse/use.
+        enable_thinking = kwargs.pop("enable_thinking", False)
+        extra_body = dict(kwargs.pop("extra_body", None) or {})
+        chat_template_kwargs = dict(extra_body.get("chat_template_kwargs") or {})
+        chat_template_kwargs.setdefault("enable_thinking", enable_thinking)
+        extra_body["chat_template_kwargs"] = chat_template_kwargs
+        generation_kwargs["extra_body"] = extra_body
+
         # Add any additional kwargs
         for key, value in kwargs.items():
             if key not in generation_kwargs:

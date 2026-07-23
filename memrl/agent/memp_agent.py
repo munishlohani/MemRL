@@ -18,35 +18,14 @@ class MempAgent(BaseAgent):
     It receives all necessary context (history, retrieved memories) from an
     external controller (the Runner) at the moment of action.
     """
-    def __init__(self, llm_provider: OpenAILLM, few_shot_examples: Dict[str, Any]):
+    def __init__(self, llm_provider: OpenAILLM):
         # The agent is now independent of the memory service.
         self.llm = llm_provider
-        self.few_shot_examples = few_shot_examples
-        self.prefixes = {
-            'pick_and_place': 'put',
-            'pick_clean_then_place': 'clean',
-            'pick_heat_then_place': 'heat',
-            'pick_cool_then_place': 'cool',
-            'look_at_obj': 'examine',
-            'pick_two_obj': 'puttwo'
-        }
 
     def reset(self, task_description: str) -> None:
         """Resets the agent for a new episode and retrieves relevant long-term memories."""
         self.task_description = task_description.strip()
         logger.info(f"Agent has been reset for new task: '{self.task_description}'")
-        
-    def _get_examples_for_task(self, task_type: str) -> str:
-        """
-        [NEW] Selects the relevant few-shot examples based on the task type.
-        """
-        for prefix, key in self.prefixes.items():
-            if task_type.startswith(prefix):
-                # This logic mirrors your example script: load two relevant examples
-                for example in self.few_shot_examples:
-                    if example['task'] == key:
-                        return copy.deepcopy(example['example'])
-        return "No specific examples found for this task type."
 
     def _split_retrieved_memory_content(self, raw_content: str) -> Tuple[str, str, str]:
         """Split retrieved memory into header/body and describe the body type."""
@@ -161,22 +140,19 @@ class MempAgent(BaseAgent):
 
         return "\n\n".join(clean_parts) or raw_content
         
-    def _construct_messages(self, task_description: str, retrieved_memories: List[Dict], task_type: str) -> List[Dict[str, str]]:
+    def _construct_messages(
+        self,
+        task_description: str,
+        retrieved_memories: List[Dict],
+        admissible_commands: Optional[List[str]] = None,
+    ) -> List[Dict[str, str]]:
         """
-        [REFACTORED]
         Builds the message list in a conversational ReAct style.
         """
         # 1. Start with the system prompt
         messages = [{"role": "system", "content": prompts.SYSTEM_PROMPT}]
 
-        # 2. Add the selected few-shot example as a complete dialogue
-        example_dialogue = self._get_examples_for_task(task_type)
-        if example_dialogue:
-            # Modify the first user message in the example to introduce it
-            example_dialogue[0]['content'] = "Here is an example of how to solve the task:\n" + example_dialogue[0]['content']
-            messages.extend(example_dialogue)
-
-        # 3. Add retrieved memories as additional context for the agent
+        # 2. Add retrieved memories as additional context for the agent
         if retrieved_memories:
             successful_mems = retrieved_memories.get('successed', [])
             failed_mems = retrieved_memories.get('failed', [])
@@ -190,7 +166,7 @@ class MempAgent(BaseAgent):
             ] if failed_mems else []
 
             memory_parts = [
-                "In addition to the example, you have the following memories from your own past experiences. "
+                "You have the following memories from your own past experiences. "
                 "Use them to help you if they are relevant:"
             ]
 
@@ -213,9 +189,17 @@ class MempAgent(BaseAgent):
         # 4. Add the current task description as the new user prompt
         # The history of the current task will be appended in the `act` method
         current_task_prompt = f"Now, it's your turn to solve a new task.\n{task_description}"
+        current_task_prompt += f"\n{self._format_admissible_commands(admissible_commands)}"
         messages.append({"role": "user", "content": current_task_prompt})
         # logger.info(f"\nPrompt {messages}")
         return messages
+
+    @staticmethod
+    def _format_admissible_commands(admissible_commands: Optional[List[str]]) -> str:
+        if not admissible_commands:
+            return "Admissible actions: (none available)"
+        listed = "\n".join(f"- {command}" for command in admissible_commands)
+        return f"Admissible actions:\n{listed}"
 
     def _parse_action(self, llm_response: str) -> str:
         """
@@ -229,16 +213,26 @@ class MempAgent(BaseAgent):
             return llm_response.strip()
         else:
             return 'look around'
-    def act(self, observation: str, history_messages: List[Dict[str, str]], first_step: bool = False):
+    def act(
+        self,
+        observation: str,
+        history_messages: List[Dict[str, str]],
+        first_step: bool = False,
+        admissible_commands: Optional[List[str]] = None,
+    ):
         """
         Agent performs one step of action generation.
         Ensures robustness: if LLM fails or returns invalid output, action=None is returned.
         """
         import json
 
+        observation_content = (
+            f"Observation: {observation.strip()}\n{self._format_admissible_commands(admissible_commands)}"
+        )
+
         current_messages = copy.deepcopy(history_messages)
         if not first_step:
-            current_messages.append({"role": "user", "content": f"Observation: {observation.strip()}"})
+            current_messages.append({"role": "user", "content": observation_content})
 
         filtered_messages = []
         for i, m in enumerate(current_messages):
@@ -262,7 +256,7 @@ class MempAgent(BaseAgent):
             response = None  # fallback
 
         if not first_step:
-            history_messages.append({"role": "user", "content": f"Observation: {observation.strip()}"})
+            history_messages.append({"role": "user", "content": observation_content})
         history_messages.append({"role": "assistant", "content": response if response is not None else "No response."})
 
         action = None

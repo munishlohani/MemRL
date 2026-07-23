@@ -155,9 +155,7 @@ def main():
             sim_norm_std=getattr(cfg.memory, "sim_norm_std", None),
         )
 
-        with open(project_root / cfg.experiment.few_shot_path, "r", encoding="utf-8") as f:
-            few_shot_examples = json.load(f)
-        agent = MempAgent(llm_provider=llm_provider, few_shot_examples=few_shot_examples)
+        agent = MempAgent(llm_provider=llm_provider)
 
         alfworld_config_path = project_root / "configs" / "envs" / "alfworld.yaml"
         runner = AlfworldRunner(

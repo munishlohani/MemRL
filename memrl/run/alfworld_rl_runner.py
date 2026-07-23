@@ -440,17 +440,19 @@ class AlfworldRunner(BaseRunner):
         results = mini_batch_env.reset()
         current_task_descs = ['\n'.join(res['obs'].split('\n\n')[1:]) for res in results]
         current_observations = ['\n'.join(res['obs'].split('\n\n')[1:]) for res in results]
-        task_types = ['/'.join(res['info']['extra.gamefile'].split('/')[-3:-1]) for res in results]
         current_gamefiles = [
             res.get('info', {}).get('extra.gamefile') or res.get('info', {}).get('gamefile')
             for res in results
+        ]
+        current_admissible = [
+            (res.get('info', {}) or {}).get('admissible_commands', []) for res in results
         ]
 
         for i in range(current_bs):
             messages = self.agent._construct_messages(
                 task_description=current_task_descs[i],
                 retrieved_memories={},
-                task_type=task_types[i]
+                admissible_commands=current_admissible[i],
             )
             if reflection_notes:
                 note = reflection_notes.get(current_gamefiles[i])
@@ -476,7 +478,8 @@ class AlfworldRunner(BaseRunner):
                                 return self.agent.act(
                                     observation=current_observations[slot_idx],
                                     history_messages=messages_per_slot[slot_idx],
-                                    first_step=(step == 0)
+                                    first_step=(step == 0),
+                                    admissible_commands=current_admissible[slot_idx],
                                 )
                             except Exception as e:
                                 logger.warning(
@@ -520,6 +523,7 @@ class AlfworldRunner(BaseRunner):
                 result = step_results[i]
                 current_observations[i] = result['obs']
                 info = result.get("info", {}) or {}
+                current_admissible[i] = info.get('admissible_commands', [])
                 gamefile = info.get("extra.gamefile") or info.get("gamefile")
                 if gamefile:
                     current_gamefiles[i] = gamefile
@@ -770,10 +774,12 @@ class AlfworldRunner(BaseRunner):
         current_task_descs = ['\n'.join(res['obs'].split('\n\n')[1:]) for res in results]
         # The first observation is part of the initial prompt, not a separate step
         current_observations = ['\n'.join(res['obs'].split('\n\n')[1:]) for res in results]
-        task_types = ['/'.join(res['info']['extra.gamefile'].split('/')[-3:-1]) for res in results]
         current_gamefiles = [
             res.get('info', {}).get('extra.gamefile') or res.get('info', {}).get('gamefile')
             for res in results
+        ]
+        current_admissible = [
+            (res.get('info', {}) or {}).get('admissible_commands', []) for res in results
         ]
 
         # --- Retrieve initial memories for the batch ---
@@ -810,7 +816,7 @@ class AlfworldRunner(BaseRunner):
             messages_per_slot[i] = self.agent._construct_messages(
                 task_description=current_task_descs[i],
                 retrieved_memories=retrieved_mems_per_slot[i],
-                task_type=task_types[i]
+                admissible_commands=current_admissible[i],
             )
 
         for step in tqdm(range(self.max_steps), desc="Sampling mini-batch (ReAct)"):
@@ -834,7 +840,8 @@ class AlfworldRunner(BaseRunner):
                                 return self.agent.act(
                                     observation=current_observations[slot_idx],
                                     history_messages=messages_per_slot[slot_idx],
-                                    first_step=(step == 0)
+                                    first_step=(step == 0),
+                                    admissible_commands=current_admissible[slot_idx],
                                 )
                             except Exception as e:
                                 logger.warning(
@@ -857,7 +864,7 @@ class AlfworldRunner(BaseRunner):
                         actions_dict[slot_idx] = "inventory"
 
             steps_per_slot += np.ones(len(steps_per_slot))
-            
+
             actions = ["look"] * current_bs
             for slot_idx, action in actions_dict.items():
                 actions[slot_idx] = action
@@ -885,6 +892,7 @@ class AlfworldRunner(BaseRunner):
                 result = step_results[i]
                 current_observations[i] = result['obs']
                 info = result.get("info", {}) or {}
+                current_admissible[i] = info.get('admissible_commands', [])
                 gamefile = info.get("extra.gamefile") or info.get("gamefile")
                 if gamefile:
                     current_gamefiles[i] = gamefile

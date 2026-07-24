@@ -190,6 +190,7 @@ class MempAgent(BaseAgent):
         # The history of the current task will be appended in the `act` method
         current_task_prompt = f"Now, it's your turn to solve a new task.\n{task_description}"
         current_task_prompt += f"\n{self._format_admissible_commands(admissible_commands)}"
+        current_task_prompt += "\nAction:"
         messages.append({"role": "user", "content": current_task_prompt})
         # logger.info(f"\nPrompt {messages}")
         return messages
@@ -203,13 +204,14 @@ class MempAgent(BaseAgent):
 
     def _parse_action(self, llm_response: str) -> str:
         """
-        Extracts the 'Action:' part from the ReAct response.
+        Extracts the action from the response. The prompt already ends with
+        a trailing "Action:" cue, so the expected/normal case is the model
+        just continuing with the bare command (no "Action:" restated) --
+        only strip an "Action:" prefix if the model echoed it back anyway.
         """
         if llm_response:
             if "Action:" in llm_response:
                 return llm_response.split("Action:")[-1].strip()
-            # Fallback if the model doesn't follow the format correctly
-            logger.warning(f"Could not find 'Action:' in LLM response. Returning the full response: '{llm_response}'")
             return llm_response.strip()
         else:
             return 'look around'
@@ -227,7 +229,7 @@ class MempAgent(BaseAgent):
         import json
 
         observation_content = (
-            f"Observation: {observation.strip()}\n{self._format_admissible_commands(admissible_commands)}"
+            f"Observation: {observation.strip()}\n{self._format_admissible_commands(admissible_commands)}\nAction:"
         )
 
         current_messages = copy.deepcopy(history_messages)

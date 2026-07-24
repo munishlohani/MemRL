@@ -378,7 +378,7 @@ class MemoryService:
                 "backend": "qdrant",
                 "config": {
                     "collection_name": f"memp_{self.user_id}_{ts_str}",
-                    "vector_dimension": 3072,
+                    "vector_dimension": 1024,
                     "distance_metric": "cosine",
                     "path": qdrant_dir,
                 },
@@ -1837,7 +1837,7 @@ class MemoryService:
                         "backend": "qdrant",
                         "config": {
                             "collection_name": f"memp_{self.user_id}_snapshot",
-                            "vector_dimension": 3072,
+                            "vector_dimension": 1024,
                             "distance_metric": "cosine",
                             "path": qdrant_dir,
                         },

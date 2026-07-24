@@ -56,8 +56,14 @@ class MempAgent(BaseAgent):
             raise ValueError("Retrieved memory trajectory is not a list.")
         return trajectory_list
 
+    # Cap on the retrieved-memory trajectory text folded into the system
+    # message once per episode -- a long past episode's full transcript
+    # would otherwise get retrieved wholesale and blow the context budget
+    # just as badly as unbounded live history does.
+    _MAX_RETRIEVED_TRAJECTORY_TURNS = 10
+
     def _clean_trajectory_messages(self, trajectory_list: List[Dict[str, Any]]) -> str:
-        """Keep only the relevant user/assistant turns from a stored trajectory."""
+        """Keep only the relevant, most recent user/assistant turns from a stored trajectory."""
         turn_idx = -1
         for i, msg in enumerate(trajectory_list):
             if (
@@ -82,6 +88,10 @@ class MempAgent(BaseAgent):
                 clean_trajectory.append(f"> {content}")
             elif role == "user" and isinstance(content, str):
                 clean_trajectory.append(content)
+
+        max_lines = self._MAX_RETRIEVED_TRAJECTORY_TURNS * 2  # user+assistant per turn
+        if len(clean_trajectory) > max_lines:
+            clean_trajectory = clean_trajectory[:1] + ["[...older steps truncated...]"] + clean_trajectory[-(max_lines - 1):]
 
         return "\n".join(clean_trajectory)
 
@@ -202,6 +212,27 @@ class MempAgent(BaseAgent):
         listed = "\n".join(f"- {command}" for command in admissible_commands)
         return f"Admissible actions:\n{listed}"
 
+    # Cap on the *live* message list actually sent to the LLM each turn.
+    # history_messages itself is never trimmed by this -- it's still the
+    # full, untruncated record used for trajectory storage -- only the
+    # per-call copy sent over the wire is windowed, so a long episode's
+    # context doesn't grow without bound and blow the model's context limit.
+    _MAX_RECENT_TURN_MESSAGES = 20
+
+    @classmethod
+    def _cap_messages_for_llm(cls, messages: List[Dict[str, str]]) -> List[Dict[str, str]]:
+        system_msgs = [m for m in messages if m.get("role") == "system"]
+        turn_msgs = [m for m in messages if m.get("role") != "system"]
+        if len(turn_msgs) <= cls._MAX_RECENT_TURN_MESSAGES:
+            return messages
+
+        # Pin the very first turn message (the initial task description +
+        # goal) so it can't silently fall out of context, then keep only the
+        # most recent turns after that.
+        pinned_task = turn_msgs[:1]
+        recent = turn_msgs[-(cls._MAX_RECENT_TURN_MESSAGES - 1):]
+        return system_msgs + pinned_task + recent
+
     def _parse_action(self, llm_response: str) -> str:
         """
         Extracts the action from the response. The prompt already ends with
@@ -246,6 +277,7 @@ class MempAgent(BaseAgent):
                 continue
             filtered_messages.append(m)
         current_messages = filtered_messages
+        current_messages = self._cap_messages_for_llm(current_messages)
 
         logger.debug("Querying LLM for the next action...")
 

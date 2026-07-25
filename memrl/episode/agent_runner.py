@@ -67,6 +67,7 @@ class EpisodeRunner(BaseEpisodeRunner):
         max_steps: int = 1,
         llm_provider: Optional[BaseLLM] = None,
         strategic_k: int = 3,
+        max_skill_invocations: int = MAX_SKILL_INVOCATIONS,
         tensorboard_log_dir: Optional[str] = None,
     ):
         self.agent = agent
@@ -114,6 +115,13 @@ class EpisodeRunner(BaseEpisodeRunner):
         self.max_steps = max(1, int(max_steps))
         self.retrieve_k = max(1, int(retrieve_k))
         self.strategic_k = max(1, int(strategic_k))
+        # Per-run cap on skill (memory_retrieval) invocations within a single
+        # _resolve_agent_turn call. Defaults to the module constant (3,
+        # ALFWorld's existing budget); benchmarks with a much smaller
+        # per-episode action budget (BCB: max_steps=1) pass a lower cap so
+        # the agent can't spend its one real turn on repeated retrieval
+        # attempts instead of ever submitting an answer.
+        self.max_skill_invocations = max(0, int(max_skill_invocations))
 
         # run_dir defaults to a generic "episode" subtree (benchmark-neutral,
         # since this runner is shared across ALFWorld/BabyAI/HLE/etc.), but a
@@ -711,7 +719,7 @@ class EpisodeRunner(BaseEpisodeRunner):
     ) -> tuple[str, Optional[MemoryRetrievalResult]]:
         latest_retrieval_result: Optional[MemoryRetrievalResult] = None
 
-        for _ in range(MAX_SKILL_INVOCATIONS + 1):
+        for _ in range(self.max_skill_invocations + 1):
             history_messages = self._history_to_messages(history)
             decision = self._act_with_retry(
                 agent=agent,
@@ -794,7 +802,7 @@ class EpisodeRunner(BaseEpisodeRunner):
 
         logger.warning(
             "Agent did not produce an environment action after %s skill turns; defaulting to look",
-            MAX_SKILL_INVOCATIONS,
+            self.max_skill_invocations,
         )
         return "look", latest_retrieval_result
 

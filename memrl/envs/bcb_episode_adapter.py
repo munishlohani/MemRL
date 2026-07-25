@@ -83,13 +83,18 @@ class BCBEpisodeEnvAdapter(EpisodeEnvAdapter):
         self._task_type_by_id: Dict[str, str] = {}
         self._phase = "train"
         self._cursors: Dict[str, int] = {"train": 0, "val": 0, "test": 0}
-        # Tracks task_ids already dispatched this pass, per non-train
-        # phase, so a wrap-around slot (pool size not evenly divisible by
-        # batch_size) can be marked duplicate and excluded from aggregated
-        # eval metrics -- mirrors AlfWorldEpisodeEnvAdapter's
-        # _seen_gamefiles/reset_epoch_tracking pattern for exact-count
-        # coverage. Train phase never marks duplicates (it cycles forever).
-        self._seen_ids: Dict[str, set] = {"val": set(), "test": set()}
+        # Tracks task_ids already dispatched this pass, per phase, so a
+        # wrap-around slot (pool size not evenly divisible by batch_size,
+        # or a full pass completing mid-batch) can be marked duplicate and
+        # excluded from aggregated metrics -- mirrors
+        # AlfWorldEpisodeEnvAdapter's _seen_gamefiles/reset_epoch_tracking
+        # pattern for exact-count epoch coverage. Train is tracked too (the
+        # caller resets it once per epoch via reset_epoch_tracking(), same
+        # as val/test do once per pass) so --epochs N produces N clean
+        # passes over the train pool, matching the original BCBRunner's
+        # per-epoch "for task in train_ids" loop instead of letting the
+        # cursor wrap across epoch boundaries uncounted.
+        self._seen_ids: Dict[str, set] = {"train": set(), "val": set(), "test": set()}
         self._last_reset_task_ids: List[Optional[str]] = []
 
     def _pool_for(self, phase: str) -> List[str]:
@@ -154,16 +159,17 @@ class BCBEpisodeEnvAdapter(EpisodeEnvAdapter):
         self._phase = phase
 
     def reset_epoch_tracking(self) -> None:
-        """Clear the seen-ids set for the CURRENT non-train phase.
+        """Clear the seen-ids set for the CURRENT phase.
 
-        Call once, right after set_phase(), at the start of each
-        validation or frozen-test pass -- so a fixed batch_size that
-        doesn't evenly divide the pool wraps around and re-dispatches a
-        few already-seen tasks to fill the last batch; those slots are
-        marked duplicate (see reset()) so EpisodeRunner excludes them
-        from aggregated eval metrics instead of double-counting them.
-        No-op for the train phase, which is never duplicate-tracked (it
-        cycles forever by design).
+        Call once, right after set_phase() (or at the start of each train
+        epoch, while still on the default "train" phase), so a fixed
+        batch_size that doesn't evenly divide the pool wraps around and
+        re-dispatches a few already-seen tasks to fill the last batch;
+        those slots are marked duplicate (see reset()) so EpisodeRunner
+        excludes them from aggregated metrics instead of double-counting
+        them. Without a per-epoch call for train, the cursor would keep
+        wrapping across epoch boundaries uncounted, so N epochs would not
+        correspond to N clean passes over the pool.
         """
         if self._phase in self._seen_ids:
             self._seen_ids[self._phase] = set()

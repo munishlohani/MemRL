@@ -143,9 +143,11 @@ def main():
             db_path=str(db_path),
         )
 
+        # No few_shot_examples: BCB has no few-shot mechanism (CustomAgent
+        # discards that parameter unconditionally, and BCBAgent's own
+        # prompting never references it).
         agent = BCBAgent(
             llm_provider=llm_provider,
-            few_shot_examples=[],
             system_prompt=BCB_SYSTEM_PROMPT,
         )
 
@@ -185,6 +187,13 @@ def main():
             batch_size=int(cfg.experiment.batch_size),
             max_steps=int(cfg.experiment.max_steps),
             llm_provider=llm_provider,
+            # BCB is a single-action-budget benchmark (max_steps=1) -- cap
+            # at one retrieval attempt so the agent can't spend its only
+            # real turn on repeated memory_retrieval calls instead of ever
+            # submitting code. Matches the original BCBRunner's one
+            # retrieval call per task; here it's still the agent's own
+            # choice whether to use it at all.
+            max_skill_invocations=1,
             tensorboard_log_dir=str(tb_dir),
         )
         logger.info("TensorBoard logs will be saved to %s", tb_dir)
@@ -225,6 +234,7 @@ def main():
                     batch_size=int(cfg.experiment.batch_size),
                     max_steps=int(cfg.experiment.max_steps),
                     llm_provider=llm_provider,
+                    max_skill_invocations=1,  # same one-retrieval-attempt cap as the train runner
                     tensorboard_log_dir=str(eval_tb_dir),
                 )
                 eval_runner.memory_config.build_memory = False
@@ -334,34 +344,50 @@ def main():
 
         try:
             num_tasks = env_adapter.num_tasks()
-            num_sections = int(args.epochs) * math.ceil(num_tasks / int(cfg.experiment.batch_size)) if num_tasks else 1
+            # Sections-per-epoch mirrors run_alfworld.py's convention: the
+            # minimum number of full batch_size sections needed to touch
+            # every train task at least once. Nested per-epoch so
+            # env_adapter.reset_epoch_tracking() (called once per epoch,
+            # below) gives --epochs N exactly N clean passes over the pool
+            # -- matching the original BCBRunner's "for epoch: for task in
+            # train_ids" loop -- instead of a single flat loop whose cursor
+            # wraps across epoch boundaries uncounted.
+            sections_per_epoch = math.ceil(num_tasks / int(cfg.experiment.batch_size)) if num_tasks else 1
+            num_epochs = int(args.epochs)
             if args.smoke:
-                num_sections = 1
+                num_epochs, sections_per_epoch = 1, 1
             logger.info(
-                "Running %s section(s) over %s BCB train tasks (epochs=%s, batch_size=%s).",
-                num_sections, num_tasks, args.epochs, cfg.experiment.batch_size,
+                "Running %s epoch(s) x %s section(s) over %s BCB train tasks (batch_size=%s).",
+                num_epochs, sections_per_epoch, num_tasks, cfg.experiment.batch_size,
             )
-            for section_idx in range(num_sections):
-                summary = runner.run()
-                logger.info(
-                    "Section %s done: mean_reward=%.4f success_rate=%.4f steps=%.1f "
-                    "formation=%s pruning=%s sleep=%s",
-                    section_idx + 1,
-                    float(summary.get("mean_reward", 0.0)),
-                    float(summary.get("success_rate", 0.0)),
-                    float(summary.get("mean_steps", 0.0)),
-                    summary.get("formation"),
-                    summary.get("pruning"),
-                    summary.get("sleep_consolidation"),
-                )
+            section_counter = 0
+            for epoch_idx in range(num_epochs):
+                env_adapter.reset_epoch_tracking()
+                for _ in range(sections_per_epoch):
+                    summary = runner.run()
+                    section_counter += 1
+                    logger.info(
+                        "Epoch %s section %s done: mean_reward=%.4f success_rate=%.4f steps=%.1f "
+                        "formation=%s pruning=%s sleep=%s",
+                        epoch_idx + 1,
+                        section_counter,
+                        float(summary.get("mean_reward", 0.0)),
+                        float(summary.get("success_rate", 0.0)),
+                        float(summary.get("mean_steps", 0.0)),
+                        summary.get("formation"),
+                        summary.get("pruning"),
+                        summary.get("sleep_consolidation"),
+                    )
+                    if args.smoke:
+                        break
+                    if (
+                        eval_runner is not None
+                        and cfg.experiment.valid_interval > 0
+                        and section_counter % cfg.experiment.valid_interval == 0
+                    ):
+                        run_validation_pass(section_counter)
                 if args.smoke:
                     break
-                if (
-                    eval_runner is not None
-                    and cfg.experiment.valid_interval > 0
-                    and (section_idx + 1) % cfg.experiment.valid_interval == 0
-                ):
-                    run_validation_pass(section_idx + 1)
         finally:
             runner.close()
 

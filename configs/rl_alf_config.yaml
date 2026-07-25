@@ -46,7 +46,7 @@ experiment:
   enable_value_driven: true
   experiment_name: 'alfworld_memrl'  # Name for Trail.
   mode: 'train'  # control whether to only test, if set as 'test' won't run on train spilt.
-  num_sections: 10  # Number of sections (re-uses the same training set each section)
+  num_sections: 1  # Number of sections (re-uses the same training set each section)
   batch_size: 32  # Number of parallel environments for sampling.
   dataset_ratio: 1.0  # Proportion of files randomly selected for training (rest used for validation)
   few_shot_path: 'data/alfworld/alfworld_examples.json' # path for alfworld examples

@@ -1,5 +1,6 @@
 import sys
 from pathlib import Path
+import json
 import logging
 import argparse
 import math
@@ -57,6 +58,18 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--split", type=str, default="instruct", choices=["instruct", "complete"])
     p.add_argument("--epochs", type=int, default=1)
     p.add_argument("--train_ratio", type=float, default=0.7)
+    p.add_argument(
+        "--test_ratio",
+        type=float,
+        default=0.0,
+        help=(
+            "Fraction held out as a frozen test split (never touched during "
+            "training or periodic validation). 0.0 (default) preserves the "
+            "original two-way train/val split. Only used for ratio-based "
+            "splitting -- ignored when --split_file's JSON already defines "
+            "test_ids."
+        ),
+    )
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--split_file", type=str, default=None)
     p.add_argument("--data_path", type=str, default=None)
@@ -142,6 +155,7 @@ def main():
             data_path=args.data_path,
             split_file=args.split_file,
             train_ratio=args.train_ratio,
+            test_ratio=args.test_ratio,
             seed=args.seed,
             batch_size=int(cfg.experiment.batch_size),
             bcb_repo=args.bcb_repo,
@@ -175,9 +189,148 @@ def main():
         )
         logger.info("TensorBoard logs will be saved to %s", tb_dir)
 
+        # Validation: shares agent/memory_service/env_adapter with the train
+        # runner (same in-process SkillGraph, so eval sees every node the
+        # train runner has formed so far with no reload) but is a distinct
+        # EpisodeRunner instance so its own memory_config copy can force
+        # build_memory=False -- retrieval/selection still run, but eval
+        # never mutates the graph (spec Project.md §8.1). Skipped entirely
+        # for --smoke (fast wiring test) or when the val split is empty
+        # (train_ratio=1.0 leaves no held-out tasks).
+        eval_runner = None
+        num_val_sections = 0
+        if cfg.experiment.bcb_run_validation and not args.smoke and cfg.experiment.mode != "eval_test":
+            num_val_tasks = env_adapter.num_val_tasks()
+            if num_val_tasks <= 0:
+                logger.warning(
+                    "bcb_run_validation is set but the val split is empty "
+                    "(train_ratio=%.2f leaves no held-out tasks); validation disabled.",
+                    args.train_ratio,
+                )
+            else:
+                eval_tb_dir = tb_dir / "eval"
+                eval_tb_dir.mkdir(parents=True, exist_ok=True)
+                eval_runner = EpisodeRunner(
+                    agent=agent,
+                    memory_service=memory_service,
+                    sleep_checkpoint=None,  # built from llm_provider inside EpisodeRunner; no-op while build_memory=False
+                    env_adapter=env_adapter,
+                    config=str(args.config),
+                    output_dir=out_dir,
+                    experiment_name=f"{cfg.experiment.experiment_name}_eval",
+                    mode="eval",
+                    run_id=run_id,
+                    run_dir=run_dir / "eval",
+                    retrieve_k=int(cfg.memory.k_retrieve),
+                    batch_size=int(cfg.experiment.batch_size),
+                    max_steps=int(cfg.experiment.max_steps),
+                    llm_provider=llm_provider,
+                    tensorboard_log_dir=str(eval_tb_dir),
+                )
+                eval_runner.memory_config.build_memory = False
+                num_val_sections = math.ceil(num_val_tasks / int(cfg.experiment.batch_size))
+                logger.info(
+                    "Validation enabled: %s held-out task(s), %s section(s)/pass, every %s train section(s).",
+                    num_val_tasks, num_val_sections, cfg.experiment.valid_interval,
+                )
+
         if args.init_only:
             logger.info("EpisodeRunner + BCBEpisodeEnvAdapter initialized; exiting due to --init-only.")
             return
+
+        if cfg.experiment.mode == "eval_test":
+            # Frozen, run-once evaluation against the held-out test split --
+            # mirrors run_alfworld.py's separate eval_seen/eval_unseen
+            # config convention (build_memory=false, reuse_skill_db=true,
+            # pointed at a train run's skill_memory.sqlite), just as a mode
+            # on this same script rather than a second entrypoint, since
+            # BCB's train/val/test split lives in one adapter instance.
+            # Test is NEVER touched during training or periodic validation
+            # (unlike val, which bcb_run_validation checks repeatedly) --
+            # that is the whole point of keeping it separate from val.
+            if runner.memory_config.build_memory:
+                logger.warning(
+                    "experiment.mode=eval_test but memory.build_memory=true "
+                    "in the config; forcing build_memory=False for this run "
+                    "so the frozen test pass cannot mutate the skill graph."
+                )
+                runner.memory_config.build_memory = False
+            if not getattr(cfg.memory, "reuse_skill_db", False):
+                logger.warning(
+                    "experiment.mode=eval_test with reuse_skill_db=false: "
+                    "evaluating against a fresh, empty skill graph instead "
+                    "of one built by a prior train run."
+                )
+
+            num_test_tasks = env_adapter.num_test_tasks()
+            if num_test_tasks <= 0:
+                logger.error(
+                    "experiment.mode=eval_test but the test split is empty. "
+                    "Pass --test_ratio > 0 for a ratio-based split, or use "
+                    "a --split_file whose JSON defines a non-empty "
+                    "'test_ids' list."
+                )
+                return
+
+            num_test_sections = math.ceil(num_test_tasks / int(cfg.experiment.batch_size))
+            logger.info(
+                "Running frozen test-set evaluation: %s task(s), %s section(s).",
+                num_test_tasks, num_test_sections,
+            )
+            env_adapter.set_phase("test")
+            env_adapter.reset_epoch_tracking()
+            total_reward = 0.0
+            total_success = 0.0
+            total_episodes = 0
+            try:
+                for section_idx in range(num_test_sections):
+                    summary = runner.run()
+                    counted = len(summary.get("episodes") or [])
+                    total_reward += float(summary.get("mean_reward", 0.0)) * counted
+                    total_success += float(summary.get("success_rate", 0.0)) * counted
+                    total_episodes += counted
+                    logger.info(
+                        "Test section %s/%s done: mean_reward=%.4f success_rate=%.4f",
+                        section_idx + 1, num_test_sections,
+                        float(summary.get("mean_reward", 0.0)),
+                        float(summary.get("success_rate", 0.0)),
+                    )
+            finally:
+                runner.close()
+
+            result = {
+                "episodes": total_episodes,
+                "mean_reward": (total_reward / total_episodes) if total_episodes else 0.0,
+                "success_rate": (total_success / total_episodes) if total_episodes else 0.0,
+            }
+            logger.info("Test-set evaluation done: %s", result)
+            with open(run_dir / "test_summary.json", "w", encoding="utf-8") as f:
+                json.dump(result, f, indent=2)
+            return
+
+        def run_validation_pass(after_section: int) -> None:
+            env_adapter.set_phase("val")
+            env_adapter.reset_epoch_tracking()
+            total_reward = 0.0
+            total_success = 0.0
+            total_episodes = 0
+            try:
+                for _ in range(num_val_sections):
+                    val_summary = eval_runner.run()
+                    counted = len(val_summary.get("episodes") or [])
+                    total_reward += float(val_summary.get("mean_reward", 0.0)) * counted
+                    total_success += float(val_summary.get("success_rate", 0.0)) * counted
+                    total_episodes += counted
+            finally:
+                env_adapter.set_phase("train")
+            if total_episodes:
+                logger.info(
+                    "Validation after train section %s: episodes=%s mean_reward=%.4f success_rate=%.4f",
+                    after_section,
+                    total_episodes,
+                    total_reward / total_episodes,
+                    total_success / total_episodes,
+                )
 
         try:
             num_tasks = env_adapter.num_tasks()
@@ -203,6 +356,12 @@ def main():
                 )
                 if args.smoke:
                     break
+                if (
+                    eval_runner is not None
+                    and cfg.experiment.valid_interval > 0
+                    and (section_idx + 1) % cfg.experiment.valid_interval == 0
+                ):
+                    run_validation_pass(section_idx + 1)
         finally:
             runner.close()
 

@@ -517,6 +517,7 @@ Defaults reflect `MemoryConfig` (`memrl/configs/config.py`). Symbols marked "abl
 | $\theta_{\text{absorb}}$ (`theta_absorb`) | Pass 1 (§8.2): absorb into the closest scaffold if $\cos(\text{centroid}, e_\omega) > \theta_{\text{absorb}}$ | 0.75 |
 | $n_{\text{min-spawn}}$ (`n_min_spawn`) | Pass 1: min cluster size to spawn when no scaffold clears $\theta_{\text{absorb}}$; smaller clusters discard. Also passed to the clustering strategy as a floor on cluster size ($k \leftarrow \min(k, \max(1, \lfloor n_{\text{eligible}}/n_{\text{min-spawn}}\rfloor))$), so a small eligible pool isn't fragmented into clusters too small to ever spawn | 2 |
 | $k$ | K-means cluster count | $\max(2,\lfloor\sqrt{\text{eligible}}\rfloor)$, DB-refined |
+| `cluster_strategy` | Sleep-consolidation clustering backend (`get_cluster_strategy()`): `kmeans` (implemented) or `hdbscan` (stub) | kmeans |
 | $\lambda_{\text{retrieval}}$ (`lambda_retrieval`) | Advantage weight in both retrieval blends (rank-normed) | 0.5 |
 | $\theta_{\text{retrieval}}$ (`theta_retrieval`) | Tactical-only quality gate on blended score | 0.0 (ablation knob) |
 | $c_{\text{ucb}}$ (`ucb_c`) | Strategic-only (§9.1) UCB1 exploration coefficient added to $Q^\Omega$ before rank-norm; 0.0 recovers pure-$Q^\Omega$ ranking | 0.0 (ablation knob) |
@@ -574,13 +575,16 @@ The theory above maps onto the codebase as follows. A coding agent implementing 
 |---|---|---|
 | Node model (§5.4) | `memrl/memory/skill_node.py` | `SkillNode`, decay-rate recompute, reservoir evidence, `refresh_task_type_dominant` |
 | In-memory graph (§5.1) | `memrl/memory/graph.py` | `SkillGraph`: `parent_id` structure, per-task-type baselines (EMA), `insert`/`reparent`/`remove`, `unabsorbed_tactical_count`, `failure_buffer`/`record_failure`/`pop_failures` (§8.4, in-memory, uncapped, per-scaffold) |
-| Utility salience (§3.3) | `memrl/utils/q_utils.py` | `get_q_salience` — shrinkage-weighted mean advantage |
+| Utility salience (§3.3) | `memrl/utils/q_utils.py` | `get_q_salience` / `get_q_omega_salience` (shrinkage-weighted mean advantage), `compute_mc_return_to_go` (§3.2), `compute_advantage` (§3.4), `apply_q_update`, `get_expected_option_value` |
 | Persistence + orchestration (§5.3) | `memrl/service/memory_service.py` | `MemoryService`: two-table SQLite I/O, working-set load/flush, node creation, pruning, sleep entry point, `retrieve_query` |
 | Retrieval blend (§9) | `memrl/service/retrievers.py` | `SkillSimilarityRetriever.tactical_retrieve` / `strategic_retrieve`; `rank_normalize`; `cosine_similarity` |
 | Tactical summarization (§4.2, §5.3) | `memrl/service/formation_judger.py` | `TacticalSummaryWriter`, `TacticalSummaryDraft`, `TACTICAL_SUMMARY_PROMPT`. Note: `memrl/service/builders.py` (`ProceduralizationBuilder`/`ScriptBuilder`/`TrajectoryBuilder`/`get_builder`) is unused legacy code from the base MemRL template — not the current formation path |
-| Sleep consolidation (§8) | `memrl/service/sleep_consolidation/` | `SleepConsolidationService` (`service.py`): `decide_cluster_structure` (Pass 1, algorithmic, §8.2) + `revise_strategy` (Pass 2, the sole LLM call, §8.3); `clustering.py` (adds `mean_embedding` for centroids); `prompts.py` (`REVISE_STRATEGY_PROMPT`); `types.py`; `checkpoint.py` |
-| Episode loop (§10) | `memrl/episode/agent_runner.py` | `EpisodeRunner.run`: step loop, end-of-episode Q updates, formation commit, strategic selection, maintenance, metrics, `_queue_failed_episode_reflections` (reflection-channel capture, §8.4) |
-| Env abstraction | `memrl/episode/env_adapter.py` | `EpisodeEnvAdapter` ABC — `reset`/`step`/`task_type`/`known_task_types`; benchmark adapters implement it |
+| Sleep consolidation (§8) | `memrl/service/sleep_consolidation/` | `SleepConsolidationService` (`service.py`): `decide_cluster_structure` (Pass 1, algorithmic, §8.2) + `revise_strategy` (Pass 2, the sole LLM call, §8.3) + `consolidate`; `clustering.py` (`KMeansClusteringStrategy`, `HDBSCANStrategy` stub, `mean_embedding` for centroids); `prompts.py` (`REVISE_STRATEGY_PROMPT`); `types.py`; `checkpoint.py` (`SleepConsolidationCheckpoint.check_and_trigger`) |
+| Episode loop (§10) | `memrl/episode/agent_runner.py` | `EpisodeRunner.run`: step loop, `_resolve_agent_turn` (agentic skill dispatch, §9), end-of-episode Q updates, formation commit, strategic selection, maintenance, metrics, `_queue_failed_episode_reflections` (reflection-channel capture, §8.4) |
+| Agent (policy) | `memrl/agent/` | `BaseAgent.act()` returns a discriminated `AgentDecision` = `EnvActionDecision \| SkillInvocationDecision` (`base.py`); `MempAgent` (ALFWorld), `BCBAgent` (BigCodeBench), `CustomAgent`; `EpisodeHistory` (`history.py`) holds the tool-message conversation; `prompts.py` |
+| Agentic retrieval skill (§9) | `memrl/skills/memory_retrieval.py` | `MemoryRetrievalSkill.retrieve` + `MemoryRetrievalResult` — the canonical agentic-not-RAG path: the agent emits a `memory_retrieval` `SkillInvocationDecision`, the runner services it and appends `MemoryRetrievalResult.to_tool_message` as a `tool` message; contract in `memory_retrieval_skill/SKILL.md`. Retrieval is never runner-injected |
+| Env abstraction | `memrl/episode/env_adapter.py` | `EpisodeEnvAdapter` ABC — `reset`/`step`/`close`/`episode_id`/`task_type`/`is_batch`/`known_task_types`, returning `EpisodeResetResult`/`EpisodeStepResult` |
+| Benchmark adapters | `memrl/envs/` | `AlfWorldEpisodeEnvAdapter`, `BCBEpisodeEnvAdapter` implement `EpisodeEnvAdapter`; `alfworld_env.py`, `base.py` |
 | Episodic evidence | `memrl/memory/episodic_bank.py` | `EpisodicMemoryBank`, `EpisodicRecord` — raw traces behind `evidence_ids` |
 | Config (§12) | `memrl/configs/config.py` | `MempConfig` → `MemoryConfig` / `ExperimentConfig` / `RLConfig`; YAML/JSON load |
 | Providers | `memrl/providers/` | `llm.py`, `embedding.py` — backbone + encoder behind thin interfaces |
@@ -595,7 +599,17 @@ The **decay clock is a global step counter**, advanced once per lockstep round i
 
 ### 16.3 Entry points
 
-Benchmark runners live under `run/` (`run_alfworld.py`, `run_bcb.py`, `run_hle.py`, `run_llb.py`) and wire an `EpisodeEnvAdapter` (e.g. `AlfWorldEpisodeEnvAdapter`) into `EpisodeRunner`. Adding a benchmark means implementing an adapter against `EpisodeEnvAdapter` and pointing a thin runner at `EpisodeRunner`; the memory architecture is benchmark-agnostic.
+Benchmark runners live under `run/`. Adding a benchmark means implementing an adapter against `EpisodeEnvAdapter` (in `memrl/envs/`) and pointing a thin runner at `EpisodeRunner`; the memory architecture is benchmark-agnostic. Migration status:
+
+| Runner | Wiring | Status |
+|---|---|---|
+| `run/run_alfworld.py` | `EpisodeRunner` + `AlfWorldEpisodeEnvAdapter` (`memrl/envs/alfworld_episode_adapter.py`) + `MempAgent` | **Migrated** |
+| `run/run_alfworld_ray.py` | same as above, Ray-parallel variant | **Migrated** |
+| `run/run_bcb.py` | `EpisodeRunner` + `BCBEpisodeEnvAdapter` (`memrl/envs/bcb_episode_adapter.py`) + `BCBAgent` | **Migrated** |
+| `run/run_hle.py` | legacy `HLERunner` (`memrl/run/hle_runner.py`) + `strategies.py` | **Not migrated** — no HLE `EpisodeEnvAdapter` yet |
+| `run/run_llb.py` | legacy `LLBRunner` (`memrl/run/llb_rl_runner.py`) + `strategies.py` | **Not migrated** — no LLB `EpisodeEnvAdapter` yet |
+
+Because HLE/LLB still route through the legacy runners, `memrl/service/strategies.py` (`BuildStrategy`/`RetrieveStrategy`/`UpdateStrategy`/`StrategyConfiguration`, plus `ClusterStrategy` consumed by sleep consolidation) is **not** yet dead — `strategies.py`'s Build/Retrieve/Update classes and `MempConfig.get_strategy_config()` become removable only once those two runners are ported to `EpisodeRunner` + adapters. `ClusterStrategy` / `get_cluster_strategy()` stay regardless (they select the sleep-consolidation clustering backend). The old flat-RAG `AlfworldRunner` (`memrl/run/alfworld_rl_runner.py`) is superseded by `EpisodeRunner` and is retained only for reference.
 
 ---
 

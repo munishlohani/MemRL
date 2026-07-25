@@ -1,18 +1,23 @@
-# Full config for running BigCodeBench (BCB) with MemRL in this repo.
+# Evaluation config: frozen, run-once BigCodeBench (BCB) test-split eval.
+#
+# Mirrors the ALFWorld eval_seen/eval_unseen convention in this repo
+# (rl_alf_config.eval_seen.yaml / eval_unseen.yaml): run this AFTER a
+# train-mode run (rl_bcb_config.yaml) has built a skill_memory.sqlite, not
+# against a fresh graph. Unlike bcb_run_validation's periodic val checks
+# during training, the test split here is never touched until this run --
+# that is the whole point of keeping it separate from val.
 #
 # IMPORTANT:
 # - This YAML must match `memrl.configs.config.MempConfig` (extra fields are forbidden).
-# - BCB-specific knobs (subset/split/epochs/train_ratio/split_file/data_path/...) are CLI args
-#   to `run/run_bcb.py` and are intentionally NOT in this YAML.
-# - Periodic validation during training can be toggled via YAML: set
-#   `experiment.bcb_run_validation: true` to run val every experiment.valid_interval sections.
-# - For a frozen, run-once evaluation against a held-out TEST split (never touched during
-#   training/val), use configs/rl_bcb_config.eval_test.yaml against a trained run's skill DB.
+# - The test split itself is a CLI concern, same as train_ratio/split_file:
+#     python run/run_bcb.py --config configs/rl_bcb_config.eval_test.yaml \
+#       --test_ratio 0.15 --train_ratio 0.7
+#   or, if your --split_file JSON already defines a non-empty "test_ids"
+#   list, no --test_ratio is needed -- the split file wins.
+# - Before running: set memory.skill_db_path below to the skill_memory.sqlite
+#   produced by the train run (e.g.
+#   results/bigcodebench/exp_bcb_memrl_<run_id>/skill_memory.sqlite).
 # - You must replace llm.api_key / embedding.api_key before running.
-#
-# Example:
-#   conda activate memory
-#   python run/run_bcb.py --config configs/rl_bcb_config.full.yaml --subset hard --split instruct --epochs 3
 
 llm:
   provider: "openai"
@@ -22,7 +27,7 @@ llm:
   base_url: "https://api.openai.com/v1"
   api_version: null
   model: "gpt-4o-mini"
-  temperature: 0.0
+  temperature: 0.0  # Greedy decoding at evaluation, matching the ALFWorld eval configs.
   max_tokens: 12800
 
 embedding:
@@ -48,21 +53,19 @@ memory:
   memory_confidence: 100.0
   add_similarity_threshold: 0.9
   n_sleep: 10
-  lambda_base: 1e-3  # Base decay rate for tactical nodes (spec sweep range [1e-4, 1e-2] log-scale).
-  # Token budget (character-level) for injected memory context.
-  # 0 means unlimited – all retrieved memories are included without truncation.
+  lambda_base: 1e-3
   memory_budget_tokens: 0
 
-  # MemOS config (NOTE: `run/run_bcb.py` writes a temporary mos_config.json at runtime;
-  # this field is kept for schema completeness/compatibility.)
+  build_memory: false  # Eval run: graph is read-only -- retrieved/used, never mutated. run_bcb.py also force-overrides this to False for mode=eval_test regardless of what's set here.
+  reuse_skill_db: true  # Point at the skill DB built by the train run instead of a fresh one.
+  skill_db_path: null  # REQUIRED: set to the trained run's skill_memory.sqlite path before launching.
+
   mos_config_path: "configs/mos_config.json"
   user_id: "memp_user"
 
-  # Similarity normalization stats (0 -> identity in current MemoryService implementation).
   sim_norm_mean: 0.31
   sim_norm_std: 0.10
 
-  # Optional checkpoint loading (unused by BCB runner unless you add support later).
   load_from_checkpoint: false
   checkpoint_path: null
 
@@ -72,18 +75,15 @@ environment:
   alfworld_env_type: "AlfredTWEnv"
 
 experiment:
-  experiment_name: "bcb_memrl"
+  experiment_name: "bcb_memrl_eval_test"
 
-  # Generic experiment switches (BCB runner uses: enable_value_driven, batch_size, output_dir).
   algorithm: "rl"
   val_before_train: true
   enable_value_driven: true
-  # BigCodeBench only: default train-only. Set true to also run validation.
-  bcb_run_validation: false
+  bcb_run_validation: false  # Irrelevant here -- run_bcb.py skips periodic val entirely when mode=eval_test.
   random_seed: 42
-  mode: "train"
-  max_steps: 1  # BCB is framed as a 1-step episode (submit code, evaluate, done) -- default of 30 would let the runner keep re-prompting after the episode should have ended.
-
+  mode: "eval_test"  # Triggers run_bcb.py's frozen, run-once test-split evaluation path.
+  max_steps: 1  # BCB is framed as a 1-step episode (submit code, evaluate, done).
 
   dataset_ratio: 0.7
   few_shot_path: "data/alfworld/alfworld_examples.json"

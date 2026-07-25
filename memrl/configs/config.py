@@ -331,8 +331,12 @@ class ExperimentConfig(BaseModel):
     bcb_run_validation: bool = Field(
         default=False,
         description=(
-            "BigCodeBench only: whether to run the validation phase. "
-            "If false, the BCB runner will run train-only by default."
+            "BigCodeBench only: whether to run periodic validation passes "
+            "against the held-out split (train_ratio remainder) every "
+            "valid_interval train sections. Validation shares the train "
+            "run's memory_service/graph but never mutates it (build_memory "
+            "forced False for the eval EpisodeRunner). If false, the BCB "
+            "runner runs train-only."
         ),
     )
 

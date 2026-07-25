@@ -42,6 +42,8 @@ class BCBEpisodeEnvAdapter(EpisodeEnvAdapter):
     dataset or vendored eval harness present.
     """
 
+    _PHASES = ("train", "val", "test")
+
     def __init__(
         self,
         *,
@@ -50,6 +52,7 @@ class BCBEpisodeEnvAdapter(EpisodeEnvAdapter):
         data_path: Optional[str] = None,
         split_file: Optional[str] = None,
         train_ratio: float = 0.7,
+        test_ratio: float = 0.0,
         seed: int = 42,
         batch_size: int = 1,
         bcb_repo: Optional[str] = None,
@@ -61,6 +64,11 @@ class BCBEpisodeEnvAdapter(EpisodeEnvAdapter):
         self._data_path = data_path
         self._split_file = split_file
         self._train_ratio = float(train_ratio)
+        # 0.0 (default) reproduces the original two-way train/val split
+        # exactly -- a frozen test pool only exists if the caller opts in,
+        # either via this ratio or a split_file whose JSON defines
+        # non-empty test_ids (see split_dataset).
+        self._test_ratio = float(test_ratio)
         self._seed = int(seed)
         self._batch_size = max(1, int(batch_size))
         self._bcb_repo = bcb_repo
@@ -71,18 +79,37 @@ class BCBEpisodeEnvAdapter(EpisodeEnvAdapter):
         self._problems: Dict[str, Dict[str, Any]] = {}
         self._train_ids: List[str] = []
         self._val_ids: List[str] = []
+        self._test_ids: List[str] = []
         self._task_type_by_id: Dict[str, str] = {}
-        self._cursor = 0
+        self._phase = "train"
+        self._cursors: Dict[str, int] = {"train": 0, "val": 0, "test": 0}
+        # Tracks task_ids already dispatched this pass, per non-train
+        # phase, so a wrap-around slot (pool size not evenly divisible by
+        # batch_size) can be marked duplicate and excluded from aggregated
+        # eval metrics -- mirrors AlfWorldEpisodeEnvAdapter's
+        # _seen_gamefiles/reset_epoch_tracking pattern for exact-count
+        # coverage. Train phase never marks duplicates (it cycles forever).
+        self._seen_ids: Dict[str, set] = {"val": set(), "test": set()}
         self._last_reset_task_ids: List[Optional[str]] = []
+
+    def _pool_for(self, phase: str) -> List[str]:
+        if phase == "train":
+            return self._train_ids
+        if phase == "val":
+            return self._val_ids
+        if phase == "test":
+            return self._test_ids
+        raise ValueError(f"Unknown BCB phase: {phase!r} (expected one of {self._PHASES})")
 
     def _ensure_loaded(self) -> None:
         if self._loaded:
             return
         ensure_bigcodebench_on_path(self._bcb_repo)
         self._problems = load_bcb_data(subset=self._subset, data_path=self._data_path)
-        self._train_ids, self._val_ids = split_dataset(
+        self._train_ids, self._val_ids, self._test_ids = split_dataset(
             self._problems,
             train_ratio=self._train_ratio,
+            test_ratio=self._test_ratio,
             seed=self._seed,
             split_file=self._split_file,
         )
@@ -113,9 +140,48 @@ class BCBEpisodeEnvAdapter(EpisodeEnvAdapter):
             task_type_by_id[task_id] = min(libs, key=lambda lib: (freq[lib], lib))
         return task_type_by_id
 
+    def set_phase(self, phase: str) -> None:
+        """Switch the active task pool among 'train', 'val', and 'test'.
+
+        The BCB train/val/test split comes from one dataset via
+        `split_dataset` (unlike ALFWorld's separate seen/unseen game
+        files), so a single adapter instance serves all three phases --
+        the caller (run_bcb.py) flips this before/after a validation or
+        frozen-test pass instead of constructing a second adapter.
+        """
+        if phase not in self._PHASES:
+            raise ValueError(f"Unknown BCB phase: {phase!r} (expected one of {self._PHASES})")
+        self._phase = phase
+
+    def reset_epoch_tracking(self) -> None:
+        """Clear the seen-ids set for the CURRENT non-train phase.
+
+        Call once, right after set_phase(), at the start of each
+        validation or frozen-test pass -- so a fixed batch_size that
+        doesn't evenly divide the pool wraps around and re-dispatches a
+        few already-seen tasks to fill the last batch; those slots are
+        marked duplicate (see reset()) so EpisodeRunner excludes them
+        from aggregated eval metrics instead of double-counting them.
+        No-op for the train phase, which is never duplicate-tracked (it
+        cycles forever by design).
+        """
+        if self._phase in self._seen_ids:
+            self._seen_ids[self._phase] = set()
+
+    def num_val_tasks(self) -> int:
+        """Total distinct tasks in the held-out val split (loads data if not loaded yet)."""
+        self._ensure_loaded()
+        return len(self._val_ids)
+
+    def num_test_tasks(self) -> int:
+        """Total distinct tasks in the frozen held-out test split (loads data if not loaded yet)."""
+        self._ensure_loaded()
+        return len(self._test_ids)
+
     def reset(self, **kwargs: Any) -> EpisodeResetResult:
         self._ensure_loaded()
-        pool = self._train_ids
+        phase = self._phase
+        pool = self._pool_for(phase)
         observations: List[str] = []
         infos: List[Dict[str, Any]] = []
         task_ids: List[Optional[str]] = []
@@ -125,8 +191,14 @@ class BCBEpisodeEnvAdapter(EpisodeEnvAdapter):
             return EpisodeResetResult(observations=[], infos=[])
 
         for _ in range(self._batch_size):
-            task_id = pool[self._cursor % len(pool)]
-            self._cursor += 1
+            task_id = pool[self._cursors[phase] % len(pool)]
+            self._cursors[phase] += 1
+            is_duplicate = False
+            seen = self._seen_ids.get(phase)
+            if seen is not None:
+                is_duplicate = task_id in seen
+                if not is_duplicate:
+                    seen.add(task_id)
             task = self._problems[task_id]
             prompt = get_prompt(task, split=self._split)
             task_ids.append(task_id)
@@ -139,7 +211,8 @@ class BCBEpisodeEnvAdapter(EpisodeEnvAdapter):
                     "task_type": self._task_type_by_id.get(task_id, "stdlib"),
                     "entry_point": task.get("entry_point", ""),
                     "libs": list(task.get("libs") or []),
-                    "phase": "train",
+                    "phase": self._phase,
+                    "duplicate": is_duplicate,
                 }
             )
 
@@ -181,7 +254,7 @@ class BCBEpisodeEnvAdapter(EpisodeEnvAdapter):
                     "task_id": task_id,
                     "episode_id": task_id,
                     "task_type": self._task_type_by_id.get(task_id, "stdlib"),
-                    "phase": "train",
+                    "phase": self._phase,
                     "status": status,
                     "error": eval_result.get("error"),
                     "code": code,

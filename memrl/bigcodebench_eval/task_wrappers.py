@@ -75,30 +75,47 @@ def load_bcb_data(subset: str = "hard", data_path: Optional[str] = None) -> Dict
 def split_dataset(
     problems: Dict[str, Dict[str, Any]],
     train_ratio: float = 0.7,
+    test_ratio: float = 0.0,
     seed: int = 42,
     split_file: Optional[str] = None,
-) -> Tuple[List[str], List[str]]:
-    """Split dataset into train and val sets.
+) -> Tuple[List[str], List[str], List[str]]:
+    """Split dataset into train, val, and (optionally) frozen test sets.
 
-    If `split_file` exists, uses it (expects JSON with `train_ids` and `val_ids`).
+    If `split_file` exists, uses it (expects JSON with `train_ids` and
+    `val_ids`; an optional `test_ids` key supplies a frozen held-out test
+    split -- absent means no test split, matching the two split files
+    already shipped under configs/bigcodebench/splits/, which predate the
+    three-way split and define train/val only).
+
+    Without a split_file, task ids are shuffled once (seeded) and sliced
+    train | val | test in that order. test_ratio=0.0 (the default)
+    reproduces the original two-way train/val behavior exactly -- the
+    remainder after train_ratio all goes to val and test is empty.
     """
+    if train_ratio + test_ratio > 1.0:
+        raise ValueError(
+            f"train_ratio ({train_ratio}) + test_ratio ({test_ratio}) exceeds 1.0"
+        )
+
     if split_file and os.path.exists(split_file):
         with open(split_file, "r", encoding="utf-8") as f:
             data = json.load(f)
-        train_ids = list(data.get("train_ids") or [])
-        val_ids = list(data.get("val_ids") or [])
         valid = set(problems.keys())
-        train_ids = [tid for tid in train_ids if tid in valid]
-        val_ids = [tid for tid in val_ids if tid in valid]
-        return train_ids, val_ids
+        train_ids = [tid for tid in (data.get("train_ids") or []) if tid in valid]
+        val_ids = [tid for tid in (data.get("val_ids") or []) if tid in valid]
+        test_ids = [tid for tid in (data.get("test_ids") or []) if tid in valid]
+        return train_ids, val_ids, test_ids
 
     task_ids = sorted(problems.keys())
     random.seed(seed)
     random.shuffle(task_ids)
-    split_idx = int(len(task_ids) * float(train_ratio))
-    train_ids = task_ids[:split_idx]
-    val_ids = task_ids[split_idx:]
-    return train_ids, val_ids
+    n = len(task_ids)
+    train_end = int(n * float(train_ratio))
+    test_start = n - int(n * float(test_ratio))
+    train_ids = task_ids[:train_end]
+    val_ids = task_ids[train_end:test_start]
+    test_ids = task_ids[test_start:]
+    return train_ids, val_ids, test_ids
 
 
 def get_prompt(task: Dict[str, Any], split: str = "instruct") -> str:

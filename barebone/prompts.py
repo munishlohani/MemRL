@@ -23,4 +23,26 @@ BAREBONE_ALFWORLD_USER_TEMPLATE = (
 )
 
 
-__all__ = ["BAREBONE_ALFWORLD_SYSTEM_PROMPT", "BAREBONE_ALFWORLD_USER_TEMPLATE"]
+# BigCodeBench is a single-step task (submit code, evaluate, done) -- there
+# is no interaction history or admissible-actions concept, so unlike the
+# ALFWorld prompt above there is no separate user template: the user
+# message is just the task prompt itself (see agent.py).
+BAREBONE_BCB_SYSTEM_PROMPT = (
+    "You are an expert Python programmer solving BigCodeBench coding tasks. "
+    "Generate clean, correct Python code.\n\n"
+    "Hard constraints for BigCodeBench:\n"
+    "- Do NOT change the required function signature, return type, or required exception types/messages.\n"
+    "- Do NOT wrap specific exceptions into generic ones; keep the exact exception class and message if specified.\n"
+    "- Import every module you use; remove unused imports; do not rely on implicit imports.\n"
+    "- Avoid broad try/except (e.g., `except Exception`) unless the task explicitly requires it.\n"
+    "- Avoid any network calls or extra file I/O beyond what the task specifies.\n"
+    "- Keep code deterministic: no randomness, time-based logic, or unnecessary logging.\n\n"
+    "Respond with your complete solution as a single fenced ```python code block, nothing else."
+)
+
+
+__all__ = [
+    "BAREBONE_ALFWORLD_SYSTEM_PROMPT",
+    "BAREBONE_ALFWORLD_USER_TEMPLATE",
+    "BAREBONE_BCB_SYSTEM_PROMPT",
+]

@@ -17,7 +17,13 @@ from __future__ import annotations
 
 from typing import Any, Optional, Sequence
 
-from prompts import BAREBONE_ALFWORLD_SYSTEM_PROMPT, BAREBONE_ALFWORLD_USER_TEMPLATE
+from memrl.bigcodebench_eval.bcb_adapter import extract_code_from_response
+
+from prompts import (
+    BAREBONE_ALFWORLD_SYSTEM_PROMPT,
+    BAREBONE_ALFWORLD_USER_TEMPLATE,
+    BAREBONE_BCB_SYSTEM_PROMPT,
+)
 
 
 class BarebonAgent:
@@ -80,4 +86,25 @@ class BarebonAgent:
         return action or "look"
 
 
-__all__ = ["BarebonAgent"]
+class BarebonBCBAgent:
+    """Single-call BigCodeBench agent: no memory, no history, no loop.
+
+    BigCodeBench is a single-step task (submit code, evaluate, done), so
+    unlike BarebonAgent there is no per-episode state to track across
+    calls -- one task prompt in, one code submission out.
+    """
+
+    def __init__(self, llm_provider: Any, *, system_prompt: str = BAREBONE_BCB_SYSTEM_PROMPT) -> None:
+        self.llm = llm_provider
+        self.system_prompt = system_prompt
+
+    def act(self, task_prompt: str) -> str:
+        messages = [
+            {"role": "system", "content": self.system_prompt},
+            {"role": "user", "content": task_prompt},
+        ]
+        response = self.llm.generate(messages=messages)
+        return extract_code_from_response(response)
+
+
+__all__ = ["BarebonAgent", "BarebonBCBAgent"]

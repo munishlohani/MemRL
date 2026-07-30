@@ -217,6 +217,7 @@ def _build_runner(cfg: MempConfig, *, config_path: Path, run_root: Path, run_id:
         batch_size=int(cfg.experiment.batch_size),
         max_steps=int(cfg.experiment.max_steps),
         llm_provider=llm_provider,
+        skill_budget_per_episode=cfg.experiment.skill_budget_per_episode,
         tensorboard_log_dir=str(tb_dir),
     )
 

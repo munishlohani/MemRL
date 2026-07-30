@@ -68,6 +68,7 @@ class EpisodeRunner(BaseEpisodeRunner):
         llm_provider: Optional[BaseLLM] = None,
         strategic_k: int = 3,
         max_skill_invocations: int = MAX_SKILL_INVOCATIONS,
+        skill_budget_per_episode: Optional[int] = None,
         tensorboard_log_dir: Optional[str] = None,
     ):
         self.agent = agent
@@ -122,6 +123,19 @@ class EpisodeRunner(BaseEpisodeRunner):
         # the agent can't spend its one real turn on repeated retrieval
         # attempts instead of ever submitting an answer.
         self.max_skill_invocations = max(0, int(max_skill_invocations))
+        # Per-EPISODE budget (all steps combined), distinct from
+        # max_skill_invocations above (which only bounds retries within a
+        # single _resolve_agent_turn call, i.e. per-step). None = unlimited.
+        # Static: starts at skill_budget_per_episode, decrements by 1 on
+        # each actual retrieval, and once it hits 0 stays there for the
+        # rest of the episode -- no regeneration. The agent is told its
+        # current remaining count every turn (see CustomAgent._build_messages)
+        # so it can pace itself instead of spending it all in the first few
+        # steps; that visibility is what's dynamic, not the budget itself.
+        self.skill_budget_per_episode = (
+            int(skill_budget_per_episode) if skill_budget_per_episode is not None else None
+        )
+        self._skill_budget_remaining: List[int] = []
 
         # run_dir defaults to a generic "episode" subtree (benchmark-neutral,
         # since this runner is shared across ALFWorld/BabyAI/HLE/etc.), but a
@@ -217,6 +231,10 @@ class EpisodeRunner(BaseEpisodeRunner):
             )
         self.pending_formations = []
         self.episode_rewards = [0.0 for _ in range(batch_size)]
+        self._skill_budget_remaining = [
+            self.skill_budget_per_episode if self.skill_budget_per_episode is not None else 0
+            for _ in range(batch_size)
+        ]
         episode_numbers = [self._next_episode_number() for _ in range(batch_size)]
         episode_candidate_buffers: List[List[Dict[str, Any]]] = [[] for _ in range(batch_size)]
         reward_histories = [[] for _ in range(batch_size)]
@@ -337,6 +355,7 @@ class EpisodeRunner(BaseEpisodeRunner):
                             episode_id=episode_ids[slot_idx],
                             active_strategic_node_id=active_strategic_node_id,
                             admissible_commands=admissible_commands,
+                            slot_idx=slot_idx,
                         )
                         action = action.strip() if isinstance(action, str) else ""
                         actions[slot_idx] = action or "look"
@@ -648,6 +667,57 @@ class EpisodeRunner(BaseEpisodeRunner):
         finally:
             self._close_tensorboard_writer()
 
+    def get_checkpoint_state(self) -> Dict[str, Any]:
+        """Serialize the cumulative, run-lifetime state that would otherwise
+        reset to zero every time a fresh EpisodeRunner is constructed (each
+        run_*.py invocation builds exactly one). The skill graph itself
+        needs no separate snapshot here -- MemoryService persists every
+        mutation straight to its sqlite db_path, so pointing a resumed run
+        at the same db_path already recovers the memory side; this method
+        only covers the runner's own progress/telemetry counters.
+        """
+        return {
+            "episode_counter": self._episode_counter,
+            "episodes_completed_cumulative": self._episodes_completed_cumulative,
+            "section_index": self._section_index,
+            "task_type_success_counts": dict(self._task_type_success_counts),
+            "task_type_total_counts": dict(self._task_type_total_counts),
+            "task_type_length_success": {
+                k: list(v) for k, v in self._task_type_length_success.items()
+            },
+            "task_type_length_failure": {
+                k: list(v) for k, v in self._task_type_length_failure.items()
+            },
+            "strategic_selection_counts": dict(self._strategic_selection_counts),
+            "cumulative_nodes_created": self._cumulative_nodes_created,
+            "cumulative_pruned_count": self._cumulative_pruned_count,
+            "cumulative_pruned_by_task_type": dict(self._cumulative_pruned_by_task_type),
+            "cumulative_sleep_action_counts": dict(self._cumulative_sleep_action_counts),
+        }
+
+    def load_checkpoint_state(self, state: Dict[str, Any]) -> None:
+        """Restore counters saved by get_checkpoint_state(). Call this once,
+        right after constructing a fresh EpisodeRunner and before the first
+        run() call, when resuming an interrupted experiment."""
+        self._episode_counter = int(state.get("episode_counter", self._episode_counter))
+        self._episodes_completed_cumulative = int(
+            state.get("episodes_completed_cumulative", self._episodes_completed_cumulative)
+        )
+        self._section_index = int(state.get("section_index", self._section_index))
+        self._task_type_success_counts = dict(state.get("task_type_success_counts") or {})
+        self._task_type_total_counts = dict(state.get("task_type_total_counts") or {})
+        self._task_type_length_success = {
+            k: list(v) for k, v in (state.get("task_type_length_success") or {}).items()
+        }
+        self._task_type_length_failure = {
+            k: list(v) for k, v in (state.get("task_type_length_failure") or {}).items()
+        }
+        self._strategic_selection_counts = dict(state.get("strategic_selection_counts") or {})
+        self._cumulative_nodes_created = int(state.get("cumulative_nodes_created", 0))
+        self._cumulative_pruned_count = int(state.get("cumulative_pruned_count", 0))
+        self._cumulative_pruned_by_task_type = dict(state.get("cumulative_pruned_by_task_type") or {})
+        self._cumulative_sleep_action_counts = dict(state.get("cumulative_sleep_action_counts") or {})
+
     def close(self) -> None:
         """Release the environment adapter's resources.
 
@@ -673,6 +743,7 @@ class EpisodeRunner(BaseEpisodeRunner):
         active_strategic_node_id: Optional[str],
         current_step: int,
         admissible_commands: Optional[Sequence[str]] = None,
+        skill_budget_remaining: Optional[float] = None,
     ) -> AgentDecision:
         for attempt in range(1, MAX_RETRIES + 1):
             try:
@@ -683,6 +754,7 @@ class EpisodeRunner(BaseEpisodeRunner):
                     active_strategic_node_id=active_strategic_node_id,
                     current_step=current_step,
                     admissible_commands=admissible_commands or [],
+                    skill_budget_remaining=skill_budget_remaining,
                 )
                 if isinstance(decision, (EnvActionDecision, SkillInvocationDecision)):
                     return decision
@@ -716,8 +788,17 @@ class EpisodeRunner(BaseEpisodeRunner):
         episode_id: str,
         active_strategic_node_id: Optional[str],
         admissible_commands: Optional[Sequence[str]] = None,
+        slot_idx: Optional[int] = None,
     ) -> tuple[str, Optional[MemoryRetrievalResult]]:
         latest_retrieval_result: Optional[MemoryRetrievalResult] = None
+
+        skill_budget_remaining: Optional[int] = None
+        if (
+            self.skill_budget_per_episode is not None
+            and slot_idx is not None
+            and slot_idx < len(self._skill_budget_remaining)
+        ):
+            skill_budget_remaining = self._skill_budget_remaining[slot_idx]
 
         for _ in range(self.max_skill_invocations + 1):
             history_messages = self._history_to_messages(history)
@@ -729,6 +810,7 @@ class EpisodeRunner(BaseEpisodeRunner):
                 active_strategic_node_id=active_strategic_node_id,
                 current_step=self.current_step,
                 admissible_commands=admissible_commands,
+                skill_budget_remaining=skill_budget_remaining,
             )
             history.append_message(decision.as_message())
 
@@ -749,6 +831,29 @@ class EpisodeRunner(BaseEpisodeRunner):
                         }
                     )
                     continue
+
+                if (
+                    self.skill_budget_per_episode is not None
+                    and slot_idx is not None
+                    and slot_idx < len(self._skill_budget_remaining)
+                    and self._skill_budget_remaining[slot_idx] < 1
+                ):
+                    history.append_message(
+                        {
+                            "role": "tool",
+                            "name": decision.skill_name or "memory_retrieval",
+                            "content": (
+                                f"Skill budget exhausted for this episode "
+                                f"({self.skill_budget_per_episode} memory_retrieval call(s) already used). "
+                                "Choose a direct environment action instead for the rest of the episode."
+                            ),
+                        }
+                    )
+                    continue
+
+                if slot_idx is not None and slot_idx < len(self._skill_budget_remaining):
+                    self._skill_budget_remaining[slot_idx] -= 1
+                    skill_budget_remaining = self._skill_budget_remaining[slot_idx]
 
                 query_override = None
                 for key in ("query", "query_text", "text"):

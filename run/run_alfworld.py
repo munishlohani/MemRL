@@ -16,6 +16,8 @@ from memrl.service.memory_service import MemoryService
 from memrl.agent.memp_agent import MempAgent
 from memrl.episode.agent_runner import EpisodeRunner
 from memrl.envs.alfworld_episode_adapter import AlfWorldEpisodeEnvAdapter
+from memrl.run.checkpoint_utils import load_checkpoint, save_epoch_checkpoint
+from memrl.run.training_summary import EpochStatsAccumulator, write_training_summary
 
 
 def setup_logging(project_root: Path, name: str):
@@ -111,6 +113,15 @@ def main():
             token_log_dir=str(log_dir),
         )
 
+        # Resuming from a checkpoint always reuses that checkpoint's skill
+        # DB (continuing the same graph is the whole point of resuming),
+        # taking priority over the reuse_skill_db/fresh-per-run choice below.
+        resume_state = None
+        if getattr(cfg.experiment, "ckpt_resume_enabled", False) and cfg.experiment.ckpt_resume_path:
+            resume_state = load_checkpoint(
+                cfg.experiment.ckpt_resume_path, cfg.experiment.ckpt_resume_epoch
+            )
+
         # Fresh skill DB per run by default -- cfg.memory.skill_db_path is a
         # single fixed path, so reusing it verbatim would silently carry
         # over (and keep growing) the entire memory graph from every prior
@@ -118,7 +129,9 @@ def main():
         # (typically alongside build_memory=false) to evaluate against a
         # specific already-built skill graph instead; skill_db_path=null
         # always falls back to the fresh per-run path.
-        if getattr(cfg.memory, "reuse_skill_db", False) and cfg.memory.skill_db_path:
+        if resume_state is not None:
+            db_path = Path(resume_state["db_path"])
+        elif getattr(cfg.memory, "reuse_skill_db", False) and cfg.memory.skill_db_path:
             db_path = Path(cfg.memory.skill_db_path)
             if not db_path.is_absolute():
                 db_path = (project_root / db_path).resolve()
@@ -180,14 +193,25 @@ def main():
             batch_size=int(cfg.experiment.batch_size),
             max_steps=int(cfg.experiment.max_steps),
             llm_provider=llm_provider,
+            skill_budget_per_episode=cfg.experiment.skill_budget_per_episode,
             tensorboard_log_dir=str(tb_dir),
         )
         logger.info("TensorBoard logs will be saved to %s", tb_dir)
+
+        resume_epoch_start = 0
+        if resume_state is not None:
+            runner.load_checkpoint_state(resume_state.get("runner_state") or {})
+            resume_epoch_start = int(resume_state.get("epoch", -1)) + 1
+            logger.info(
+                "Resumed runner state from checkpoint; continuing from epoch %s.",
+                resume_epoch_start + 1,
+            )
 
         if args.init_only:
             logger.info("EpisodeRunner + AlfWorldEpisodeEnvAdapter initialized; exiting due to --init-only.")
             return
 
+        epoch_summaries: list = []
         try:
             # Sections-per-epoch is the minimum number of full batch_size
             # sections needed to touch every game in the split at least
@@ -222,12 +246,19 @@ def main():
                 "Running %s epoch(s) x %s section(s) on ALFWorld via EpisodeRunner.",
                 num_epochs, sections_per_epoch,
             )
+            if resume_epoch_start >= num_epochs:
+                logger.info(
+                    "Checkpoint already covers all %s configured epoch(s); nothing to resume.",
+                    num_epochs,
+                )
             section_counter = 0
-            for epoch_idx in range(num_epochs):
+            for epoch_idx in range(resume_epoch_start, num_epochs):
                 env_adapter.reset_epoch_tracking()
+                epoch_stats = EpochStatsAccumulator()
                 for _ in range(sections_per_epoch):
                     summary = runner.run()
                     section_counter += 1
+                    epoch_stats.add_section(summary)
                     logger.info(
                         "Epoch %s section %s done: mean_reward=%.4f success_rate=%.4f steps=%.1f "
                         "duplicate_slots=%s formation=%s pruning=%s sleep=%s",
@@ -243,6 +274,9 @@ def main():
                     )
                     if args.smoke:
                         break
+                epoch_summaries.append(epoch_stats.finalize(epoch_idx + 1, runner))
+                if not args.smoke:
+                    save_epoch_checkpoint(run_dir, epoch_idx, runner, db_path)
                 if args.smoke:
                     break
         finally:
@@ -251,6 +285,7 @@ def main():
             # rebuild from scratch on the next reset(), losing its shuffled
             # game-cycling position and replaying the same game every section.
             runner.close()
+            write_training_summary(run_dir, epoch_summaries)
 
     except Exception as e:
         logger.error(f"An unhandled error occurred during the experiment: {e}", exc_info=True)

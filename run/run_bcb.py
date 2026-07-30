@@ -16,6 +16,8 @@ from memrl.service.memory_service import MemoryService
 from memrl.agent.bcb_agent import BCBAgent, BCB_SYSTEM_PROMPT
 from memrl.episode.agent_runner import EpisodeRunner
 from memrl.envs.bcb_episode_adapter import BCBEpisodeEnvAdapter
+from memrl.run.checkpoint_utils import load_checkpoint, save_epoch_checkpoint
+from memrl.run.training_summary import EpochStatsAccumulator, write_training_summary
 
 DEFAULT_SPLIT_FILES = {
     "hard": project_root / "configs" / "bigcodebench" / "splits" / "hard_seed42.json",
@@ -130,8 +132,19 @@ def main():
             token_log_dir=str(log_dir),
         )
 
+        # Resuming from a checkpoint always reuses that checkpoint's skill
+        # DB (continuing the same graph is the whole point of resuming),
+        # taking priority over the reuse_skill_db/fresh-per-run choice below.
+        resume_state = None
+        if getattr(cfg.experiment, "ckpt_resume_enabled", False) and cfg.experiment.ckpt_resume_path:
+            resume_state = load_checkpoint(
+                cfg.experiment.ckpt_resume_path, cfg.experiment.ckpt_resume_epoch
+            )
+
         # Same reuse_skill_db/skill_db_path/fresh-per-run pattern as run_alfworld.py.
-        if getattr(cfg.memory, "reuse_skill_db", False) and cfg.memory.skill_db_path:
+        if resume_state is not None:
+            db_path = Path(resume_state["db_path"])
+        elif getattr(cfg.memory, "reuse_skill_db", False) and cfg.memory.skill_db_path:
             db_path = Path(cfg.memory.skill_db_path)
             if not db_path.is_absolute():
                 db_path = (project_root / db_path).resolve()
@@ -194,6 +207,7 @@ def main():
             # retrieval call per task; here it's still the agent's own
             # choice whether to use it at all.
             max_skill_invocations=1,
+            skill_budget_per_episode=cfg.experiment.skill_budget_per_episode,
             tensorboard_log_dir=str(tb_dir),
         )
         logger.info("TensorBoard logs will be saved to %s", tb_dir)
@@ -235,6 +249,7 @@ def main():
                     max_steps=int(cfg.experiment.max_steps),
                     llm_provider=llm_provider,
                     max_skill_invocations=1,  # same one-retrieval-attempt cap as the train runner
+                    skill_budget_per_episode=cfg.experiment.skill_budget_per_episode,
                     tensorboard_log_dir=str(eval_tb_dir),
                 )
                 eval_runner.memory_config.build_memory = False
@@ -243,6 +258,15 @@ def main():
                     "Validation enabled: %s held-out task(s), %s section(s)/pass, every %s train section(s).",
                     num_val_tasks, num_val_sections, cfg.experiment.valid_interval,
                 )
+
+        resume_epoch_start = 0
+        if resume_state is not None:
+            runner.load_checkpoint_state(resume_state.get("runner_state") or {})
+            resume_epoch_start = int(resume_state.get("epoch", -1)) + 1
+            logger.info(
+                "Resumed runner state from checkpoint; continuing from epoch %s.",
+                resume_epoch_start + 1,
+            )
 
         if args.init_only:
             logger.info("EpisodeRunner + BCBEpisodeEnvAdapter initialized; exiting due to --init-only.")
@@ -342,6 +366,7 @@ def main():
                     total_success / total_episodes,
                 )
 
+        epoch_summaries: list = []
         try:
             num_tasks = env_adapter.num_tasks()
             # Sections-per-epoch mirrors run_alfworld.py's convention: the
@@ -360,12 +385,19 @@ def main():
                 "Running %s epoch(s) x %s section(s) over %s BCB train tasks (batch_size=%s).",
                 num_epochs, sections_per_epoch, num_tasks, cfg.experiment.batch_size,
             )
+            if resume_epoch_start >= num_epochs:
+                logger.info(
+                    "Checkpoint already covers all %s configured epoch(s); nothing to resume.",
+                    num_epochs,
+                )
             section_counter = 0
-            for epoch_idx in range(num_epochs):
+            for epoch_idx in range(resume_epoch_start, num_epochs):
                 env_adapter.reset_epoch_tracking()
+                epoch_stats = EpochStatsAccumulator()
                 for _ in range(sections_per_epoch):
                     summary = runner.run()
                     section_counter += 1
+                    epoch_stats.add_section(summary)
                     logger.info(
                         "Epoch %s section %s done: mean_reward=%.4f success_rate=%.4f steps=%.1f "
                         "formation=%s pruning=%s sleep=%s",
@@ -386,10 +418,14 @@ def main():
                         and section_counter % cfg.experiment.valid_interval == 0
                     ):
                         run_validation_pass(section_counter)
+                epoch_summaries.append(epoch_stats.finalize(epoch_idx + 1, runner))
+                if not args.smoke:
+                    save_epoch_checkpoint(run_dir, epoch_idx, runner, db_path)
                 if args.smoke:
                     break
         finally:
             runner.close()
+            write_training_summary(run_dir, epoch_summaries)
 
     except Exception as e:
         logger.error(f"An unhandled error occurred during the experiment: {e}", exc_info=True)

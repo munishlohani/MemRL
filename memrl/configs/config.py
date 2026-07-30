@@ -327,6 +327,23 @@ class ExperimentConfig(BaseModel):
         default="train", description="Control whether to only train or test"
     )
 
+    skill_budget_per_episode: Optional[int] = Field(
+        default=None,
+        description=(
+            "Static per-episode budget on total memory_retrieval skill "
+            "invocations (all steps combined, not per-step). None = "
+            "unlimited (current default, matches an 'always allowed to "
+            "retrieve' baseline). Decrements by 1 on each actual retrieval; "
+            "once it hits 0 it stays there for the rest of the episode -- "
+            "no regeneration. The agent is told its current remaining count "
+            "every turn (see CustomAgent._build_messages) so it can pace "
+            "itself instead of spending it all in the first few steps; that "
+            "visibility, not the budget mechanism, is what's dynamic here. "
+            "Once exhausted, further Skill: memory_retrieval decisions are "
+            "intercepted and the agent is told to act directly instead."
+        ),
+    )
+
     # BCB evaluation toggles (used only by run/run_bcb.py).
     bcb_run_validation: bool = Field(
         default=False,

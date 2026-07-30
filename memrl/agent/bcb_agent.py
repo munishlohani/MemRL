@@ -38,7 +38,7 @@ answering.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 from .base import AgentDecision, EnvActionDecision, SkillInvocationDecision
 from .custom_agent import CustomAgent
@@ -91,6 +91,7 @@ class BCBAgent(CustomAgent):
         history_messages: List[Dict[str, Any]],
         first_step: bool,
         admissible_commands: Sequence[str] = (),
+        skill_budget_remaining: Optional[int] = None,
     ) -> List[Dict[str, str]]:
         # observation duplicates task_description for BCB (the adapter sets
         # both to the same prompt string) and there is no admissible-actions
@@ -106,6 +107,14 @@ class BCBAgent(CustomAgent):
         messages = [{"role": "system", "content": self.system_prompt}]
 
         user_parts = [self.task_description.strip()]
+        # Low-value for BCB in practice (max_skill_invocations=1 already
+        # limits it to a single attempt), but included for consistency with
+        # CustomAgent's rendering since the runner passes this through
+        # regardless of benchmark.
+        if skill_budget_remaining is not None:
+            user_parts.append(
+                f"Remaining memory_retrieval budget this task: {skill_budget_remaining} call(s)."
+            )
         if history_messages:
             # Only present after this episode already invoked the memory
             # skill at least once (BCB's max_steps=1 means history_messages

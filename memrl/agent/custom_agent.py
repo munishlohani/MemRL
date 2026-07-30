@@ -66,6 +66,7 @@ class CustomAgent(BaseAgent):
             history_messages=history_messages,
             first_step=first_step,
             admissible_commands=kwargs.get("admissible_commands") or [],
+            skill_budget_remaining=kwargs.get("skill_budget_remaining"),
         )
         response = self._generate_response(messages)
         decision = self._parse_decision(response)
@@ -97,6 +98,7 @@ class CustomAgent(BaseAgent):
         history_messages: List[Dict[str, Any]],
         first_step: bool,
         admissible_commands: Sequence[str] = (),
+        skill_budget_remaining: Optional[int] = None,
     ) -> List[Dict[str, str]]:
         admissible_text = (
             "\n".join(f"- {command}" for command in admissible_commands)
@@ -105,6 +107,19 @@ class CustomAgent(BaseAgent):
         )
 
         skill_contract = self._render_memory_retrieval_contract()
+        # Tell the agent its live remaining budget so it can pace itself
+        # (e.g. save retrieval for a harder step) instead of spending a
+        # fixed budget in the first few turns out of habit. Static budget,
+        # no regeneration -- once it hits 0 it stays there for the rest of
+        # the episode, so the agent seeing the count matters even more.
+        if skill_contract and skill_budget_remaining is not None:
+            skill_contract = (
+                f"{skill_contract}\n\n"
+                f"Remaining memory_retrieval budget this episode: "
+                f"{skill_budget_remaining} call(s). Once exhausted you must act "
+                "directly for the rest of the episode -- use it when it "
+                "matters, not on every turn."
+            )
         system_content = (
             self.system_prompt.format(skill_contract=skill_contract)
             if "{skill_contract}" in self.system_prompt

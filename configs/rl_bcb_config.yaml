@@ -100,6 +100,7 @@ experiment:
 
   baseline_mode: null
   baseline_k: 10
+  skill_budget_per_episode: 5  # Static cap on total memory_retrieval calls per episode. Has no practical effect while max_skill_invocations=1 (run_bcb.py) already limits BCB to at most one retrieval attempt per task -- set for config parity/self-documentation with ALFWorld.
 
   output_dir: "./results"
   save_trajectories: true

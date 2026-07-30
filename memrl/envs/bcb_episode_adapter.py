@@ -10,6 +10,7 @@ Q-learning, sleep consolidation) with zero changes to EpisodeRunner itself.
 
 from __future__ import annotations
 
+import ast
 import logging
 from collections import Counter
 from typing import Any, Dict, List, Optional
@@ -32,6 +33,25 @@ def _shorten_text(text: Any, *, limit: int = 160) -> str:
     if len(value) <= limit:
         return value
     return value[: limit - 3] + "..."
+
+
+def _normalize_libs(raw: Any) -> List[str]:
+    """The shipped BigCodeBench JSONL stores `libs` as a stringified Python
+    list literal (e.g. "['random', 'itertools']"), not a real JSON array --
+    iterating it directly (`for lib in task["libs"]`) silently walks
+    individual characters instead of library names. Parse that back into
+    an actual list; already-a-list values (e.g. from a source that got
+    this right) pass through unchanged.
+    """
+    if isinstance(raw, str):
+        try:
+            parsed = ast.literal_eval(raw)
+        except Exception:
+            return []
+        raw = parsed
+    if isinstance(raw, (list, tuple)):
+        return [str(lib) for lib in raw]
+    return []
 
 
 class BCBEpisodeEnvAdapter(EpisodeEnvAdapter):
@@ -133,12 +153,12 @@ class BCBEpisodeEnvAdapter(EpisodeEnvAdapter):
         """
         freq: Counter[str] = Counter()
         for task in problems.values():
-            for lib in task.get("libs") or []:
-                freq[str(lib)] += 1
+            for lib in _normalize_libs(task.get("libs")):
+                freq[lib] += 1
 
         task_type_by_id: Dict[str, str] = {}
         for task_id, task in problems.items():
-            libs = [str(lib) for lib in (task.get("libs") or [])]
+            libs = _normalize_libs(task.get("libs"))
             if not libs:
                 task_type_by_id[task_id] = "stdlib"
                 continue
@@ -216,7 +236,7 @@ class BCBEpisodeEnvAdapter(EpisodeEnvAdapter):
                     "task_description": prompt,
                     "task_type": self._task_type_by_id.get(task_id, "stdlib"),
                     "entry_point": task.get("entry_point", ""),
-                    "libs": list(task.get("libs") or []),
+                    "libs": _normalize_libs(task.get("libs")),
                     "phase": self._phase,
                     "duplicate": is_duplicate,
                 }

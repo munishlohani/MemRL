@@ -1,4 +1,9 @@
-# Example config for running LifelongAgentBench (LLB) with MemRL.
+# Example config for running LifelongAgentBench (LLB) with MemRL, via the
+# same agentic two-tier EpisodeRunner used by ALFWorld/BigCodeBench
+# (run/run_llb.py + memrl/envs/llb_episode_adapter.py). The prior
+# memrl/run/llb_rl_runner.py ("LLBRunner") is gone -- it called MemoryService
+# methods (mos_config_path, update_values, add_memories, save_checkpoint_snapshot,
+# ...) that don't exist on this branch's skill-graph MemoryService.
 #
 # NOTE:
 # - Put private values (API keys / internal endpoints) in `configs/rl_llb_config.local.yaml` (gitignored).
@@ -38,7 +43,7 @@ memory:  # Memory system settings (strategies + thresholds).
   update_strategy: "adjustment"         # How to update memory values: vanilla | validation | adjustment.
 
   # Retrieval / add thresholds
-  k_retrieve: 10                     # How many memories to retrieve per query (wired to LLBRunner.retrieve_k).
+  k_retrieve: 10                     # How many memories to retrieve per query (EpisodeRunner's retrieve_k).
   max_keywords: 8                   # Keyword count for avefact strategy / keyword extraction.
   confidence_threshold: 0.0         # Min similarity threshold (used by some retrieval modes).
   memory_confidence: 100.0          # Default confidence score for new memories (used by some builders).
@@ -46,13 +51,18 @@ memory:  # Memory system settings (strategies + thresholds).
   n_sleep: 10
   lambda_base: 1e-3  # Base decay rate for tactical nodes (spec sweep range [1e-4, 1e-2] log-scale).
 
-  # MemOS
-  mos_config_path: "configs/mos_config.json"  # MemOS config path (NOTE: run/run_llb.py overrides this at runtime).
+  # MemOS (dead: kept for schema completeness/compatibility, matching
+  # rl_bcb_config.yaml -- this branch's MemoryService is the skill-graph
+  # implementation, constructed from skill_db_path/reuse_skill_db below, not mos_config_path).
+  mos_config_path: "configs/mos_config.json"
   user_id: "llb_memrl_os_seed42"        # Stable user_id used to partition physical memory storage.
   sim_norm_mean: 0.39                      # Similarity normalization mean (0 = disabled/identity in most setups).
   sim_norm_std: 0.14                       # Similarity normalization std (0 = disabled/identity in most setups).
  # - LLB db_bench: mean = 0.2747681439, std = 0.1127030626
  # - LLB os_interaction: mean = 0.3895803988, std = 0.1428813934
+  # reuse_skill_db/skill_db_path: not set here (defaults: reuse_skill_db=false,
+  # skill_db_path=null) -- run_llb.py falls back to a fresh per-run skill DB
+  # path unless you set both, same convention as rl_alf_config.yaml/rl_bcb_config.yaml.
 environment:  # Environment settings (mostly for ALFWorld; unused for LLB).
   # Unused for LLB runs (kept here for schema completeness).
   alfworld_config_path: "configs/base_config.yaml"  # ALFWorld env config (unused for LLB).
@@ -75,19 +85,14 @@ experiment:  # Experiment / runner settings.
   trace_sample_filter: null
 
 
-  # -------- LLB retrieval scoring normalization --------
-  # LLB only: controls how retrieval candidates are ranked when RL/value-driven is enabled.
-  # - true  => z-score normalize similarity and q before hybrid scoring (default)
-  # - false => use raw similarity and raw q (closer to memory_rl legacy behavior)
+  # -------- LLB retrieval scoring knobs (DEAD on this branch) --------
+  # These three fields are schema-legal (extra="forbid" doesn't reject them)
+  # but have no effect here: they were retrieval-scoring knobs for the old
+  # MemoryService's hybrid similarity+Q formula, and nothing in this
+  # branch's skill-graph MemoryService reads them. Kept for schema
+  # completeness, matching the mos_config_path precedent above.
   llb_use_z_score_normalization: true
-
-  # -------- LLB q_floor (optional) --------
-  # LLB only: if set, clamp Q values to at least this value (applied during both Q update and retrieval scoring).
-  # Set to 0.0 to effectively disable.
   llb_q_floor: 0.0
-
-  # -------- LLB Phase-B task_id de-dup (optional) --------
-  # LLB only: when selecting the final top-k memories, deduplicate by task_id (fallback sample_index/id).
   llb_dedup_by_task_id: false
 
 
@@ -139,6 +144,7 @@ experiment:  # Experiment / runner settings.
   # Baselines (optional)
   baseline_mode: null          # passk | reflection (null disables baseline mode).
   baseline_k: 10               # Baseline rounds (k) for pass@k / reflection baseline.
+  skill_budget_per_episode: 5  # Static cap on total memory_retrieval calls per episode -- matches ALFWorld/BCB.
 
   # Output / logging
   output_dir: "./results"      # Output dir (NOTE: LLBRunner also writes to results/llb/exp_* timestamp dirs).

@@ -57,10 +57,7 @@ For each turn, choose exactly one branch:
 
 If you invoke the skill, the runtime will append a tool message with retrieved context and ask you again. Do not emit both a skill call and a code submission in the same turn. You may invoke the skill at most once per task -- use your other turn to submit code.
 
-You may receive retrieved memory context with past experiences from similar problems -- references for learning, not guaranteed solutions:
-- [MEMORY TYPE] SUCCESS_PROCEDURE: a successful approach from a similar task -- learn the implementation pattern.
-- [MEMORY TYPE] FAILURE_REFLECTION: a failed attempt with lessons -- avoid similar mistakes.
-Use them as inspiration, but always analyze the current task independently.
+You may receive retrieved memory context: a past procedure from a similar problem, offered as a reference pattern -- not a guaranteed solution, and not tagged by outcome (this memory system only ever stores successful procedures, never a labeled record of what failed). Treat it as a possible starting point, adapt it to the current task's exact signature/requirements, and always verify it independently rather than trusting it blindly.
 
 Hard constraints for BigCodeBench:
 - Do NOT change the required function signature, return type, or required exception types/messages.

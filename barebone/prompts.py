@@ -33,8 +33,33 @@ BAREBONE_BCB_SYSTEM_PROMPT = (
 )
 
 
+# LifelongBench (LLB) is multi-turn like ALFWorld (running interaction
+# history + current observation each turn), but has no admissible-actions
+# list -- DB/OS actions are free-form SQL/bash, not a fixed command set.
+# The STRICT OUTPUT FORMAT block is reused verbatim from
+# memrl.lifelongbench_eval.prompts (not duplicated here): it's the exact
+# grammar contract the vendored Task.interact()'s own parser depends on
+# (Action:/Act: + a fenced sql/bash block), so getting it wrong isn't a
+# style choice, it's a correctness bug. Only the memory-context section of
+# that module's DEFAULT_SYSTEM_PROMPT is dropped -- this is the no-memory
+# baseline, so there is never anything to retrieve.
+BAREBONE_LLB_SYSTEM_PROMPT_BASE = (
+    "You are an execution-focused AI agent solving database and "
+    "operating-system tasks. Take exactly one "
+    "action per turn."
+)
+
+BAREBONE_LLB_USER_TEMPLATE = (
+    "Task:\n{objective}\n\n"
+    "Interaction history so far:\n{history}\n\n"
+    "Current observation:\n{current_obs}"
+)
+
+
 __all__ = [
     "BAREBONE_ALFWORLD_SYSTEM_PROMPT",
     "BAREBONE_ALFWORLD_USER_TEMPLATE",
     "BAREBONE_BCB_SYSTEM_PROMPT",
+    "BAREBONE_LLB_SYSTEM_PROMPT_BASE",
+    "BAREBONE_LLB_USER_TEMPLATE",
 ]

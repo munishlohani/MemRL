@@ -18,11 +18,14 @@ from __future__ import annotations
 from typing import Any, Optional, Sequence
 
 from memrl.bigcodebench_eval.bcb_adapter import extract_code_from_response
+from memrl.lifelongbench_eval.prompts import llb_strict_output_constraint_for_task
 
 from prompts import (
     BAREBONE_ALFWORLD_SYSTEM_PROMPT,
     BAREBONE_ALFWORLD_USER_TEMPLATE,
     BAREBONE_BCB_SYSTEM_PROMPT,
+    BAREBONE_LLB_SYSTEM_PROMPT_BASE,
+    BAREBONE_LLB_USER_TEMPLATE,
 )
 
 
@@ -107,4 +110,55 @@ class BarebonBCBAgent:
         return extract_code_from_response(response)
 
 
-__all__ = ["BarebonAgent", "BarebonBCBAgent"]
+class BarebonLLBAgent:
+    """LifelongBench (LLB) agent: no memory, multi-turn like BarebonAgent,
+    but with no admissible-actions list (DB/OS actions are free-form
+    SQL/bash, not a fixed command set) and no action-line extraction.
+
+    The vendored Task.interact() does its OWN parsing of the raw response
+    text (its "STRICT OUTPUT FORMAT" grammar -- Action:/Act: + a fenced
+    sql/bash block), so act() returns the model's full response untouched,
+    the same way memrl.agent.llb_agent.LLBAgent forwards it for the
+    memory-augmented pipeline: there is exactly one place that decides
+    what's a valid action (the vendored parser), not two that could drift.
+    """
+
+    def __init__(self, llm_provider: Any, *, task: str) -> None:
+        self.llm = llm_provider
+        constraint = llb_strict_output_constraint_for_task(task)
+        self.system_prompt = (
+            f"{BAREBONE_LLB_SYSTEM_PROMPT_BASE}\n\n{constraint}" if constraint else BAREBONE_LLB_SYSTEM_PROMPT_BASE
+        )
+        self.task_description = ""
+        self._history_text = ""
+        self._last_action: Optional[str] = None
+
+    def reset(self, task_description: str = "") -> None:
+        self.task_description = task_description
+        self._history_text = ""
+        self._last_action = None
+
+    def act(self, observation: str) -> str:
+        # Same convention as BarebonAgent: the result of the PREVIOUS
+        # action (this turn's observation) completes that step's history
+        # entry, recorded before building this turn's prompt.
+        if self._last_action is not None:
+            self._history_text += f"{self._last_action}\nObservation: {observation}\n"
+
+        user_content = BAREBONE_LLB_USER_TEMPLATE.format(
+            objective=self.task_description,
+            history=self._history_text.strip() or "(none yet)",
+            current_obs=observation,
+        )
+        messages = [
+            {"role": "system", "content": self.system_prompt},
+            {"role": "user", "content": user_content},
+        ]
+
+        response = self.llm.generate(messages=messages)
+        action = (response or "").strip()
+        self._last_action = action
+        return action
+
+
+__all__ = ["BarebonAgent", "BarebonBCBAgent", "BarebonLLBAgent"]

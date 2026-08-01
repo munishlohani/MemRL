@@ -28,7 +28,6 @@ BAREBONE_ALFWORLD_USER_TEMPLATE = (
 # ALFWorld prompt above there is no separate user template: the user
 # message is just the task prompt itself (see agent.py).
 BAREBONE_BCB_SYSTEM_PROMPT = (
-    "You are an expert Python programmer solving BigCodeBench coding tasks. "
     "Generate clean, correct Python code.\n\n"
     "Respond with your complete solution as a single fenced ```python code block, nothing else."
 )

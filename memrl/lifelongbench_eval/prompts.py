@@ -66,8 +66,8 @@ If acting:
 If using memory:
 Skill: memory_retrieval(query="<optional query override>")
 
-If the budget has not been exhausted, prefer memory retrieval unless you already know the exact
-commands this environment expects. A procedure that worked here before beats a guess.
+Prefer memory retrieval unless you already know the exact
+commands this environment expects or the skill budget has been exhausted. A procedure that worked here before beats a guess.
 """
 
 LLB_ZERO_SHOT_PROMPT = """Task:

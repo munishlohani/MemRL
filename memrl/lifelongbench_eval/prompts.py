@@ -60,11 +60,14 @@ Current observation:
 
 Choose the next step.
 
+If acting:
+<the Act:/Action: directive exactly as specified in the output-format block>
+
 If using memory:
 Skill: memory_retrieval(query="<optional query override>")
 
-If acting:
-<the Act:/Action: directive exactly as specified in the output-format block>
+On the first turn of a task, prefer memory retrieval unless you already know the exact
+commands this environment expects. A procedure that worked here before beats a guess.
 """
 
 LLB_ZERO_SHOT_PROMPT = """Task:

@@ -77,18 +77,27 @@ class LLBAgent(CustomAgent):
         del first_step, admissible_commands
 
         skill_contract = self._render_memory_retrieval_contract()
-        # Budget note rides along with the contract in the SYSTEM message and
-        # carries the same pacing guidance CustomAgent gives ALFWorld -- a
-        # bare count in the user turn reads as a restriction rather than an
-        # invitation, and the two benchmarks should frame it identically.
+        # Budget note rides along with the contract in the SYSTEM message,
+        # like CustomAgent does for ALFWorld. The wording deliberately
+        # DIVERGES from ALFWorld's "use it when it matters, not on every
+        # turn": at skill_budget_per_episode=1 that phrasing is vacuous (it
+        # cannot be used on every turn) and functions purely as a hoarding
+        # signal -- the agent saves its single call for a moment that never
+        # arrives and the episode ends with the budget unspent.
         if skill_contract and skill_budget_remaining is not None:
-            skill_contract = (
-                f"{skill_contract}\n\n"
-                f"Remaining memory_retrieval budget this episode: "
-                f"{skill_budget_remaining} call(s). Once exhausted you must act "
-                "directly for the rest of the episode -- use it when it "
-                "matters, not on every turn."
-            )
+            if skill_budget_remaining > 0:
+                budget_note = (
+                    f"You have {skill_budget_remaining} memory_retrieval call(s) available "
+                    "this episode. An unused call is wasted -- there is no benefit to "
+                    "ending the episode with budget left over, so spend it on the step "
+                    "where a past procedure would help most."
+                )
+            else:
+                budget_note = (
+                    "Your memory_retrieval budget for this episode is used up. Act "
+                    "directly for the rest of the episode."
+                )
+            skill_contract = f"{skill_contract}\n\n{budget_note}"
         system_content = build_llb_system_prompt(task=self.task_type, base_prompt=self.system_prompt)
         if "{skill_contract}" in system_content:
             system_content = system_content.format(skill_contract=skill_contract)

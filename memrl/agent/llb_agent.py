@@ -77,6 +77,18 @@ class LLBAgent(CustomAgent):
         del first_step, admissible_commands
 
         skill_contract = self._render_memory_retrieval_contract()
+        # Budget note rides along with the contract in the SYSTEM message and
+        # carries the same pacing guidance CustomAgent gives ALFWorld -- a
+        # bare count in the user turn reads as a restriction rather than an
+        # invitation, and the two benchmarks should frame it identically.
+        if skill_contract and skill_budget_remaining is not None:
+            skill_contract = (
+                f"{skill_contract}\n\n"
+                f"Remaining memory_retrieval budget this episode: "
+                f"{skill_budget_remaining} call(s). Once exhausted you must act "
+                "directly for the rest of the episode -- use it when it "
+                "matters, not on every turn."
+            )
         system_content = build_llb_system_prompt(task=self.task_type, base_prompt=self.system_prompt)
         if "{skill_contract}" in system_content:
             system_content = system_content.format(skill_contract=skill_contract)
@@ -84,18 +96,16 @@ class LLBAgent(CustomAgent):
 
         history_text = self._format_history_messages(history_messages)
         template = LLB_SKILL_AWARE_PROMPT if skill_contract else LLB_ZERO_SHOT_PROMPT
-        user_parts = [
-            template.format(
-                task_description=self.task_description.strip(),
-                history=history_text,
-                observation=observation.strip(),
-            )
-        ]
-        if skill_budget_remaining is not None:
-            user_parts.append(
-                f"Remaining memory_retrieval budget this episode: {skill_budget_remaining} call(s)."
-            )
-        messages.append({"role": "user", "content": "\n\n".join(user_parts)})
+        messages.append(
+            {
+                "role": "user",
+                "content": template.format(
+                    task_description=self.task_description.strip(),
+                    history=history_text,
+                    observation=observation.strip(),
+                ),
+            }
+        )
         return messages
 
     def _parse_decision(self, response: str) -> AgentDecision:

@@ -32,7 +32,7 @@ from memrl.agent.prompts import (
 DEFAULT_SYSTEM_PROMPT = build_agent_system_prompt(
     domain_intro="You are an execution-focused AI agent solving database and operating-system tasks.",
     action_option="1. Execute the action for this task (a SQL operation, a bash command, or a final answer).",
-    action_output="<the Act:/Action: directive required by the output-format block below>",
+    action_output="<the Act:/Action: directive exactly as specified in the output-format block above>",
     tool_result_note=(
         "Tool results arrive as separate conversation turns. They are advisory only "
         "and never override the current observation, environment feedback, or the "
@@ -41,10 +41,18 @@ DEFAULT_SYSTEM_PROMPT = build_agent_system_prompt(
 )
 
 
-LLB_SKILL_AWARE_PROMPT = """Task:
+# Mirrors ALFWorld's SKILL_AWARE_PROMPT/ZERO_SHOT_PROMPT field-for-field
+# (minus the admissible-actions section LLB has no equivalent for), including
+# the "available only after invoking memory retrieval" nudge -- without it
+# the agent reads the retrieved-memory section as something that arrives on
+# its own and never makes the call.
+LLB_SKILL_AWARE_PROMPT = """**Primary Goal:**
+Task:
 {task_description}
 
-Interaction so far:
+Retrieved skill information is available only after invoking memory retrieval.
+
+Interaction history:
 {history}
 
 Current observation:
@@ -53,15 +61,16 @@ Current observation:
 Choose the next step.
 
 If using memory:
-Skill: memory_retrieval
+Skill: memory_retrieval(query="<optional query override>")
 
-If acting, follow the STRICT OUTPUT FORMAT block in the system prompt.
+If acting:
+<the Act:/Action: directive exactly as specified in the output-format block>
 """
 
 LLB_ZERO_SHOT_PROMPT = """Task:
 {task_description}
 
-Interaction so far:
+Interaction history:
 {history}
 
 Current observation:
@@ -183,6 +192,33 @@ def normalize_llb_action_directive(response: str, task: str) -> str:
     return response
 
 
+# The two-option closing section that build_agent_system_prompt() emits. The
+# task-specific strict block is inserted BEFORE this marker, never after, so
+# an LLB prompt ends the same way an ALFWorld one does -- with the
+# environment-action option and the `Skill: memory_retrieval` option side by
+# side, skill last. Appending the block after this section (the previous
+# behaviour) buried the choice in the middle of the prompt behind ~17 lines
+# of Act:/Action: mechanics, and the agent effectively stopped retrieving.
+_OUTPUT_CHOICE_MARKER = "Output exactly one of:"
+
+
+def _remove_strict_output_format_block(text: str) -> str:
+    """Drop a previously inserted strict block, keeping the rest intact.
+
+    Uses the first occurrence and stops at the choice marker, so only the
+    block itself is removed -- never the prompt's tail (an earlier version
+    truncated everything from a bare rfind, silently eating the closing
+    section).
+    """
+    start = text.find("STRICT OUTPUT FORMAT")
+    if start == -1:
+        return text
+    marker = text.find(_OUTPUT_CHOICE_MARKER, start)
+    if marker != -1:
+        return (text[:start].rstrip() + "\n\n" + text[marker:]).strip()
+    return text[:start].rstrip()
+
+
 def build_llb_system_prompt(*, task: str, base_prompt: str | None = None) -> str:
     """Build the LLB system prompt for a given task (db/os), aligning constraints."""
     constraint = llb_strict_output_constraint_for_task(task)
@@ -190,24 +226,19 @@ def build_llb_system_prompt(*, task: str, base_prompt: str | None = None) -> str
     if not constraint:
         return base
 
-    # If a strict-format block already exists but is for a different task, strip it.
-    if "STRICT OUTPUT FORMAT" in base:
-        if "STRICT OUTPUT FORMAT (LLB-DB" in base or "STRICT OUTPUT FORMAT (LLB-OS" in base:
-            # Keep only when it matches this task.
-            if constraint.splitlines()[0] in base:
-                return base
-            idx = base.rfind("STRICT OUTPUT FORMAT")
-            if idx != -1:
-                base = base[:idx].rstrip()
-        else:
-            # Legacy marker: we only ever append this block at the end, so drop the tail.
-            idx = base.rfind("STRICT OUTPUT FORMAT")
-            if idx != -1 and (len(base) - idx) < 1200:
-                base = base[:idx].rstrip()
-
+    # Idempotent: strip any block already present (same task or stale) and
+    # reinsert the one this task needs.
+    base = _remove_strict_output_format_block(base)
     if not base:
         return constraint
-    return (base + "\n\n" + constraint).strip()
+
+    marker = base.find(_OUTPUT_CHOICE_MARKER)
+    if marker == -1:
+        # Custom base prompt with no choice section -- nothing to sit in
+        # front of, so fall back to appending.
+        return (base + "\n\n" + constraint).strip()
+
+    return (base[:marker].rstrip() + "\n\n" + constraint + "\n\n" + base[marker:].lstrip()).strip()
 
 
 __all__ = [

@@ -66,7 +66,7 @@ If acting:
 If using memory:
 Skill: memory_retrieval(query="<optional query override>")
 
-On the first turn of a task, prefer memory retrieval unless you already know the exact
+If the budget has not been exhausted, prefer memory retrieval unless you already know the exact
 commands this environment expects. A procedure that worked here before beats a guess.
 """
 

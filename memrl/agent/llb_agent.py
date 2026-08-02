@@ -88,9 +88,7 @@ class LLBAgent(CustomAgent):
             if skill_budget_remaining > 0:
                 budget_note = (
                     f"You have {skill_budget_remaining} memory_retrieval call(s) available "
-                    "this episode. An unused call is wasted -- there is no benefit to "
-                    "ending the episode with budget left over, so spend it on the step "
-                    "where a past procedure would help most."
+                    "this episode. An unused call is wasted. Use when a previous experience would help most"
                 )
             else:
                 budget_note = (

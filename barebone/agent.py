@@ -125,7 +125,12 @@ class BarebonLLBAgent:
 
     def __init__(self, llm_provider: Any, *, task: str) -> None:
         self.llm = llm_provider
-        constraint = llb_strict_output_constraint_for_task(task)
+        # include_memory_branch=False: this is the no-memory baseline and has
+        # no skill mechanism. With the memory branch left in, the model can
+        # emit `Skill: memory_retrieval`, which run_llb_barebone.py forwards
+        # verbatim to the vendored parser -- no Act:/Action: line, so the
+        # episode dies as AGENT_VALIDATION_FAILED.
+        constraint = llb_strict_output_constraint_for_task(task, include_memory_branch=False)
         self.system_prompt = (
             f"{BAREBONE_LLB_SYSTEM_PROMPT_BASE}\n\n{constraint}" if constraint else BAREBONE_LLB_SYSTEM_PROMPT_BASE
         )

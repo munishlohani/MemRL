@@ -14,8 +14,15 @@ from memrl.providers.base import BaseLLM
 import logging
 
 
+# One contract per benchmark, named for it: ALFWORLD_SKILL.md,
+# BCB_SKILL.md, LLB_SKILL.md. Each runner passes its own via
+# EpisodeRunner(skill_contract_path=...). ALFWorld's doubles as the
+# fallback for callers that don't specify one (tests, ad-hoc scripts).
 _SKILL_DOC_DIR = Path(__file__).resolve().parent / "memory_retrieval_skill"
-_DEFAULT_SKILL_DOC_PATH = _SKILL_DOC_DIR / "SKILL.md"
+ALFWORLD_SKILL_DOC_PATH = _SKILL_DOC_DIR / "ALFWORLD_SKILL.md"
+BCB_SKILL_DOC_PATH = _SKILL_DOC_DIR / "BCB_SKILL.md"
+LLB_SKILL_DOC_PATH = _SKILL_DOC_DIR / "LLB_SKILL.md"
+_DEFAULT_SKILL_DOC_PATH = ALFWORLD_SKILL_DOC_PATH
 logger = logging.getLogger(__name__)
 
 
@@ -311,4 +318,7 @@ class MemoryRetrievalSkill:
 __all__ = [
     "MemoryRetrievalResult",
     "MemoryRetrievalSkill",
+    "ALFWORLD_SKILL_DOC_PATH",
+    "BCB_SKILL_DOC_PATH",
+    "LLB_SKILL_DOC_PATH",
 ]

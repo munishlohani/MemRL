@@ -16,6 +16,7 @@ from memrl.service.memory_service import MemoryService
 from memrl.agent.bcb_agent import BCBAgent, BCB_SYSTEM_PROMPT
 from memrl.episode.agent_runner import EpisodeRunner
 from memrl.envs.bcb_episode_adapter import BCBEpisodeEnvAdapter
+from memrl.skills.memory_retrieval import BCB_SKILL_DOC_PATH
 from memrl.run.checkpoint_utils import load_checkpoint, save_epoch_checkpoint
 from memrl.run.training_summary import EpochStatsAccumulator, write_training_summary
 
@@ -24,9 +25,7 @@ DEFAULT_SPLIT_FILES = {
     "full": project_root / "configs" / "bigcodebench" / "splits" / "full_seed123.json",
 }
 
-BCB_SKILL_CONTRACT_PATH = str(
-    project_root / "memrl" / "skills" / "memory_retrieval_skill" / "BCB_SKILL.md"
-)
+BCB_SKILL_CONTRACT_PATH = str(BCB_SKILL_DOC_PATH)
 
 
 def setup_logging(project_root: Path, name: str):

@@ -1,4 +1,6 @@
-"""Standalone system prompt for the barebone ALFWorld runner.
+"""Standalone system prompts for the barebone (no-memory) runners.
+
+Covers all three benchmarks -- ALFWorld, BigCodeBench, and LifelongBench.
 
 Plain LLM baseline: no ReAct, no memory, no skill invocation, no retrieval
 mechanism. Exactly two messages per turn (system + user) -- the user
@@ -6,6 +8,12 @@ message is built fresh each call from Task/Interaction-history/Current
 observation/Admissible actions fields (see agent.py), not an accumulating
 chat message list. "Interaction history so far" is rendered as plain text
 inside that single user message.
+
+Each benchmark's system prompt opens by stating the domain the agent is
+operating in, then the one hard output rule. Keep that shape when editing:
+the barebone baseline is compared head-to-head against the memory-enabled
+agents, so a prompt that is asymmetrically weaker than its siblings turns
+a measured memory effect into a prompt-quality confound.
 """
 
 BAREBONE_ALFWORLD_SYSTEM_PROMPT = (
@@ -44,8 +52,8 @@ BAREBONE_BCB_SYSTEM_PROMPT = (
 # that module's DEFAULT_SYSTEM_PROMPT is dropped -- this is the no-memory
 # baseline, so there is never anything to retrieve.
 BAREBONE_LLB_SYSTEM_PROMPT_BASE = (
- "Take exactly one "
-    "action per turn."
+    "You are an execution-focused AI agent solving database and "
+    "operating-system tasks. Take exactly one action per turn."
 )
 
 BAREBONE_LLB_USER_TEMPLATE = (

@@ -17,10 +17,9 @@ from memrl.episode.agent_runner import EpisodeRunner
 from memrl.envs.llb_episode_adapter import LLBEpisodeEnvAdapter
 from memrl.run.checkpoint_utils import load_checkpoint, save_epoch_checkpoint
 from memrl.run.training_summary import EpochStatsAccumulator, write_training_summary
+from memrl.skills.memory_retrieval import LLB_SKILL_DOC_PATH
 
-LLB_SKILL_CONTRACT_PATH = str(
-    project_root / "memrl" / "skills" / "memory_retrieval_skill" / "LLB_SKILL.md"
-)
+LLB_SKILL_CONTRACT_PATH = str(LLB_SKILL_DOC_PATH)
 
 
 def setup_logging(project_root: Path, name: str):

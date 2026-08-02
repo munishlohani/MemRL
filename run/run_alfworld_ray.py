@@ -24,6 +24,7 @@ from memrl.envs.alfworld_episode_adapter import AlfWorldEpisodeEnvAdapter
 from memrl.providers.embedding import OpenAIEmbedder
 from memrl.providers.llm import OpenAILLM
 from memrl.service.memory_service import MemoryService
+from memrl.skills.memory_retrieval import ALFWORLD_SKILL_DOC_PATH
 
 
 def setup_logging(project_root: Path, name: str) -> None:
@@ -219,6 +220,7 @@ def _build_runner(cfg: MempConfig, *, config_path: Path, run_root: Path, run_id:
         llm_provider=llm_provider,
         skill_budget_per_episode=cfg.experiment.skill_budget_per_episode,
         tensorboard_log_dir=str(tb_dir),
+        skill_contract_path=str(ALFWORLD_SKILL_DOC_PATH),
     )
 
 

@@ -23,15 +23,14 @@ to the agent; that separation is the whole point of the EpisodeEnvAdapter
 abstraction).
 
 Task-type-aware system prompt: memrl/lifelongbench_eval/prompts.py's
-build_llb_system_prompt() already appends the correct DB/OS "STRICT OUTPUT
-FORMAT" block and is reused verbatim. memory_context.py/sanitize.py are
-NOT reused here: they were built for LLB's old always-retrieve-upfront
-design (bucket memories into the system prompt before the episode starts).
-This branch's memory retrieval is agent-invoked (Skill: memory_retrieval,
-same as ALFWorld/BCB) -- retrieved content arrives as a tool message in
-conversation history, not as a pre-formatted system-prompt block, so those
-two legacy helpers don't fit this architecture and are intentionally left
-untouched/unused by this port.
+build_llb_system_prompt() already appends the correct DB/OS strict
+output-format block and is reused verbatim. LLB's old
+always-retrieve-upfront helpers (memory_context.py/sanitize.py, which
+bucketed memories into the system prompt before the episode started) were
+deleted along with that design: memory retrieval here is agent-invoked
+(Skill: memory_retrieval, same as ALFWorld/BCB), so retrieved content
+arrives as a tool message in conversation history rather than as a
+pre-formatted system-prompt block.
 """
 
 from __future__ import annotations

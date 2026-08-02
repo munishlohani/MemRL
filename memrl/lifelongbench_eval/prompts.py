@@ -21,14 +21,22 @@ from memrl.agent.prompts import (
 # {skill_contract} slot (filled from LLB_SKILL.md), the skill-aware/
 # zero-shot user-prompt split, and the strategic-scaffold-selection JSON
 # contract are the exact same mechanism across all three benchmarks.
+#
+# CAREFUL: nothing in this constant may contain the literal phrase
+# "STRICT OUTPUT FORMAT". build_llb_system_prompt() below locates an
+# already-appended constraint block with a bare rfind("STRICT OUTPUT
+# FORMAT") and truncates everything from that offset -- so the phrase
+# appearing in the base prompt silently eats this prompt's own tail (it
+# previously severed the action-output line mid-phrase and swallowed the
+# trailing "Skill: memory_retrieval" option). Say "output-format" instead.
 DEFAULT_SYSTEM_PROMPT = build_agent_system_prompt(
     domain_intro="You are an execution-focused AI agent solving database and operating-system tasks.",
     action_option="1. Execute the action for this task (a SQL operation, a bash command, or a final answer).",
-    action_output="<the Act:/Action: directive required by the STRICT OUTPUT FORMAT block below>",
+    action_output="<the Act:/Action: directive required by the output-format block below>",
     tool_result_note=(
         "Tool results arrive as separate conversation turns. They are advisory only "
         "and never override the current observation, environment feedback, or the "
-        "STRICT OUTPUT FORMAT contract for this task."
+        "required output-format contract for this task."
     ),
 )
 
@@ -105,10 +113,6 @@ STRICT OUTPUT FORMAT (LLB-OS, do not violate):
 3) If Act: finish, it must be the last line (no code blocks, no extra text).
 4) Do NOT use `Action:` in OS tasks (use `Act:` only).
 """.strip()
-
-
-# Backward-compatible alias (historically this constant existed and was DB-oriented).
-LLB_STRICT_OUTPUT_FORMAT_CONSTRAINT = LLB_DB_STRICT_OUTPUT_FORMAT_CONSTRAINT
 
 
 _DB_TASK_ALIASES = ("db", "db_bench", "db_bench_tts", "db_bench_resume")
@@ -196,47 +200,6 @@ def build_llb_system_prompt(*, task: str, base_prompt: str | None = None) -> str
     return (base + "\n\n" + constraint).strip()
 
 
-def strip_llb_strict_output_format_block(text: str) -> str:
-    """Strip a trailing LLB strict-output-format block from a prompt, if present."""
-    s = (text or "").strip()
-    if not s:
-        return s
-
-    idx = s.rfind("STRICT OUTPUT FORMAT")
-    if idx == -1:
-        return s
-
-    # Conservative: only strip when the marker is near the end.
-    if (len(s) - idx) > 2000:
-        return s
-
-    return s[:idx].rstrip()
-
-
-def build_llb_prompt_with_memory(
-    *,
-    task: str,
-    base_prompt: str | None = None,
-    memory_context: str | None = None,
-) -> str:
-    """Build the final LLB prompt with memory injected.
-
-    Ordering:
-      1) system prompt
-      2) [Retrieved Memory Context] (optional)
-      3) STRICT OUTPUT FORMAT block at the very end (task-aligned)
-    """
-    base = (base_prompt if base_prompt is not None else DEFAULT_SYSTEM_PROMPT).strip()
-    base = strip_llb_strict_output_format_block(base)
-
-    mem = (memory_context or "").strip()
-    combined = base
-    if mem:
-        combined = f"{base}\n\n{mem}".strip()
-
-    return build_llb_system_prompt(task=task, base_prompt=combined)
-
-
 __all__ = [
     "DEFAULT_SYSTEM_PROMPT",
     "LLB_SKILL_AWARE_PROMPT",
@@ -244,11 +207,8 @@ __all__ = [
     "LLB_STRATEGIC_SELECTION_SYSTEM_PROMPT",
     "LLB_DB_STRICT_OUTPUT_FORMAT_CONSTRAINT",
     "LLB_OS_STRICT_OUTPUT_FORMAT_CONSTRAINT",
-    "LLB_STRICT_OUTPUT_FORMAT_CONSTRAINT",
     "llb_strict_output_constraint_for_task",
     "normalize_llb_action_directive",
     "build_llb_system_prompt",
-    "strip_llb_strict_output_format_block",
-    "build_llb_prompt_with_memory",
 ]
 

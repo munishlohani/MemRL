@@ -16,6 +16,7 @@ from memrl.service.memory_service import MemoryService
 from memrl.agent.memp_agent import MempAgent
 from memrl.episode.agent_runner import EpisodeRunner
 from memrl.envs.alfworld_episode_adapter import AlfWorldEpisodeEnvAdapter
+from memrl.skills.memory_retrieval import ALFWORLD_SKILL_DOC_PATH
 from memrl.run.checkpoint_utils import load_checkpoint, save_epoch_checkpoint
 from memrl.run.training_summary import EpochStatsAccumulator, write_training_summary
 
@@ -195,6 +196,7 @@ def main():
             llm_provider=llm_provider,
             skill_budget_per_episode=cfg.experiment.skill_budget_per_episode,
             tensorboard_log_dir=str(tb_dir),
+            skill_contract_path=str(ALFWORLD_SKILL_DOC_PATH),
         )
         logger.info("TensorBoard logs will be saved to %s", tb_dir)
 

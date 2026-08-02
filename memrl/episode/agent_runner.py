@@ -138,6 +138,13 @@ class EpisodeRunner(BaseEpisodeRunner):
             int(skill_budget_per_episode) if skill_budget_per_episode is not None else None
         )
         self._skill_budget_remaining: List[int] = []
+        # Per-slot retrieval bookkeeping, surfaced on the episode record.
+        # Without it the only evidence a retrieval happened is a pair of INFO
+        # lines from MemoryRetrievalSkill, and a budget-refused invocation
+        # emits nothing at all -- making "the agent never retrieved" and "the
+        # agent asked but was refused" indistinguishable after the fact.
+        self._skill_retrievals: List[int] = []
+        self._skill_refused_budget: List[int] = []
 
         # run_dir defaults to a generic "episode" subtree (benchmark-neutral,
         # since this runner is shared across ALFWorld/BabyAI/HLE/etc.), but a
@@ -237,6 +244,8 @@ class EpisodeRunner(BaseEpisodeRunner):
             self.skill_budget_per_episode if self.skill_budget_per_episode is not None else 0
             for _ in range(batch_size)
         ]
+        self._skill_retrievals = [0 for _ in range(batch_size)]
+        self._skill_refused_budget = [0 for _ in range(batch_size)]
         episode_numbers = [self._next_episode_number() for _ in range(batch_size)]
         episode_candidate_buffers: List[List[Dict[str, Any]]] = [[] for _ in range(batch_size)]
         reward_histories = [[] for _ in range(batch_size)]
@@ -594,6 +603,16 @@ class EpisodeRunner(BaseEpisodeRunner):
                         "done": done_flags[slot_idx],
                         "active_strategic_node_id": active_strategic_node_ids[slot_idx],
                         "active_strategic_node_summary": strategic_selection_summaries[slot_idx],
+                        "memory_retrievals": (
+                            self._skill_retrievals[slot_idx]
+                            if slot_idx < len(self._skill_retrievals)
+                            else 0
+                        ),
+                        "memory_retrievals_refused_budget": (
+                            self._skill_refused_budget[slot_idx]
+                            if slot_idx < len(self._skill_refused_budget)
+                            else 0
+                        ),
                     }
                 )
 
@@ -840,6 +859,18 @@ class EpisodeRunner(BaseEpisodeRunner):
                     and slot_idx < len(self._skill_budget_remaining)
                     and self._skill_budget_remaining[slot_idx] < 1
                 ):
+                    if slot_idx is not None and slot_idx < len(self._skill_refused_budget):
+                        self._skill_refused_budget[slot_idx] += 1
+                    # Logged explicitly: this path returns without calling
+                    # retrieve(), so it otherwise leaves no trace and looks
+                    # identical to the agent never asking.
+                    logger.info(
+                        "Memory retrieval refused (budget exhausted): episode_id=%s step=%s "
+                        "budget=%s",
+                        episode_id,
+                        self.current_step,
+                        self.skill_budget_per_episode,
+                    )
                     history.append_message(
                         {
                             "role": "tool",
@@ -876,6 +907,8 @@ class EpisodeRunner(BaseEpisodeRunner):
                         query_override=query_override,
                     )
                     latest_retrieval_result = retrieval_result
+                    if slot_idx is not None and slot_idx < len(self._skill_retrievals):
+                        self._skill_retrievals[slot_idx] += 1
                     history.append_message(
                         retrieval_result.to_tool_message(skill_name=decision.skill_name)
                     )

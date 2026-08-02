@@ -96,78 +96,45 @@ LLB_STRATEGIC_SELECTION_SYSTEM_PROMPT = build_strategic_selection_system_prompt(
 )
 
 
-# The memory branch is OPT-IN. The barebone (no-memory) runner shares these
-# blocks but has no skill mechanism at all: if it emits
-# `Skill: memory_retrieval`, run_llb_barebone.py forwards that text straight
-# to the vendored parser, which finds no Act:/Action: line and fails the
-# episode. Offering a branch the caller cannot service silently corrupts the
-# no-memory baseline, so callers without retrieval must build these with
-# include_memory_branch=False.
-def _llb_strict_constraint(*, kind: str, include_memory_branch: bool) -> str:
-    if kind == "db":
-        label, directives = "LLB-DB", "`Action: Operation` or `Action: Answer`"
-        body = (
-            "1) Include exactly ONE action line:\n"
-            "   - Action: Operation\n"
-            "   - Action: Answer\n"
-            "2) If Action: Operation, put exactly ONE SQL statement in the FIRST fenced code block using ```sql, on a single line. Do not add any extra text after that block.\n"
-            "3) If Action: Answer, include `Final Answer: ...` on the next line and do not add extra text after that."
-        )
-        next_rule = "4"
-    else:
-        label, directives = "LLB-OS", "`Act: bash` or `Act: finish`"
-        body = (
-            "1) Include exactly ONE action line:\n"
-            "   - Act: bash\n"
-            "   - Act: finish\n"
-            "2) If Act: bash, the next lines MUST be a ```bash fenced code block with your Bash commands. Do not include any other code blocks.\n"
-            "3) If Act: finish, it must be the last line (no code blocks, no extra text).\n"
-            "4) Do NOT use `Action:` in OS tasks (use `Act:` only)."
-        )
-        next_rule = "5"
-
-    action_word = "Action:" if kind == "db" else "Act:"
-
-    if include_memory_branch:
-        rule0 = (
-            "0) MANDATORY ON EVERY SINGLE TURN, WITH NO EXCEPTIONS: end your response with EXACTLY ONE\n"
-            "   of these two branches:\n"
-            f"     (a) ENVIRONMENT ACTION -- a literal {directives} line; or\n"
-            f"     (b) MEMORY LOOKUP -- a literal `Skill: memory_retrieval` line, with NO `{action_word}` line.\n"
-            "   A response containing NEITHER branch is REJECTED and the episode ENDS IN FAILURE. Never\n"
-            "   emit both branches in the same turn. This applies on turn 1 just as much as on later\n"
-            "   turns -- do not spend a turn only reasoning or only restating the task."
-        )
-        body = body.replace("1) Include exactly ONE action line:", "1) For branch (a), include exactly ONE action line:")
-        tail = (
-            f"\n{next_rule}) For branch (b), write `Skill: memory_retrieval` (or\n"
-            '   `Skill: memory_retrieval(query="...")`) with nothing after it and no code block. The\n'
-            "   runtime answers with a tool message and prompts you again; you then take branch (a)."
-        )
-    else:
-        rule0 = (
-            f"0) MANDATORY ON EVERY SINGLE TURN, WITH NO EXCEPTIONS: your response MUST contain a literal\n"
-            f"   {directives} line. A response without one is REJECTED and the episode ENDS IN FAILURE.\n"
-            "   This applies on turn 1 just as much as on later turns -- do not spend a turn only\n"
-            "   reasoning or only restating the task."
-        )
-        tail = ""
-
-    return f"STRICT OUTPUT FORMAT ({label}, do not violate):\n{rule0}\n{body}{tail}".strip()
+LLB_DB_STRICT_OUTPUT_FORMAT_CONSTRAINT = """
+STRICT OUTPUT FORMAT (LLB-DB, do not violate):
+0) MANDATORY ON EVERY SINGLE TURN, WITH NO EXCEPTIONS: end your response with EXACTLY ONE
+   of these two branches:
+     (a) ENVIRONMENT ACTION -- a literal `Action: Operation` or `Action: Answer` line; or
+     (b) MEMORY LOOKUP -- a literal `Skill: memory_retrieval` line, with NO `Action:` line.
+   A response containing NEITHER branch is REJECTED and the episode ENDS IN FAILURE. Never
+   emit both branches in the same turn. This applies on turn 1 just as much as on later
+   turns -- do not spend a turn only reasoning or only restating the task.
+1) For branch (a), include exactly ONE action line:
+   - Action: Operation
+   - Action: Answer
+2) If Action: Operation, put exactly ONE SQL statement in the FIRST fenced code block using ```sql, on a single line. Do not add any extra text after that block.
+3) If Action: Answer, include `Final Answer: ...` on the next line and do not add extra text after that.
+4) For branch (b), write `Skill: memory_retrieval` (or
+   `Skill: memory_retrieval(query="...")`) with nothing after it and no code block. The
+   runtime answers with a tool message and prompts you again; you then take branch (a).
+""".strip()
 
 
-LLB_DB_STRICT_OUTPUT_FORMAT_CONSTRAINT = _llb_strict_constraint(
-    kind="db", include_memory_branch=True
-)
-LLB_OS_STRICT_OUTPUT_FORMAT_CONSTRAINT = _llb_strict_constraint(
-    kind="os", include_memory_branch=True
-)
-LLB_DB_STRICT_OUTPUT_FORMAT_CONSTRAINT_NO_MEMORY = _llb_strict_constraint(
-    kind="db", include_memory_branch=False
-)
-LLB_OS_STRICT_OUTPUT_FORMAT_CONSTRAINT_NO_MEMORY = _llb_strict_constraint(
-    kind="os", include_memory_branch=False
-)
+LLB_OS_STRICT_OUTPUT_FORMAT_CONSTRAINT = """
+STRICT OUTPUT FORMAT (LLB-OS, do not violate):
+0) MANDATORY ON EVERY SINGLE TURN, WITH NO EXCEPTIONS: end your response with EXACTLY ONE
+   of these two branches:
+     (a) ENVIRONMENT ACTION -- a literal `Act: bash` or `Act: finish` line; or
+     (b) MEMORY LOOKUP -- a literal `Skill: memory_retrieval` line, with NO `Act:` line.
+   A response containing NEITHER branch is REJECTED and the episode ENDS IN FAILURE. Never
+   emit both branches in the same turn. This applies on turn 1 just as much as on later
+   turns -- do not spend a turn only reasoning or only restating the task.
+1) For branch (a), include exactly ONE action line:
+   - Act: bash
+   - Act: finish
+2) If Act: bash, the next lines MUST be a ```bash fenced code block with your Bash commands. Do not include any other code blocks.
+3) If Act: finish, it must be the last line (no code blocks, no extra text).
+4) Do NOT use `Action:` in OS tasks (use `Act:` only).
+5) For branch (b), write `Skill: memory_retrieval` (or
+   `Skill: memory_retrieval(query="...")`) with nothing after it and no code block. The
+   runtime answers with a tool message and prompts you again; you then take branch (a).
+""".strip()
 
 
 _DB_TASK_ALIASES = ("db", "db_bench", "db_bench_tts", "db_bench_resume")
@@ -184,30 +151,14 @@ def _llb_task_kind(task: str) -> str | None:
     return None
 
 
-def llb_strict_output_constraint_for_task(
-    task: str, *, include_memory_branch: bool = True
-) -> str | None:
-    """Return the task-aligned strict output format constraint block.
-
-    include_memory_branch=False omits the `Skill: memory_retrieval` option --
-    required for callers with no retrieval mechanism (the barebone runner),
-    which would otherwise be invited to emit a directive that fails the
-    episode.
-    """
+def llb_strict_output_constraint_for_task(task: str) -> str | None:
+    """Return the task-aligned strict output format constraint block."""
     kind = _llb_task_kind(task)
-    if kind is None:
-        return None
-    if include_memory_branch:
-        return (
-            LLB_DB_STRICT_OUTPUT_FORMAT_CONSTRAINT
-            if kind == "db"
-            else LLB_OS_STRICT_OUTPUT_FORMAT_CONSTRAINT
-        )
-    return (
-        LLB_DB_STRICT_OUTPUT_FORMAT_CONSTRAINT_NO_MEMORY
-        if kind == "db"
-        else LLB_OS_STRICT_OUTPUT_FORMAT_CONSTRAINT_NO_MEMORY
-    )
+    if kind == "db":
+        return LLB_DB_STRICT_OUTPUT_FORMAT_CONSTRAINT
+    if kind == "os":
+        return LLB_OS_STRICT_OUTPUT_FORMAT_CONSTRAINT
+    return None
 
 
 _OS_ACT_RE = re.compile(r"Act:\s*\S")

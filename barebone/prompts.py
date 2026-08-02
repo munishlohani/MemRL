@@ -44,17 +44,64 @@ BAREBONE_BCB_SYSTEM_PROMPT = (
 # LifelongBench (LLB) is multi-turn like ALFWorld (running interaction
 # history + current observation each turn), but has no admissible-actions
 # list -- DB/OS actions are free-form SQL/bash, not a fixed command set.
-# The STRICT OUTPUT FORMAT block is reused verbatim from
-# memrl.lifelongbench_eval.prompts (not duplicated here): it's the exact
-# grammar contract the vendored Task.interact()'s own parser depends on
-# (Action:/Act: + a fenced sql/bash block), so getting it wrong isn't a
-# style choice, it's a correctness bug. Only the memory-context section of
-# that module's DEFAULT_SYSTEM_PROMPT is dropped -- this is the no-memory
-# baseline, so there is never anything to retrieve.
+#
+# The output-format blocks below are defined HERE rather than imported from
+# memrl.lifelongbench_eval.prompts. That module's blocks describe a second
+# branch, `Skill: memory_retrieval`, because the memory-augmented agent can
+# take it. This runner has no skill contract and no retrieval mechanism at
+# all: run_llb_barebone.py forwards the model's raw response straight to the
+# vendored parser, so a `Skill:` line would arrive with no Act:/Action:
+# directive and fail the episode outright.
+#
+# The tradeoff of duplicating is drift: this grammar must keep matching the
+# vendored Task.interact() parser (Act:/Action: + a fenced bash/sql block).
+# tests/test_llb_prompts.py pins that, so drift fails the suite rather than
+# silently corrupting the baseline.
 BAREBONE_LLB_SYSTEM_PROMPT_BASE = (
     "You are an execution-focused AI agent solving database and "
     "operating-system tasks. Take exactly one action per turn."
 )
+
+BAREBONE_LLB_OS_OUTPUT_FORMAT = """
+STRICT OUTPUT FORMAT (LLB-OS, do not violate):
+0) MANDATORY ON EVERY SINGLE TURN, WITH NO EXCEPTIONS: your response MUST contain a literal
+   `Act: bash` or `Act: finish` line. A response without one is REJECTED and the episode
+   ENDS IN FAILURE. This applies on turn 1 just as much as on later turns -- do not spend a
+   turn only reasoning or only restating the task.
+1) Include exactly ONE action line:
+   - Act: bash
+   - Act: finish
+2) If Act: bash, the next lines MUST be a ```bash fenced code block with your Bash commands. Do not include any other code blocks.
+3) If Act: finish, it must be the last line (no code blocks, no extra text).
+4) Do NOT use `Action:` in OS tasks (use `Act:` only).
+""".strip()
+
+BAREBONE_LLB_DB_OUTPUT_FORMAT = """
+STRICT OUTPUT FORMAT (LLB-DB, do not violate):
+0) MANDATORY ON EVERY SINGLE TURN, WITH NO EXCEPTIONS: your response MUST contain a literal
+   `Action: Operation` or `Action: Answer` line. A response without one is REJECTED and the
+   episode ENDS IN FAILURE. This applies on turn 1 just as much as on later turns -- do not
+   spend a turn only reasoning or only restating the task.
+1) Include exactly ONE action line:
+   - Action: Operation
+   - Action: Answer
+2) If Action: Operation, put exactly ONE SQL statement in the FIRST fenced code block using ```sql, on a single line. Do not add any extra text after that block.
+3) If Action: Answer, include `Final Answer: ...` on the next line and do not add extra text after that.
+""".strip()
+
+_BAREBONE_LLB_DB_ALIASES = ("db", "db_bench", "db_bench_tts", "db_bench_resume")
+_BAREBONE_LLB_OS_ALIASES = ("os", "os_interaction", "os_interaction_tts", "os_interaction_resume")
+
+
+def barebone_llb_output_format(task: str) -> str | None:
+    """Task-aligned output-format block for the no-memory LLB runner."""
+    t = (task or "").strip().lower()
+    if t in _BAREBONE_LLB_DB_ALIASES:
+        return BAREBONE_LLB_DB_OUTPUT_FORMAT
+    if t in _BAREBONE_LLB_OS_ALIASES:
+        return BAREBONE_LLB_OS_OUTPUT_FORMAT
+    return None
+
 
 BAREBONE_LLB_USER_TEMPLATE = (
     "Task:\n{objective}\n\n"
@@ -68,5 +115,8 @@ __all__ = [
     "BAREBONE_ALFWORLD_USER_TEMPLATE",
     "BAREBONE_BCB_SYSTEM_PROMPT",
     "BAREBONE_LLB_SYSTEM_PROMPT_BASE",
+    "BAREBONE_LLB_OS_OUTPUT_FORMAT",
+    "BAREBONE_LLB_DB_OUTPUT_FORMAT",
+    "barebone_llb_output_format",
     "BAREBONE_LLB_USER_TEMPLATE",
 ]

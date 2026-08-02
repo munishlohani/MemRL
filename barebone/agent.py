@@ -18,7 +18,6 @@ from __future__ import annotations
 from typing import Any, Optional, Sequence
 
 from memrl.bigcodebench_eval.bcb_adapter import extract_code_from_response
-from memrl.lifelongbench_eval.prompts import llb_strict_output_constraint_for_task
 
 from prompts import (
     BAREBONE_ALFWORLD_SYSTEM_PROMPT,
@@ -26,6 +25,7 @@ from prompts import (
     BAREBONE_BCB_SYSTEM_PROMPT,
     BAREBONE_LLB_SYSTEM_PROMPT_BASE,
     BAREBONE_LLB_USER_TEMPLATE,
+    barebone_llb_output_format,
 )
 
 
@@ -121,16 +121,16 @@ class BarebonLLBAgent:
     the same way memrl.agent.llb_agent.LLBAgent forwards it for the
     memory-augmented pipeline: there is exactly one place that decides
     what's a valid action (the vendored parser), not two that could drift.
+
+    The output-format block comes from barebone/prompts.py, NOT from
+    memrl.lifelongbench_eval.prompts: this agent has no skill contract, so
+    it must never be shown the `Skill: memory_retrieval` branch that the
+    memory-augmented blocks describe.
     """
 
     def __init__(self, llm_provider: Any, *, task: str) -> None:
         self.llm = llm_provider
-        # include_memory_branch=False: this is the no-memory baseline and has
-        # no skill mechanism. With the memory branch left in, the model can
-        # emit `Skill: memory_retrieval`, which run_llb_barebone.py forwards
-        # verbatim to the vendored parser -- no Act:/Action: line, so the
-        # episode dies as AGENT_VALIDATION_FAILED.
-        constraint = llb_strict_output_constraint_for_task(task, include_memory_branch=False)
+        constraint = barebone_llb_output_format(task)
         self.system_prompt = (
             f"{BAREBONE_LLB_SYSTEM_PROMPT_BASE}\n\n{constraint}" if constraint else BAREBONE_LLB_SYSTEM_PROMPT_BASE
         )

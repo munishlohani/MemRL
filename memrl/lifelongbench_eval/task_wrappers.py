@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import os
 import sys
 import json
@@ -70,6 +71,59 @@ def ensure_standard_prompts() -> str:
     return str(standard_dir)
 
 
+# Fields the shipped LLB dataset JSONs store as Python-repr strings (e.g.
+# "{'command_name': 'bash', ...}") instead of real nested JSON objects --
+# a data-export artifact upstream, not something the vendored
+# OSInteraction/DBBench task classes tolerate: they json.load() the file
+# directly and immediately dict-subscript or pydantic-validate these
+# fields, so a string there is a hard failure (pydantic ValidationError
+# for OS, a bare TypeError for DB) before any Docker/container work even
+# starts.
+_STRINGIFIED_FIELDS_BY_TASK = {
+    "os": ("initialization_command_item", "evaluation_info", "skill_list"),
+    "db": ("answer_info", "table_info", "skill_list"),
+}
+
+
+def _normalize_dataset_file(data_file_path: str, task_kind: str) -> str:
+    """Parse Python-repr-string fields back into real dicts/lists and write
+    a normalized copy alongside the original (reused on later calls if the
+    source file hasn't changed since). Returns the original path unchanged
+    if nothing needed fixing.
+    """
+    fields = _STRINGIFIED_FIELDS_BY_TASK.get(task_kind)
+    if not fields:
+        return data_file_path
+
+    src = Path(data_file_path)
+    cache_path = src.with_name(f"{src.stem}.normalized{src.suffix}")
+    if cache_path.exists() and cache_path.stat().st_mtime >= src.stat().st_mtime:
+        return str(cache_path)
+
+    with open(src, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    changed = False
+    for entry in data.values():
+        if not isinstance(entry, dict):
+            continue
+        for field in fields:
+            value = entry.get(field)
+            if isinstance(value, str):
+                try:
+                    entry[field] = ast.literal_eval(value)
+                    changed = True
+                except (ValueError, SyntaxError):
+                    pass
+
+    if not changed:
+        return data_file_path
+
+    with open(cache_path, "w", encoding="utf-8") as f:
+        json.dump(data, f)
+    return str(cache_path)
+
+
 def build_task(
     task: str,
     data_file_path: str,
@@ -103,7 +157,7 @@ def build_task(
         task_obj = DBBench(
             task_name=tname,
             chat_history_item_factory=factory,
-            data_file_path=data_file_path,
+            data_file_path=_normalize_dataset_file(data_file_path, "db"),
             max_round=max_round,
         )
         return task_obj, tname
@@ -126,7 +180,7 @@ def build_task(
         task_obj = OSInteraction(
             task_name=tname,
             chat_history_item_factory=factory,
-            data_file_path=data_file_path,
+            data_file_path=_normalize_dataset_file(data_file_path, "os"),
             max_round=max_round,
             command_execution_timeout=os_timeout,
         )

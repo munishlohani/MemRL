@@ -70,6 +70,7 @@ class EpisodeRunner(BaseEpisodeRunner):
         max_skill_invocations: int = MAX_SKILL_INVOCATIONS,
         skill_budget_per_episode: Optional[int] = None,
         tensorboard_log_dir: Optional[str] = None,
+        skill_contract_path: Optional[str] = None,
     ):
         self.agent = agent
         self.memory_service = memory_service
@@ -100,6 +101,7 @@ class EpisodeRunner(BaseEpisodeRunner):
             llm_provider=llm_provider,
             retrieve_k=retrieve_k,
             rl_config=self.rl_config,
+            contract_path=skill_contract_path,
         )
         if hasattr(self.agent, "memory_retrieval_skill"):
             try:
@@ -1688,11 +1690,23 @@ class EpisodeRunner(BaseEpisodeRunner):
             chosen_id = self._coerce_optional_strategy_id(candidate)
             return chosen_id, self._strategy_summary(candidate)
 
+        # Each benchmark's agent subclass can define its own domain-flavored
+        # scaffold-selection prompts (e.g. BCBAgent/LLBAgent) via the
+        # strategic_selection_system_prompt/_user_prompt class attributes
+        # (memrl/agent/custom_agent.py); fall back to ALFWorld's original
+        # wording for any agent that doesn't define them.
+        strategic_selection_system_prompt = getattr(
+            self.agent, "strategic_selection_system_prompt", None
+        ) or agent_prompts.STRATEGIC_SELECTION_SYSTEM_PROMPT
+        strategic_selection_user_prompt = getattr(
+            self.agent, "strategic_selection_user_prompt", None
+        ) or agent_prompts.STRATEGIC_SELECTION_USER_PROMPT
+
         prompt_messages = [
-            {"role": "system", "content": agent_prompts.STRATEGIC_SELECTION_SYSTEM_PROMPT},
+            {"role": "system", "content": strategic_selection_system_prompt},
             {
                 "role": "user",
-                "content": agent_prompts.STRATEGIC_SELECTION_USER_PROMPT.format(
+                "content": strategic_selection_user_prompt.format(
                     task_description=task_description,
                     task_type=task_type,
                     observation=observation,

@@ -44,8 +44,7 @@ BAREBONE_BCB_SYSTEM_PROMPT = (
 # that module's DEFAULT_SYSTEM_PROMPT is dropped -- this is the no-memory
 # baseline, so there is never anything to retrieve.
 BAREBONE_LLB_SYSTEM_PROMPT_BASE = (
-    "You are an execution-focused AI agent solving database and "
-    "operating-system tasks. Take exactly one "
+ "Take exactly one "
     "action per turn."
 )
 

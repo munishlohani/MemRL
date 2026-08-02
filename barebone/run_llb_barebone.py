@@ -27,6 +27,7 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 from memrl.envs.llb_episode_adapter import _latest_observation
+from memrl.lifelongbench_eval.prompts import normalize_llb_action_directive
 from memrl.lifelongbench_eval.task_wrappers import (
     ChatHistoryItem,
     Role,
@@ -112,7 +113,7 @@ def run_one_episode(
 
     try:
         while session.sample_status == SampleStatus.RUNNING:
-            response = agent.act(observation)
+            response = normalize_llb_action_directive(agent.act(observation), task)
             session.chat_history.inject(ChatHistoryItem(role=Role.AGENT, content=response))
             task_obj.interact(session)
             steps += 1

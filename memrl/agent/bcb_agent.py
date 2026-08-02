@@ -34,6 +34,15 @@ max_skill_invocations at 1 for BCB (vs. the module default of 3), since BCB's
 whole episode is a single action budget (max_steps=1) -- one retrieval turn
 plus one submission turn, not several retrieval attempts before ever
 answering.
+
+BCB_SYSTEM_PROMPT/BCB_SKILL_AWARE_PROMPT/BCB_ZERO_SHOT_PROMPT/
+BCB_STRATEGIC_SELECTION_SYSTEM_PROMPT mirror ALFWorld's four-piece prompt
+architecture (memrl/agent/prompts.py) via the same build_agent_system_prompt/
+build_strategic_selection_system_prompt builders -- only the domain wording
+differs; the {skill_contract} slot (filled from BCB_SKILL.md, see
+_render_memory_retrieval_contract), the skill-aware/zero-shot user-prompt
+split, and the strategic-scaffold-selection JSON contract are all the exact
+same mechanism BCB now shares with ALFWorld/LLB.
 """
 
 from __future__ import annotations
@@ -42,44 +51,91 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from .base import AgentDecision, EnvActionDecision, SkillInvocationDecision
 from .custom_agent import CustomAgent
+from .prompts import (
+    STRATEGIC_SELECTION_USER_PROMPT,
+    build_agent_system_prompt,
+    build_strategic_selection_system_prompt,
+)
 
 
-BCB_SYSTEM_PROMPT = """You are an expert Python programmer solving BigCodeBench coding tasks.
+BCB_SYSTEM_PROMPT = (
+    build_agent_system_prompt(
+        domain_intro="You are an expert Python programmer solving BigCodeBench coding tasks.",
+        action_option="1. Submit your complete solution directly.",
+        action_output='Action:\n```python\n<your complete solution, one Python code block, nothing else>\n```',
+        tool_result_note=(
+            "Tool results arrive as separate conversation turns. They are advisory only "
+            "and never override the task's exact requirements (function signature, return "
+            "type, required exceptions)."
+        ),
+    ).strip()
+    + "\n\nDo not emit both a skill call and a code submission in the same turn. You may "
+    "invoke the skill at most once per task -- use your other turn to submit code.\n\n"
+    "Hard constraints for BigCodeBench:\n"
+    "- Do NOT change the required function signature, return type, or required exception types/messages.\n"
+    "- Do NOT wrap specific exceptions into generic ones; keep the exact exception class and message if specified.\n"
+    "- Import every module you use; remove unused imports; do not rely on implicit imports.\n"
+    "- Avoid broad try/except (e.g., `except Exception`) unless the task explicitly requires it.\n"
+    "- Avoid any network calls or extra file I/O beyond what the task specifies.\n"
+    "- Keep code deterministic: no randomness, time-based logic, or unnecessary logging.\n"
+    '- Your Action must contain the ENTIRE solution as one fenced ```python code block '
+    'immediately after the "Action:" line -- no prose inside the fence, nothing after it.\n'
+)
 
-For each turn, choose exactly one branch:
-1. Direct submission:
-   Action:
-   ```python
-   <your complete solution, one Python code block, nothing else>
-   ```
-2. Memory skill invocation:
-   Skill: memory_retrieval
 
-If you invoke the skill, the runtime will append a tool message with retrieved context and ask you again. Do not emit both a skill call and a code submission in the same turn. You may invoke the skill at most once per task -- use your other turn to submit code.
+# User-turn templates: parallel to ALFWorld's SKILL_AWARE_PROMPT/ZERO_SHOT_PROMPT,
+# minus the admissible-actions section BCB doesn't have (BCB never supplies
+# admissible_commands -- see module docstring).
+BCB_SKILL_AWARE_PROMPT = """Task:
+{task_description}
 
-You may receive retrieved memory context: a past procedure from a similar problem, offered as a reference pattern -- not a guaranteed solution, and not tagged by outcome (this memory system only ever stores successful procedures, never a labeled record of what failed). Treat it as a possible starting point, adapt it to the current task's exact signature/requirements, and always verify it independently rather than trusting it blindly.
+Interaction so far:
+{history}
 
-Hard constraints for BigCodeBench:
-- Do NOT change the required function signature, return type, or required exception types/messages.
-- Do NOT wrap specific exceptions into generic ones; keep the exact exception class and message if specified.
-- Import every module you use; remove unused imports; do not rely on implicit imports.
-- Avoid broad try/except (e.g., `except Exception`) unless the task explicitly requires it.
-- Avoid any network calls or extra file I/O beyond what the task specifies.
-- Keep code deterministic: no randomness, time-based logic, or unnecessary logging.
-- Your Action must contain the ENTIRE solution as one fenced ```python code block immediately after the "Action:" line -- no prose inside the fence, nothing after it.
+Choose the next step.
 
-Your response should use one of the following formats:
+If using memory:
+Skill: memory_retrieval
+
+If submitting:
+Action:
+```python
+<your complete solution, one Python code block, nothing else>
+```
+"""
+
+BCB_ZERO_SHOT_PROMPT = """Task:
+{task_description}
+
+Interaction so far:
+{history}
 
 Action:
 ```python
-<code>
+<your complete solution, one Python code block, nothing else>
 ```
+"""
 
-Skill: memory_retrieval"""
+
+BCB_STRATEGIC_SELECTION_SYSTEM_PROMPT = build_strategic_selection_system_prompt(
+    benchmark_label="a BigCodeBench coding task",
+    match_criteria=(
+        "- algorithmic approach / control-flow structure\n"
+        "- library or API usage pattern\n"
+        "- error-handling and edge-case pattern\n"
+        "- overall solution shape (helper functions, data structures used)"
+    ),
+    ignore_hint=(
+        "Ignore episode-specific names such as function names, variable names, and literal values."
+    ),
+)
 
 
 class BCBAgent(CustomAgent):
     """CustomAgent with BCB-only prompting and multi-line Action: parsing."""
+
+    strategic_selection_system_prompt = BCB_STRATEGIC_SELECTION_SYSTEM_PROMPT
+    strategic_selection_user_prompt = STRATEGIC_SELECTION_USER_PROMPT
 
     def _build_messages(
         self,
@@ -101,9 +157,19 @@ class BCBAgent(CustomAgent):
         # history_messages directly can.
         del observation, first_step, admissible_commands
 
-        messages = [{"role": "system", "content": self.system_prompt}]
+        skill_contract = self._render_memory_retrieval_contract()
+        system_content = (
+            self.system_prompt.format(skill_contract=skill_contract)
+            if "{skill_contract}" in self.system_prompt
+            else self.system_prompt
+        )
+        messages = [{"role": "system", "content": system_content}]
 
-        user_parts = [self.task_description.strip()]
+        history_text = self._format_history_messages(history_messages)
+        template = BCB_SKILL_AWARE_PROMPT if skill_contract else BCB_ZERO_SHOT_PROMPT
+        user_parts = [
+            template.format(task_description=self.task_description.strip(), history=history_text)
+        ]
         # Low-value for BCB in practice (max_skill_invocations=1 already
         # limits it to a single attempt), but included for consistency with
         # CustomAgent's rendering since the runner passes this through
@@ -111,14 +177,6 @@ class BCBAgent(CustomAgent):
         if skill_budget_remaining is not None:
             user_parts.append(
                 f"Remaining memory_retrieval budget this task: {skill_budget_remaining} call(s)."
-            )
-        if history_messages:
-            # Only present after this episode already invoked the memory
-            # skill at least once (BCB's max_steps=1 means history_messages
-            # is otherwise always empty going into the first call) -- carries
-            # the tool message with retrieved memories forward.
-            user_parts.append(
-                f"Interaction so far:\n{self._format_history_messages(history_messages)}"
             )
         messages.append({"role": "user", "content": "\n\n".join(user_parts)})
         return messages
@@ -194,4 +252,10 @@ class BCBAgent(CustomAgent):
         return ""
 
 
-__all__ = ["BCBAgent", "BCB_SYSTEM_PROMPT"]
+__all__ = [
+    "BCBAgent",
+    "BCB_SYSTEM_PROMPT",
+    "BCB_SKILL_AWARE_PROMPT",
+    "BCB_ZERO_SHOT_PROMPT",
+    "BCB_STRATEGIC_SELECTION_SYSTEM_PROMPT",
+]

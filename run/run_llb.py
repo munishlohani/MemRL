@@ -18,6 +18,10 @@ from memrl.envs.llb_episode_adapter import LLBEpisodeEnvAdapter
 from memrl.run.checkpoint_utils import load_checkpoint, save_epoch_checkpoint
 from memrl.run.training_summary import EpochStatsAccumulator, write_training_summary
 
+LLB_SKILL_CONTRACT_PATH = str(
+    project_root / "memrl" / "skills" / "memory_retrieval_skill" / "LLB_SKILL.md"
+)
+
 
 def setup_logging(project_root: Path, name: str):
     log_dir = project_root / "logs" / name
@@ -165,6 +169,7 @@ def main():
             llm_provider=llm_provider,
             skill_budget_per_episode=cfg.experiment.skill_budget_per_episode,
             tensorboard_log_dir=str(tb_dir),
+            skill_contract_path=LLB_SKILL_CONTRACT_PATH,
         )
         logger.info("TensorBoard logs will be saved to %s", tb_dir)
 
@@ -215,6 +220,7 @@ def main():
                     llm_provider=llm_provider,
                     skill_budget_per_episode=cfg.experiment.skill_budget_per_episode,
                     tensorboard_log_dir=str(eval_tb_dir),
+                    skill_contract_path=LLB_SKILL_CONTRACT_PATH,
                 )
                 eval_runner.memory_config.build_memory = False
                 num_val_sections = math.ceil(num_val_tasks / int(cfg.experiment.batch_size))

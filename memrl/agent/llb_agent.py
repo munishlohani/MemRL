@@ -38,23 +38,30 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Sequence
 
-from memrl.lifelongbench_eval.prompts import DEFAULT_SYSTEM_PROMPT, build_llb_system_prompt
+from memrl.lifelongbench_eval.prompts import (
+    DEFAULT_SYSTEM_PROMPT,
+    LLB_SKILL_AWARE_PROMPT,
+    LLB_STRATEGIC_SELECTION_SYSTEM_PROMPT,
+    LLB_ZERO_SHOT_PROMPT,
+    build_llb_system_prompt,
+)
 
 from .base import AgentDecision, EnvActionDecision, SkillInvocationDecision
 from .custom_agent import CustomAgent
+from .prompts import STRATEGIC_SELECTION_USER_PROMPT
 
 
-LLB_SYSTEM_PROMPT = (
-    DEFAULT_SYSTEM_PROMPT
-    + "\n\nYou may also invoke a memory-retrieval skill instead of acting directly:\n"
-    "Skill: memory_retrieval\n"
-    "If you invoke it, the runtime appends a tool message with retrieved context and "
-    "asks you again. Do not emit both a skill call and an env action in the same turn."
-)
+# DEFAULT_SYSTEM_PROMPT already covers the Skill: memory_retrieval mechanics
+# (agent-invoked, not automatic) -- this alias just names it for run_llb.py's
+# call site.
+LLB_SYSTEM_PROMPT = DEFAULT_SYSTEM_PROMPT
 
 
 class LLBAgent(CustomAgent):
     """CustomAgent with LLB (DB/OS) task-aware prompting and parsing."""
+
+    strategic_selection_system_prompt = LLB_STRATEGIC_SELECTION_SYSTEM_PROMPT
+    strategic_selection_user_prompt = STRATEGIC_SELECTION_USER_PROMPT
 
     def _build_messages(
         self,
@@ -70,14 +77,20 @@ class LLBAgent(CustomAgent):
         # observation fields already carry everything needed each turn.
         del first_step, admissible_commands
 
+        skill_contract = self._render_memory_retrieval_contract()
         system_content = build_llb_system_prompt(task=self.task_type, base_prompt=self.system_prompt)
+        if "{skill_contract}" in system_content:
+            system_content = system_content.format(skill_contract=skill_contract)
         messages = [{"role": "system", "content": system_content}]
 
         history_text = self._format_history_messages(history_messages)
+        template = LLB_SKILL_AWARE_PROMPT if skill_contract else LLB_ZERO_SHOT_PROMPT
         user_parts = [
-            f"Task:\n{self.task_description.strip()}",
-            f"Interaction so far:\n{history_text}",
-            f"Current observation:\n{observation.strip()}",
+            template.format(
+                task_description=self.task_description.strip(),
+                history=history_text,
+                observation=observation.strip(),
+            )
         ]
         if skill_budget_remaining is not None:
             user_parts.append(

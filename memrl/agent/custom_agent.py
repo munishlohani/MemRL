@@ -18,6 +18,14 @@ logger = logging.getLogger(__name__)
 class CustomAgent(BaseAgent):
     """Concrete BaseAgent implementation for the single-agent pipeline."""
 
+    # EpisodeRunner._select_strategic_scaffold reads these off the active
+    # agent (falling back to prompts.STRATEGIC_SELECTION_SYSTEM_PROMPT/
+    # _USER_PROMPT if an agent doesn't define them) so each benchmark's
+    # agent subclass can supply its own domain-flavored scaffold-selection
+    # prompt instead of every benchmark sharing ALFWorld's wording.
+    strategic_selection_system_prompt: str = prompts.STRATEGIC_SELECTION_SYSTEM_PROMPT
+    strategic_selection_user_prompt: str = prompts.STRATEGIC_SELECTION_USER_PROMPT
+
     def __init__(
         self,
         llm_provider: BaseLLM,

@@ -14,15 +14,16 @@ from memrl.providers.base import BaseLLM
 import logging
 
 
-_SKILL_DOC_PATH = Path(__file__).resolve().parent / "memory_retrieval_skill" / "SKILL.md"
+_SKILL_DOC_DIR = Path(__file__).resolve().parent / "memory_retrieval_skill"
+_DEFAULT_SKILL_DOC_PATH = _SKILL_DOC_DIR / "SKILL.md"
 logger = logging.getLogger(__name__)
 
 
-@lru_cache(maxsize=1)
-def _load_skill_contract_text() -> str:
-    """Load the retrieval skill contract from disk, with a short fallback."""
+@lru_cache(maxsize=8)
+def _load_skill_contract_text(path: Path) -> str:
+    """Load a retrieval skill contract from disk, with a short fallback."""
     try:
-        return _SKILL_DOC_PATH.read_text(encoding="utf-8").strip()
+        return path.read_text(encoding="utf-8").strip()
     except OSError:
         return (
             "Memory retrieval skill contract unavailable.\n"
@@ -78,12 +79,15 @@ class MemoryRetrievalSkill:
         llm_provider: Optional[BaseLLM] = None,
         retrieve_k: int = 1,
         rl_config: Optional[Any] = None,
+        contract_path: Optional[Path] = None,
     ) -> None:
         self.memory_service = memory_service
         self.llm_provider = llm_provider
         self.retrieve_k = max(1, int(retrieve_k))
         self.rl_config = rl_config
-        self._skill_contract_text = _load_skill_contract_text()
+        self._skill_contract_text = _load_skill_contract_text(
+            Path(contract_path) if contract_path else _DEFAULT_SKILL_DOC_PATH
+        )
 
     def prompt_contract(self) -> str:
         """Return the contract text injected into the agent prompt."""

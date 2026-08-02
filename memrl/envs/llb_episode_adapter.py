@@ -27,6 +27,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional
 
+from memrl.lifelongbench_eval.prompts import normalize_llb_action_directive
 from memrl.lifelongbench_eval.task_wrappers import (
     ChatHistoryItem,
     Role,
@@ -240,7 +241,7 @@ class LLBEpisodeEnvAdapter(EpisodeEnvAdapter):
             task_obj = slot["task_obj"]
             session: Session = slot["session"]
             sample_id = slot["sample_id"]
-            raw_response = str(action or "")
+            raw_response = normalize_llb_action_directive(str(action or ""), self._task)
 
             try:
                 session.chat_history.inject(

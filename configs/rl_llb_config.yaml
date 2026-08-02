@@ -144,7 +144,7 @@ experiment:  # Experiment / runner settings.
   # Baselines (optional)
   baseline_mode: null          # passk | reflection (null disables baseline mode).
   baseline_k: 10               # Baseline rounds (k) for pass@k / reflection baseline.
-  skill_budget_per_episode: 5  # Static cap on total memory_retrieval calls per episode -- matches ALFWorld/BCB.
+  skill_budget_per_episode: 1  # Static cap on total memory_retrieval calls per episode -- matches ALFWorld/BCB (all set to 1, matching the legacy always-retrieve-once-per-episode design for a fair comparison).
 
   # Output / logging
   output_dir: "./results"      # Output dir (NOTE: LLBRunner also writes to results/llb/exp_* timestamp dirs).

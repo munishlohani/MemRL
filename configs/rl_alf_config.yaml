@@ -66,7 +66,7 @@ experiment:
   few_shot_path: 'data/alfworld/alfworld_examples.json' # path for alfworld examples
   baseline_mode: none   # passk
   baseline_k: 10
-  skill_budget_per_episode: 5  # Static cap on total memory_retrieval calls per episode (all steps combined). Agent is told its remaining count each turn.
+  skill_budget_per_episode: 1  # Static cap on total memory_retrieval calls per episode (all steps combined). Agent is told its remaining count each turn. Set to 1 to match the legacy/main-branch ALFWorld implementation, which retrieves memory exactly once per episode (before the step loop) rather than letting the agent invoke it repeatedly.
 
   # Output settings
   output_dir: "./results"

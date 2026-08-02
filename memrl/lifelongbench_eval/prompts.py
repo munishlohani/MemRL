@@ -86,32 +86,42 @@ LLB_STRATEGIC_SELECTION_SYSTEM_PROMPT = build_strategic_selection_system_prompt(
 
 LLB_DB_STRICT_OUTPUT_FORMAT_CONSTRAINT = """
 STRICT OUTPUT FORMAT (LLB-DB, do not violate):
-0) MANDATORY ON EVERY SINGLE TURN, WITH NO EXCEPTIONS: your response is REJECTED and the
-   episode ENDS IN FAILURE if it does not contain a literal `Action: Operation` or
-   `Action: Answer` line. This applies on turn 1 just as much as on later turns -- do not
-   spend a turn only reasoning or only restating the task; every turn must end with one of
-   these two action lines.
-1) After your reasoning, include exactly ONE action line:
+0) MANDATORY ON EVERY SINGLE TURN, WITH NO EXCEPTIONS: end your response with EXACTLY ONE
+   of these two branches:
+     (a) ENVIRONMENT ACTION -- a literal `Action: Operation` or `Action: Answer` line; or
+     (b) MEMORY LOOKUP -- a literal `Skill: memory_retrieval` line, with NO `Action:` line.
+   A response containing NEITHER branch is REJECTED and the episode ENDS IN FAILURE. Never
+   emit both branches in the same turn. This applies on turn 1 just as much as on later
+   turns -- do not spend a turn only reasoning or only restating the task.
+1) For branch (a), include exactly ONE action line:
    - Action: Operation
    - Action: Answer
 2) If Action: Operation, put exactly ONE SQL statement in the FIRST fenced code block using ```sql, on a single line. Do not add any extra text after that block.
 3) If Action: Answer, include `Final Answer: ...` on the next line and do not add extra text after that.
+4) For branch (b), write `Skill: memory_retrieval` (or
+   `Skill: memory_retrieval(query="...")`) with nothing after it and no code block. The
+   runtime answers with a tool message and prompts you again; you then take branch (a).
 """.strip()
 
 
 LLB_OS_STRICT_OUTPUT_FORMAT_CONSTRAINT = """
 STRICT OUTPUT FORMAT (LLB-OS, do not violate):
-0) MANDATORY ON EVERY SINGLE TURN, WITH NO EXCEPTIONS: your response is REJECTED and the
-   episode ENDS IN FAILURE if it does not contain a literal `Act: bash` or `Act: finish`
-   line. This applies on turn 1 just as much as on later turns -- do not spend a turn only
-   reasoning or only restating the task; every turn must end with one of these two action
-   lines.
-1) After your reasoning, include exactly ONE action line:
+0) MANDATORY ON EVERY SINGLE TURN, WITH NO EXCEPTIONS: end your response with EXACTLY ONE
+   of these two branches:
+     (a) ENVIRONMENT ACTION -- a literal `Act: bash` or `Act: finish` line; or
+     (b) MEMORY LOOKUP -- a literal `Skill: memory_retrieval` line, with NO `Act:` line.
+   A response containing NEITHER branch is REJECTED and the episode ENDS IN FAILURE. Never
+   emit both branches in the same turn. This applies on turn 1 just as much as on later
+   turns -- do not spend a turn only reasoning or only restating the task.
+1) For branch (a), include exactly ONE action line:
    - Act: bash
    - Act: finish
 2) If Act: bash, the next lines MUST be a ```bash fenced code block with your Bash commands. Do not include any other code blocks.
 3) If Act: finish, it must be the last line (no code blocks, no extra text).
 4) Do NOT use `Action:` in OS tasks (use `Act:` only).
+5) For branch (b), write `Skill: memory_retrieval` (or
+   `Skill: memory_retrieval(query="...")`) with nothing after it and no code block. The
+   runtime answers with a tool message and prompts you again; you then take branch (a).
 """.strip()
 
 

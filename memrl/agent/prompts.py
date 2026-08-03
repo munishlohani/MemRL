@@ -10,7 +10,12 @@ and memrl/lifelongbench_eval/prompts.py for the BCB/LLB instances.
 
 
 def build_agent_system_prompt(
-    *, domain_intro: str, action_option: str, action_output: str, tool_result_note: str
+    *,
+    domain_intro: str,
+    action_option: str,
+    action_output: str,
+    tool_result_note: str,
+    memory_note: str = "",
 ) -> str:
     """Generalized top-level agent system prompt. {skill_contract} is filled
     in by each agent's _build_messages only when a memory_retrieval_skill is
@@ -19,7 +24,13 @@ def build_agent_system_prompt(
     system message instead of a separate injected one. Only domain_intro/
     action_option/action_output/tool_result_note vary by benchmark; the
     memory-retrieval mechanics stay identical everywhere.
+
+    memory_note is an optional benchmark-specific steer placed directly under
+    the retrieval format, where it sits next to the mechanic it is talking
+    about. Empty by default, which reproduces the original prompt byte for
+    byte -- ALFWorld and BCB pass nothing.
     """
+    memory_note_block = f"{memory_note.strip()}\n\n" if memory_note.strip() else ""
     return f"""
 {domain_intro}
 
@@ -32,7 +43,7 @@ You may either:
 Memory retrieval format:
 Skill: memory_retrieval(query="<optional query override>")
 
-{tool_result_note}
+{memory_note_block}{tool_result_note}
 
 {{skill_contract}}
 

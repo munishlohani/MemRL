@@ -38,6 +38,14 @@ DEFAULT_SYSTEM_PROMPT = build_agent_system_prompt(
         "and never override the current observation, environment feedback, or the "
         "required output-format contract for this task."
     ),
+    memory_note=(
+        "ON YOUR FIRST TURN OF A TASK, RETRIEVE BEFORE ACTING. You have not interacted "
+        "with this environment yet, and a procedure that already succeeded on a similar "
+        "task is the cheapest way to get the commands, flags, and conventions right the "
+        "first time. Retrieval costs one turn; the wrong approach costs the episode. Skip "
+        "it on the first turn only if the task is trivial, or your retrieval budget is "
+        "already spent."
+    ),
 )
 
 

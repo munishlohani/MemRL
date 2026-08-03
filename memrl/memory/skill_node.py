@@ -28,6 +28,13 @@ class SkillNode:
     evidence_ids: list[str] = field(default_factory=list)
     evidence_seen: int = 0
     consolidated: bool = False
+    # Strategic tier only: how many failed-episode traces have ever been
+    # folded into this scaffold's content. evidence_ids tracks POSITIVE
+    # evidence only, and the failure traces themselves live in
+    # SkillGraph.failure_buffer, which pop_failures() destroys on a
+    # successful revision -- so without this counter there is no lasting
+    # record that reflection ever reached a scaffold.
+    reflections_absorbed: int = 0
 
     def __post_init__(self) -> None:
         if self.depth not in {1, 2}:

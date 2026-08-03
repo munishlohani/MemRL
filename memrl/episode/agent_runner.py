@@ -1351,6 +1351,17 @@ class EpisodeRunner(BaseEpisodeRunner):
                     "n_omega": dict(scaffold.n_omega or {}),
                     "selection_count": self._strategic_selection_counts.get(scaffold.id, 0),
                     "evidence_ids": list(scaffold.evidence_ids or []),
+                    # evidence_ids covers POSITIVE evidence only. The failure
+                    # traces are in-memory and destroyed on a successful
+                    # revision, and the revised steps read as ordinary
+                    # instructions, so this count is the only durable signal
+                    # that reflection reached this scaffold.
+                    "reflections_absorbed": int(
+                        getattr(scaffold, "reflections_absorbed", 0) or 0
+                    ),
+                    "pending_failure_traces": len(
+                        self.memory_service.graph.failure_buffer.get(scaffold.id, [])
+                    ),
                 }
                 f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
 

@@ -130,6 +130,7 @@ class MemoryService:
             Column("secondary_parents", JSON, nullable=False),
             Column("evidence_ids", JSON, nullable=False),
             Column("evidence_seen", Integer, nullable=False, default=0),
+            Column("reflections_absorbed", Integer, nullable=False, default=0),
             Index("idx_parent", "parent_id"),
             Index("idx_depth", "depth"),
             Index("idx_consolidated", "consolidated"),
@@ -151,6 +152,7 @@ class MemoryService:
         )
         self._metadata.create_all(self._engine)
         self._migrate_add_evidence_seen_column()
+        self._migrate_add_reflections_absorbed_column()
         self._migrate_add_missing_indexes()
 
         if self.graph.nodes:
@@ -252,6 +254,7 @@ class MemoryService:
             secondary_parents=self._serialize_json(node.secondary_parents),
             evidence_ids=self._serialize_json(node.evidence_ids),
             evidence_seen=int(node.evidence_seen),
+            reflections_absorbed=int(node.reflections_absorbed),
         )
         return stmt.on_conflict_do_update(
             index_elements=["node_id"],
@@ -270,6 +273,7 @@ class MemoryService:
                 "secondary_parents": stmt.excluded.secondary_parents,
                 "evidence_ids": stmt.excluded.evidence_ids,
                 "evidence_seen": stmt.excluded.evidence_seen,
+                "reflections_absorbed": stmt.excluded.reflections_absorbed,
             },
         )
 
@@ -338,6 +342,7 @@ class MemoryService:
             decay_rate=float(row["decay_rate"]),
             evidence_ids=list(self._deserialize_json(row["evidence_ids"], [])),
             evidence_seen=int(row["evidence_seen"] or 0),
+            reflections_absorbed=int(row["reflections_absorbed"] or 0),
             consolidated=bool(row["consolidated"]),
         )
 
@@ -388,6 +393,27 @@ class MemoryService:
         with self._engine.begin() as conn:
             conn.execute(
                 text("ALTER TABLE skill_graph_state ADD COLUMN evidence_seen INTEGER DEFAULT 0")
+            )
+
+    def _migrate_add_reflections_absorbed_column(self) -> None:
+        """Additive migration for DBs written before `reflections_absorbed`
+        existed. Same rationale as `_migrate_add_evidence_seen_column`:
+        create_all won't add a column to an existing table, so a skill DB
+        carried over from an earlier run (memory.reuse_skill_db) would fail
+        on load without this.
+        """
+        inspector = inspect(self._engine)
+        existing_columns = {
+            column["name"] for column in inspector.get_columns("skill_graph_state")
+        }
+        if "reflections_absorbed" in existing_columns:
+            return
+        with self._engine.begin() as conn:
+            conn.execute(
+                text(
+                    "ALTER TABLE skill_graph_state "
+                    "ADD COLUMN reflections_absorbed INTEGER DEFAULT 0"
+                )
             )
 
     def _migrate_add_missing_indexes(self) -> None:
@@ -998,6 +1024,21 @@ class MemoryService:
         self._upsert_representation(
             SkillRepresentation(id=scaffold_id, content=new_content, embedding=new_embedding)
         )
+        # Count the traces before pop_failures() destroys them -- this is the
+        # only lasting record that reflection reached this scaffold, since the
+        # traces are in-memory and the revised content deliberately reads as
+        # ordinary prescriptive steps.
+        reflections_absorbed = 0
+        if negative_evidence:
+            try:
+                node = self.graph.get(scaffold_id)
+                node.reflections_absorbed += len(negative_evidence)
+                reflections_absorbed = node.reflections_absorbed
+                self.persist_node_state(node)
+            except KeyError:
+                logger.warning(
+                    "Scaffold %s not in graph; reflections_absorbed not recorded", scaffold_id
+                )
         self.graph.pop_failures(scaffold_id)
         log_event(
             logger,
@@ -1006,6 +1047,7 @@ class MemoryService:
             is_new=is_new,
             positive_count=len(positive_evidence),
             negative_count=len(negative_evidence),
+            reflections_absorbed=reflections_absorbed,
             new_content=new_content,
         )
 

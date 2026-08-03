@@ -17,9 +17,16 @@ Return the strategy text only -- no JSON, no markdown, no explanations, nothing 
 
 Rules:
 - If CURRENT STRATEGY is non-empty, REVISE it. Preserve existing steps unless the evidence below directly contradicts them. Do not regenerate from scratch.
-- Corrections derived from failures must be written PRESCRIPTIVELY.
+- Corrections derived from failures must be written PRESCRIPTIVELY in the numbered steps.
   BAD:  "Avoid heating before retrieving."
   GOOD: "Retrieve the target object before heating it."
+- Separately from the steps, you MUST end the output with a `REFLECTION:` section naming what
+  actually went wrong in the FAILED ATTEMPTS and what to watch for. This is the only place
+  failures are visible as failures -- the steps above deliberately read as ordinary
+  instructions, so without this section there is no record that anything was learned from a
+  failure. Write `REFLECTION:` followed by 1-3 short lines. If FAILED ATTEMPTS is "(none)",
+  write exactly `REFLECTION:` then `(none yet)`. Never invent a failure that is not in the
+  evidence.
 - FAILED ATTEMPTS are cases where this strategy was appropriate and still failed. They indicate flaws in the procedure, not in strategy selection.
 
 Summary Spec (applies whether this is a fresh strategy or a revision):
@@ -27,7 +34,7 @@ Summary Spec (applies whether this is a fresh strategy or a revision):
 - Precondition-guarded steps. Where the evidence below shares a precondition or failure-prone step (must be holding the object; must be at the correct receptacle; appliance must be open before use), attach it to that step as an explicit checkable condition, and instruct skipping any step whose postcondition already holds.
 - Structural, not descriptive, generality. Generalize over WHAT is manipulated, never over HOW you do it. A strategy that would fit any task ("complete the objective efficiently") is a failure; a strategy naming one concrete object ("cool the tomato") is also a failure. The target sits between those two: object-agnostic, procedure-specific.
 - Grounding in shared evidence. State only procedure elements present across MULTIPLE examples below. A step that appears in only one example is an instance detail -- omit it.
-- Shape: one short title line, then 3-6 ordered imperative steps, each carrying its precondition in parentheses.
+- Shape: one short title line, then 3-6 ordered imperative steps, each carrying its precondition in parentheses, then the `REFLECTION:` section. Keep it to 3-6 steps even across many revisions -- if new evidence adds a step, fold it into an existing one or drop a step that only ever appeared in a single example. A growing list of "If X is required" branches means the strategy is turning into a catch-all checklist, which is the same failure as being too vague.
 
 Summary Spec examples (for calibration only -- derive the real strategy from the evidence below, do not copy these):
 
@@ -39,18 +46,26 @@ Good strategy (object-agnostic, procedure-specific, precondition-guarded):
 3. Put the object inside and wait for it to cool.
 4. Take the cooled object back out.
 5. Go to the destination receptacle, opening it first if it is a closed appliance.
-6. Place the object at the destination."
+6. Place the object at the destination.
+
+REFLECTION:
+(none yet)"
 Bad strategy (too specific, rejected): "Cool the tomato in the fridge and put it in the microwave."
 Bad strategy (too vague, rejected): "Complete the cooling task efficiently."
 
+Example with a failure present -- note the correction appears BOTH prescriptively in the steps AND named in REFLECTION:
 Example cluster: [1] "goal: clean the mug and put it on the shelf" [2] "goal: clean the plate and put it in the cabinet"
+Example failed attempt: [1] "went to the sink and turned on the faucet, but was not holding the plate, so nothing was washed"
 Good strategy:
 "Clean an object and place it at a destination.
 1. Pick up the target object (must not already be holding it).
 2. Go to the sink (must be holding the target object).
 3. Turn on the faucet, wash the object, then turn the faucet off.
 4. Go to the destination receptacle, opening it first if it is a closed container.
-5. Place the cleaned object at the destination."
+5. Place the cleaned object at the destination.
+
+REFLECTION:
+Washing was attempted without holding the object, so nothing happened. Confirm the object is in hand before reaching the sink."
 
 CURRENT STRATEGY (empty if new):
 {current_summary}

@@ -39,12 +39,16 @@ DEFAULT_SYSTEM_PROMPT = build_agent_system_prompt(
         "required output-format contract for this task."
     ),
     memory_note=(
-        "ON YOUR FIRST TURN OF A TASK, RETRIEVE BEFORE ACTING. You have not interacted "
-        "with this environment yet, and a procedure that already succeeded on a similar "
-        "task is the cheapest way to get the commands, flags, and conventions right the "
-        "first time. Retrieval costs one turn; the wrong approach costs the episode. Skip "
-        "it on the first turn only if the task is trivial, or your retrieval budget is "
-        "already spent."
+        "On the first step of a task, invoke memory retrieval unless you already know the "
+        "answer with certainty. Skip it if your retrieval budget is already spent.\n\n"
+        "WHAT RETRIEVED MEMORY IS: a REFERENCE from a DIFFERENT, similar task -- never a "
+        "one-to-one mapping onto this one. Table names, column names, file paths, values, "
+        "and the exact commands will differ, and the archived task's goal was not this "
+        "task's goal. Use it to inform your approach, then derive every concrete detail "
+        "from THIS task's description and the current observation. Never copy a retrieved "
+        "procedure verbatim, and never assume a step applies just because it appears in "
+        "the memory. If the memory and the current observation disagree, the observation "
+        "wins."
     ),
 )
 
@@ -74,8 +78,12 @@ If acting:
 If using memory:
 Skill: memory_retrieval(query="<optional query override>")
 
-Prefer memory retrieval for the first step unless you already know the exact commands this environment expects or the skill budget has been exhausted.
-A procedure that worked here before beats a guess.
+On the first step, use memory retrieval unless you already know the answer with certainty
+or the skill budget has been exhausted.
+
+Anything already retrieved is a reference from a similar-but-different task, not a template
+to follow. Adapt it to this task's actual names, paths, and values, and prefer the current
+observation wherever the two disagree.
 """
 
 LLB_ZERO_SHOT_PROMPT = """Task:

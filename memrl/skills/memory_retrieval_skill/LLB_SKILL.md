@@ -14,8 +14,8 @@ Use this skill when the runner has attached archived memories for the current st
 ## Decision Rule
 
 - Each turn is either skill-assisted or a direct environment action.
-- Archived procedures come from tasks that were already solved successfully. When one exists for a task like this, it is usually the cheapest way to get the exact command sequence, flag, or schema detail right on the first attempt instead of discovering it through a failed one.
-- **The first turn of a task defaults to retrieval.** Invoke the skill before your first environment action. At that point you have not interacted with the environment at all, so a procedure from a similar task is the single highest-value thing you can obtain: it costs one turn, while committing to the wrong approach costs the episode. Skip it on the first turn only if the task is genuinely trivial, or your retrieval budget is already spent.
+- **On the first step of a task, invoke the skill unless you already know the answer with certainty.** Skip it if your retrieval budget is already spent.
+- **What you get back is a REFERENCE, not the answer.** It is a procedure from a DIFFERENT task that happened to be similar. Its table names, column names, file paths, values, and exact commands will differ from yours, and its goal was not your goal. A retrieved procedure that looks close is the most dangerous case: it invites you to follow steps that do not apply here. Treat it as one piece of evidence about *how* to approach the task, then derive every concrete detail from this task's description and the current observation.
 - On later turns, invoke the skill when any of these hold:
   - The task hinges on a specific command, flag, path convention, or schema detail you would otherwise be guessing at.
   - You are uncertain what SQL operation or bash command to run next.

@@ -144,6 +144,10 @@ experiment:  # Experiment / runner settings.
   # Baselines (optional)
   baseline_mode: null          # passk | reflection (null disables baseline mode).
   baseline_k: 10               # Baseline rounds (k) for pass@k / reflection baseline.
+  # Retrieve memory only when the agent asks (`Skill: memory_retrieval`).
+  # Multi-step: the agent can judge from the current observation and a failed attempt, so retrieval stays agent-driven.
+  auto_inject_memory: false
+
   skill_budget_per_episode: 1  # Static cap on total memory_retrieval calls per episode -- matches ALFWorld/BCB (all set to 1, matching the legacy always-retrieve-once-per-episode design for a fair comparison).
 
   # Output / logging

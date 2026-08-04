@@ -71,6 +71,7 @@ class EpisodeRunner(BaseEpisodeRunner):
         skill_budget_per_episode: Optional[int] = None,
         tensorboard_log_dir: Optional[str] = None,
         skill_contract_path: Optional[str] = None,
+        auto_inject_memory: bool = False,
     ):
         self.agent = agent
         self.memory_service = memory_service
@@ -145,6 +146,12 @@ class EpisodeRunner(BaseEpisodeRunner):
         # agent asked but was refused" indistinguishable after the fact.
         self._skill_retrievals: List[int] = []
         self._skill_refused_budget: List[int] = []
+        # Retrieve once up front instead of waiting for the agent to ask.
+        # Intended for single-step benchmarks where the agent has no
+        # information on which to base that choice -- see
+        # _auto_inject_memory. Off by default: multi-step benchmarks keep
+        # retrieval agent-driven.
+        self.auto_inject_memory = bool(auto_inject_memory)
 
         # run_dir defaults to a generic "episode" subtree (benchmark-neutral,
         # since this runner is shared across ALFWorld/BabyAI/HLE/etc.), but a
@@ -797,6 +804,69 @@ class EpisodeRunner(BaseEpisodeRunner):
 
         return EnvActionDecision(action="look", raw_response="")
 
+    def _auto_inject_memory(
+        self,
+        *,
+        history: EpisodeHistory,
+        observation: str,
+        task_description: str,
+        task_type: str,
+        episode_id: str,
+        active_strategic_node_id: Optional[str],
+        slot_idx: Optional[int],
+    ) -> Optional[MemoryRetrievalResult]:
+        """Retrieve once, up front, and append the result as if the agent had
+        asked for it.
+
+        For single-step benchmarks (BCB: max_steps=1) agent-chosen retrieval is
+        close to meaningless -- the agent has one decision point, no observation
+        history, and no failed attempt to be uncertain about, so "should I
+        retrieve?" carries no information. In practice it simply never asked
+        (measured retrieval rate: 0), which quietly reduced the memory arm to
+        the barebone baseline plus a longer prompt.
+
+        Deliberately routed through the SAME MemoryRetrievalSkill call, budget,
+        and counters as an agent-issued retrieval, so episodes.jsonl's
+        memory_retrievals stays comparable across both modes and this shows up
+        as a measurable ablation rather than a hidden behaviour change.
+        """
+        if self.memory_retrieval_skill is None:
+            return None
+        if (
+            self.skill_budget_per_episode is not None
+            and slot_idx is not None
+            and slot_idx < len(self._skill_budget_remaining)
+            and self._skill_budget_remaining[slot_idx] < 1
+        ):
+            return None
+
+        try:
+            retrieval_result = self.memory_retrieval_skill.retrieve(
+                task_description=task_description,
+                observation=observation,
+                history_messages=self._history_to_messages(history),
+                task_type=task_type,
+                episode_id=episode_id,
+                active_strategic_node_id=active_strategic_node_id,
+                current_step=self.current_step,
+                query_override=None,
+            )
+        except Exception as exc:
+            logger.warning("Auto-injected memory retrieval failed: %s", exc)
+            return None
+
+        history.append_message(retrieval_result.to_tool_message(skill_name="memory_retrieval"))
+        if slot_idx is not None and slot_idx < len(self._skill_budget_remaining):
+            self._skill_budget_remaining[slot_idx] -= 1
+        if slot_idx is not None and slot_idx < len(self._skill_retrievals):
+            self._skill_retrievals[slot_idx] += 1
+        logger.info(
+            "Auto-injected memory (single-step mode): episode_id=%s selected=%s",
+            episode_id,
+            len(retrieval_result.selected_memories),
+        )
+        return retrieval_result
+
     def _resolve_agent_turn(
         self,
         *,
@@ -820,6 +890,24 @@ class EpisodeRunner(BaseEpisodeRunner):
             and slot_idx < len(self._skill_budget_remaining)
         ):
             skill_budget_remaining = self._skill_budget_remaining[slot_idx]
+
+        if self.auto_inject_memory and first_step:
+            injected = self._auto_inject_memory(
+                history=history,
+                observation=observation,
+                task_description=task_description,
+                task_type=task_type,
+                episode_id=episode_id,
+                active_strategic_node_id=active_strategic_node_id,
+                slot_idx=slot_idx,
+            )
+            if injected is not None:
+                latest_retrieval_result = injected
+                if (
+                    slot_idx is not None
+                    and slot_idx < len(self._skill_budget_remaining)
+                ):
+                    skill_budget_remaining = self._skill_budget_remaining[slot_idx]
 
         for _ in range(self.max_skill_invocations + 1):
             history_messages = self._history_to_messages(history)

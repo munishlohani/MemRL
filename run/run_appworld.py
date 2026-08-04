@@ -1,3 +1,17 @@
+"""Run AppWorld with the agentic two-tier EpisodeRunner.
+
+Same structure as run/run_llb.py and run/run_bcb.py: build the LLM/embedding
+providers, resolve a skill DB, construct MemoryService + agent + env adapter,
+then drive epoch x section loops through EpisodeRunner with per-epoch
+checkpoints and an end-of-training summary.
+
+AppWorld-specific: the environment lives in a separate interpreter
+(experiment.appworld_python) behind a subprocess worker, because appworld pins
+pydantic 1.x and cannot share MemRL's venv. See
+memrl/appworld_eval/worker.py and the two-venv note at the top of
+configs/rl_appworld_config.yaml.
+"""
+
 import sys
 from pathlib import Path
 import logging
@@ -12,26 +26,26 @@ from memrl.configs.config import MempConfig
 from memrl.providers.llm import OpenAILLM
 from memrl.providers.embedding import OpenAIEmbedder
 from memrl.service.memory_service import MemoryService
-from memrl.agent.llb_agent import LLBAgent, LLB_SYSTEM_PROMPT
+from memrl.agent.appworld_agent import AppWorldAgent
+from memrl.appworld_eval.prompts import APPWORLD_SYSTEM_PROMPT
 from memrl.episode.agent_runner import EpisodeRunner
-from memrl.envs.llb_episode_adapter import LLBEpisodeEnvAdapter
+from memrl.envs.appworld_episode_adapter import AppWorldEpisodeEnvAdapter
 from memrl.run.checkpoint_utils import load_checkpoint, save_epoch_checkpoint
 from memrl.run.training_summary import EpochStatsAccumulator, write_training_summary
-from memrl.skills.memory_retrieval import LLB_SKILL_DOC_PATH
+from memrl.skills.memory_retrieval import APPWORLD_SKILL_DOC_PATH
 
-LLB_SKILL_CONTRACT_PATH = str(LLB_SKILL_DOC_PATH)
+APPWORLD_SKILL_CONTRACT_PATH = str(APPWORLD_SKILL_DOC_PATH)
 
 
 def setup_logging(project_root: Path, name: str):
     log_dir = project_root / "logs" / name
     log_dir.mkdir(parents=True, exist_ok=True)
-    log_filename = f"{name}_{time.strftime('%Y%m%d-%H%M%S')}.log"
-    log_filepath = log_dir / log_filename
+    log_filepath = log_dir / f"{name}_{time.strftime('%Y%m%d-%H%M%S')}.log"
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.INFO)
     if root_logger.hasHandlers():
         root_logger.handlers.clear()
-    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
     file_handler = logging.FileHandler(log_filepath)
     file_handler.setFormatter(formatter)
     root_logger.addHandler(file_handler)
@@ -43,14 +57,16 @@ def setup_logging(project_root: Path, name: str):
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Run LifelongBench (LLB) with the agentic two-tier EpisodeRunner")
+    p = argparse.ArgumentParser(
+        description="Run AppWorld with the agentic two-tier EpisodeRunner"
+    )
     p.add_argument(
         "--config",
         type=str,
         default=str(
-            (project_root / "configs" / "rl_llb_config.local.yaml")
-            if (project_root / "configs" / "rl_llb_config.local.yaml").exists()
-            else (project_root / "configs" / "rl_llb_config.yaml")
+            (project_root / "configs" / "rl_appworld_config.local.yaml")
+            if (project_root / "configs" / "rl_appworld_config.local.yaml").exists()
+            else (project_root / "configs" / "rl_appworld_config.yaml")
         ),
     )
     p.add_argument("--temperature", type=float, default=None)
@@ -79,8 +95,8 @@ def main():
 
         out_dir = Path(cfg.experiment.output_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
-        run_id = time.strftime('%Y%m%d-%H%M%S')
-        run_dir = out_dir / "llb" / f"exp_{cfg.experiment.experiment_name}_{run_id}"
+        run_id = time.strftime("%Y%m%d-%H%M%S")
+        run_dir = out_dir / "appworld" / f"exp_{cfg.experiment.experiment_name}_{run_id}"
         log_dir = run_dir / "local_cache"
         log_dir.mkdir(parents=True, exist_ok=True)
         tb_dir = run_dir / "tensorboard"
@@ -90,8 +106,12 @@ def main():
             api_key=cfg.llm.api_key,
             base_url=cfg.llm.base_url,
             model=cfg.llm.model,
-            default_temperature=(args.temperature if args.temperature is not None else cfg.llm.temperature),
-            default_max_tokens=(args.max_tokens if args.max_tokens is not None else cfg.llm.max_tokens),
+            default_temperature=(
+                args.temperature if args.temperature is not None else cfg.llm.temperature
+            ),
+            default_max_tokens=(
+                args.max_tokens if args.max_tokens is not None else cfg.llm.max_tokens
+            ),
             token_log_dir=str(log_dir),
         )
         embedding_provider = OpenAIEmbedder(
@@ -102,17 +122,17 @@ def main():
             token_log_dir=str(log_dir),
         )
 
-        # Resuming from a checkpoint always reuses that checkpoint's skill
-        # DB (continuing the same graph is the whole point of resuming),
-        # taking priority over the reuse_skill_db/fresh-per-run choice below.
+        # Resuming always reuses the checkpoint's skill DB -- continuing the
+        # same graph is the point -- ahead of the reuse_skill_db choice below.
         resume_state = None
-        if getattr(cfg.experiment, "ckpt_resume_enabled", False) and cfg.experiment.ckpt_resume_path:
+        if (
+            getattr(cfg.experiment, "ckpt_resume_enabled", False)
+            and cfg.experiment.ckpt_resume_path
+        ):
             resume_state = load_checkpoint(
                 cfg.experiment.ckpt_resume_path, cfg.experiment.ckpt_resume_epoch
             )
 
-        # Same reuse_skill_db/skill_db_path/fresh-per-run pattern as
-        # run_alfworld.py/run_bcb.py.
         if resume_state is not None:
             db_path = Path(resume_state["db_path"])
         elif getattr(cfg.memory, "reuse_skill_db", False) and cfg.memory.skill_db_path:
@@ -128,25 +148,28 @@ def main():
             db_path=str(db_path),
         )
 
-        # No few_shot_examples: LLB has no few-shot mechanism (CustomAgent
-        # discards that parameter unconditionally, and LLBAgent's own
-        # prompting never references it).
-        agent = LLBAgent(
+        agent = AppWorldAgent(
             llm_provider=llm_provider,
-            system_prompt=LLB_SYSTEM_PROMPT,
+            system_prompt=APPWORLD_SYSTEM_PROMPT,
         )
 
-        env_adapter = LLBEpisodeEnvAdapter(
-            task=cfg.experiment.task,
-            train_file=cfg.experiment.split_file,
-            val_file=cfg.experiment.valid_file,
+        env_adapter = AppWorldEpisodeEnvAdapter(
+            appworld_root=cfg.experiment.appworld_root,
+            appworld_python=cfg.experiment.appworld_python,
+            train_split=cfg.experiment.appworld_train_split,
+            val_split=cfg.experiment.appworld_val_split,
+            test_split=cfg.experiment.appworld_test_split,
             batch_size=int(cfg.experiment.batch_size),
             max_steps=int(cfg.experiment.max_steps),
+            experiment_name=cfg.experiment.experiment_name,
         )
         logger.info(
-            "Building LLB runner with task=%s split_file=%s skill_db=%s output_dir=%s",
-            cfg.experiment.task,
-            cfg.experiment.split_file,
+            "Building AppWorld runner with root=%s python=%s splits=%s/%s/%s skill_db=%s output_dir=%s",
+            cfg.experiment.appworld_root,
+            cfg.experiment.appworld_python,
+            cfg.experiment.appworld_train_split,
+            cfg.experiment.appworld_val_split,
+            cfg.experiment.appworld_test_split,
             memory_service.db_path,
             run_dir,
         )
@@ -168,7 +191,7 @@ def main():
             llm_provider=llm_provider,
             skill_budget_per_episode=cfg.experiment.skill_budget_per_episode,
             tensorboard_log_dir=str(tb_dir),
-            skill_contract_path=LLB_SKILL_CONTRACT_PATH,
+            skill_contract_path=APPWORLD_SKILL_CONTRACT_PATH,
             auto_inject_memory=cfg.experiment.auto_inject_memory,
         )
         logger.info("TensorBoard logs will be saved to %s", tb_dir)
@@ -182,23 +205,20 @@ def main():
                 resume_epoch_start + 1,
             )
 
-        # Validation: shares agent/memory_service/env_adapter with the train
-        # runner (same in-process SkillGraph, so eval sees every node the
-        # train runner has formed so far with no reload) but is a distinct
-        # EpisodeRunner instance so its own memory_config copy can force
-        # build_memory=False -- retrieval/selection still run, but eval
-        # never mutates the graph. Skipped for --smoke (fast wiring test),
-        # when valid_interval<=0, or when experiment.valid_file is unset
-        # (num_val_tasks() returns 0 in that case).
+        # Validation shares agent/memory_service/env_adapter with the train
+        # runner (same in-process SkillGraph, so eval sees every node formed so
+        # far) but is a distinct EpisodeRunner so its own memory_config copy can
+        # force build_memory=False -- retrieval/selection still run, eval never
+        # mutates the graph.
         eval_runner = None
         num_val_sections = 0
         if not args.smoke and cfg.experiment.valid_interval > 0:
             num_val_tasks = env_adapter.num_val_tasks()
             if num_val_tasks <= 0:
                 logger.info(
-                    "valid_interval=%s but no validation tasks (experiment.valid_file unset "
-                    "or empty); periodic validation disabled.",
+                    "valid_interval=%s but the %s split is empty; validation disabled.",
                     cfg.experiment.valid_interval,
+                    cfg.experiment.appworld_val_split,
                 )
             else:
                 eval_tb_dir = tb_dir / "eval"
@@ -206,7 +226,7 @@ def main():
                 eval_runner = EpisodeRunner(
                     agent=agent,
                     memory_service=memory_service,
-                    sleep_checkpoint=None,  # built from llm_provider inside EpisodeRunner; no-op while build_memory=False
+                    sleep_checkpoint=None,
                     env_adapter=env_adapter,
                     config=str(args.config),
                     output_dir=out_dir,
@@ -220,18 +240,27 @@ def main():
                     llm_provider=llm_provider,
                     skill_budget_per_episode=cfg.experiment.skill_budget_per_episode,
                     tensorboard_log_dir=str(eval_tb_dir),
-                    skill_contract_path=LLB_SKILL_CONTRACT_PATH,
+                    skill_contract_path=APPWORLD_SKILL_CONTRACT_PATH,
                     auto_inject_memory=cfg.experiment.auto_inject_memory,
                 )
                 eval_runner.memory_config.build_memory = False
-                num_val_sections = math.ceil(num_val_tasks / int(cfg.experiment.batch_size))
+                num_val_sections = math.ceil(
+                    num_val_tasks / int(cfg.experiment.batch_size)
+                )
                 logger.info(
-                    "Validation enabled: %s held-out task(s), %s section(s)/pass, every %s train section(s).",
-                    num_val_tasks, num_val_sections, cfg.experiment.valid_interval,
+                    "Validation enabled: %s task(s) on split %s, %s section(s)/pass, "
+                    "every %s train section(s).",
+                    num_val_tasks,
+                    cfg.experiment.appworld_val_split,
+                    num_val_sections,
+                    cfg.experiment.valid_interval,
                 )
 
         if args.init_only:
-            logger.info("EpisodeRunner + LLBEpisodeEnvAdapter initialized; exiting due to --init-only.")
+            logger.info(
+                "EpisodeRunner + AppWorldEpisodeEnvAdapter initialized; exiting due to --init-only."
+            )
+            runner.close()
             return
 
         def run_validation_pass(after_section: int) -> None:
@@ -261,17 +290,21 @@ def main():
         epoch_summaries: list = []
         try:
             num_tasks = env_adapter.num_tasks()
-            # "Epochs" for LLB = experiment.num_sections dataset replays
-            # (per configs/rl_llb_config.yaml's own documented convention),
-            # not experiment.num_epochs like ALFWorld -- LLB's original
-            # runner never had a num_epochs field.
-            sections_per_epoch = math.ceil(num_tasks / int(cfg.experiment.batch_size)) if num_tasks else 1
+            # "Epochs" for AppWorld = experiment.num_sections dataset replays,
+            # the same convention rl_llb_config.yaml documents.
+            sections_per_epoch = (
+                math.ceil(num_tasks / int(cfg.experiment.batch_size)) if num_tasks else 1
+            )
             num_epochs = int(cfg.experiment.num_sections)
             if args.smoke:
                 num_epochs, sections_per_epoch = 1, 1
             logger.info(
-                "Running %s epoch(s) x %s section(s) over %s LLB train tasks (batch_size=%s).",
-                num_epochs, sections_per_epoch, num_tasks, cfg.experiment.batch_size,
+                "Running %s epoch(s) x %s section(s) over %s AppWorld %s tasks (batch_size=%s).",
+                num_epochs,
+                sections_per_epoch,
+                num_tasks,
+                cfg.experiment.appworld_train_split,
+                cfg.experiment.batch_size,
             )
             if resume_epoch_start >= num_epochs:
                 logger.info(
@@ -288,12 +321,13 @@ def main():
                     epoch_stats.add_section(summary)
                     logger.info(
                         "Epoch %s section %s done: mean_reward=%.4f success_rate=%.4f steps=%.1f "
-                        "formation=%s pruning=%s sleep=%s",
+                        "duplicate_slots=%s formation=%s pruning=%s sleep=%s",
                         epoch_idx + 1,
                         section_counter,
                         float(summary.get("mean_reward", 0.0)),
                         float(summary.get("success_rate", 0.0)),
                         float(summary.get("mean_steps", 0.0)),
+                        summary.get("duplicate_slots", 0),
                         summary.get("formation"),
                         summary.get("pruning"),
                         summary.get("sleep_consolidation"),
@@ -312,6 +346,8 @@ def main():
                 if args.smoke:
                     break
         finally:
+            # Closes the adapter too, which tears down every AppWorld worker
+            # process -- otherwise they outlive the run.
             runner.close()
             write_training_summary(run_dir, epoch_summaries)
 

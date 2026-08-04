@@ -399,6 +399,53 @@ class ExperimentConfig(BaseModel):
         default=None, description="Path to LLB validation dataset file"
     )
 
+    auto_inject_memory: bool = Field(
+        default=False,
+        description=(
+            "Retrieve memory once up front instead of waiting for the agent to "
+            "emit `Skill: memory_retrieval`. Intended for SINGLE-STEP benchmarks "
+            "(BCB, max_steps=1), where the agent has one decision point and no "
+            "observation history, so choosing whether to retrieve carries no "
+            "information -- measured retrieval rate there was 0, which reduced "
+            "the memory arm to the barebone baseline plus a longer prompt. Leave "
+            "False for multi-step benchmarks, where retrieval stays agent-driven."
+        ),
+    )
+
+    # AppWorld-specific parameters. AppWorld pins pydantic 1.x / SQLAlchemy 1.4
+    # and cannot share MemRL's interpreter, so it runs in its own venv behind a
+    # subprocess worker (memrl/appworld_eval/worker.py). These two fields are
+    # what locate that venv and its downloaded data; declared here rather than
+    # passed loosely because ExperimentConfig silently IGNORES unknown keys, so
+    # an undeclared config option would look wired while doing nothing.
+    appworld_root: str = Field(
+        default="data/appworld",
+        description=(
+            "AppWorld data root -- the --root passed to `appworld download data`. "
+            "Also where AppWorld writes experiment_outputs/ at run time."
+        ),
+    )
+    appworld_python: str = Field(
+        default=".venv-appworld/bin/python",
+        description=(
+            "Interpreter that has `appworld` installed. Must NOT be MemRL's own "
+            "venv: appworld downgrades pydantic to 1.x and breaks every benchmark."
+        ),
+    )
+    appworld_train_split: str = Field(
+        default="train", description="AppWorld split used for training (90 tasks)"
+    )
+    appworld_val_split: str = Field(
+        default="dev", description="AppWorld split used for validation (57 tasks)"
+    )
+    appworld_test_split: str = Field(
+        default="test_normal",
+        description=(
+            "AppWorld split used for the frozen test pass (test_normal=168, "
+            "test_challenge=417)"
+        ),
+    )
+
     num_sections: int = Field(default=5, description="Number of sections to split the training data into")
     num_epochs: Optional[int] = Field(
         default=None,

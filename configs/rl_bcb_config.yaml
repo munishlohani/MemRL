@@ -100,6 +100,15 @@ experiment:
 
   baseline_mode: null
   baseline_k: 10
+  # BCB is single-step (max_steps=1), so the agent has one decision point,
+  # no observation history, and no failed attempt to be uncertain about --
+  # "should I retrieve?" carries no information, and in practice it never
+  # asked (measured retrieval rate: 0), which reduced the memory arm to the
+  # barebone baseline plus a longer prompt. True retrieves once up front
+  # through the same skill/budget/counters, so memory_retrievals in
+  # episodes.jsonl stays comparable. Set False to measure the agentic variant.
+  auto_inject_memory: true
+
   skill_budget_per_episode: 5  # Static cap on total memory_retrieval calls per episode. Has no practical effect while max_skill_invocations=1 (run_bcb.py) already limits BCB to at most one retrieval attempt per task -- set for config parity/self-documentation with ALFWorld.
 
   output_dir: "./results"

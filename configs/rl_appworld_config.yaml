@@ -1,0 +1,158 @@
+# Config for running AppWorld with MemRL, via the same agentic two-tier
+# EpisodeRunner used by ALFWorld / BigCodeBench / LifelongAgentBench
+# (run/run_appworld.py + memrl/envs/appworld_episode_adapter.py).
+#
+# TWO-VENV SETUP (required -- read before running):
+#   AppWorld pins pydantic 1.x and SQLAlchemy 1.4; MemRL is built on pydantic
+#   2.x / SQLAlchemy 2.0. Installing appworld into MemRL's own venv downgrades
+#   both and breaks every benchmark (config.py uses field_validator/ConfigDict;
+#   memory_service.py uses 2.0-style select()/.mappings()). So AppWorld gets its
+#   own interpreter and runs behind a subprocess worker:
+#
+#     uv venv .venv-appworld --python 3.12
+#     uv pip install --python .venv-appworld/bin/python appworld
+#     .venv-appworld/bin/appworld install
+#     .venv-appworld/bin/appworld download data --root data/appworld
+#
+#   `experiment.appworld_python` and `experiment.appworld_root` below point at
+#   the results of those four commands. data/appworld/ is ~183M and gitignored.
+#
+# NOTE:
+# - Put private values (API keys / internal endpoints) in
+#   `configs/rl_appworld_config.local.yaml` (gitignored).
+# - `run/run_appworld.py` prefers that local file when it exists.
+# - "Epochs" here = `experiment.num_sections` (dataset replay count), same
+#   convention as rl_llb_config.yaml.
+#
+# You must set at least:
+# - llm.api_key / embedding.api_key (and base_url if not using OpenAI)
+
+llm:  # LLM (chat/completions) provider settings.
+  provider: "openai"
+  api_key: "API"                    # LLM API key (required).
+  base_url: "BASEURL"               # OpenAI-compatible chat completions endpoint.
+  model: "gpt-4o-mini"              # Chat model name.
+  temperature: 0.0
+  # AppWorld answers are code blocks plus short reasoning; 10240 is ample.
+  max_tokens: 10240
+
+embedding:  # Embedding provider settings.
+  provider: "openai"
+  api_key: "API"                    # Embedding API key (required).
+  base_url: "BASEURL"               # OpenAI-compatible embeddings endpoint.
+  model: "text-embedding-3-large"
+  # NOTE: this is CHARACTERS, not tokens. 8196 chars is ~2000+ tokens, which
+  # exceeds a 512-token embedding model -- lower it if your endpoint rejects
+  # oversized inputs (the real error is logged to local_cache/token_usage.jsonl).
+  max_text_len: 8196
+
+memory:  # Memory system settings (strategies + thresholds).
+  build_strategy: "proceduralization"
+  retrieve_strategy: "query"
+  update_strategy: "adjustment"
+
+  k_retrieve: 10                    # Memories retrieved per query (EpisodeRunner's retrieve_k).
+  max_keywords: 8
+  confidence_threshold: 0.0
+  memory_confidence: 100.0
+  add_similarity_threshold: 0.99
+  # Sleep consolidation fires once this many unconsolidated tactical nodes
+  # exist. AppWorld's train split is only 90 tasks, so with a fresh skill DB
+  # per run a high value means Pass 2 (strategy authoring + reflection
+  # absorption) may never trigger. Lower it if scaffolds stay empty.
+  n_sleep: 10
+  lambda_base: 1e-3
+
+  # Dead on this branch (kept for schema completeness, as in the other configs).
+  mos_config_path: "configs/mos_config.json"
+  user_id: "appworld_memrl_seed42"
+  sim_norm_mean: 0.0                # No calibrated AppWorld stats yet; identity.
+  sim_norm_std: 0.0
+  # reuse_skill_db/skill_db_path unset -> fresh per-run skill DB, same as the
+  # other configs. Set both (with build_memory=false) to evaluate against an
+  # already-built graph.
+
+environment:  # ALFWorld-only; kept for schema completeness.
+  alfworld_config_path: "configs/base_config.yaml"
+  alfworld_env_type: "AlfredTWEnv"
+
+experiment:  # Experiment / runner settings.
+  experiment_name: "appworld_memrl"
+
+  # -------- AppWorld setup (see the two-venv note at the top) --------
+  # Interpreter with `appworld` installed. Must NOT be MemRL's own venv.
+  appworld_python: ".venv-appworld/bin/python"
+  # Data root from `appworld download data --root <root>`. AppWorld also writes
+  # experiment_outputs/ under here at run time.
+  appworld_root: "data/appworld"
+  # Splits: train=90, dev=57, test_normal=168, test_challenge=417.
+  appworld_train_split: "train"
+  appworld_val_split: "dev"
+  appworld_test_split: "test_normal"
+
+  # Algorithm controls
+  algorithm: "rl"
+  val_before_train: false
+  enable_value_driven: true
+  random_seed: 42
+  mode: "train"
+
+  # "Epochs" = number of sections (dataset replay count).
+  num_sections: 18             # 90 train tasks / batch_size 5 = 18 sections per pass.
+
+  # Sampling / rollout
+  batch_size: 5                # Parallel rollouts == number of AppWorld worker processes.
+  # Max agent turns per episode. AppWorld's own max_interactions defaults to
+  # 1000, which is not a useful cap -- this is the effective ceiling, enforced
+  # by the adapter. AppWorld tasks need real multi-step API exploration, so this
+  # is higher than LLB's 15.
+  max_steps: 30
+
+  # Eval frequency (0 disables)
+  valid_interval: 0            # Set >0 to run the dev split every N sections.
+  test_interval: 0
+
+  dataset_ratio: 1.0
+
+  # Unused for AppWorld (kept for schema compatibility).
+  task: "appworld"
+  split_file: ""
+  valid_file: null
+  few_shot_path: "data/alfworld/alfworld_examples.json"
+  bon: 0
+  hle_categories: null
+  hle_category_ratio: null
+  trace_jsonl_path: null
+  trace_sample_filter: null
+
+  # Checkpoint controls
+  ckpt_eval_enabled: false
+  ckpt_eval_path: null
+  ckpt_resume_enabled: false
+  ckpt_resume_path: null
+  ckpt_resume_epoch: null
+
+  # Baselines (optional)
+  baseline_mode: null
+  baseline_k: 10
+  # Retrieve memory only when the agent asks (`Skill: memory_retrieval`).
+  # Multi-step: the agent can judge from the last code output and API errors,
+  # so retrieval stays agent-driven. Only single-step BCB injects up front.
+  auto_inject_memory: false
+
+  # Static cap on memory_retrieval calls per episode -- 1 across all benchmarks,
+  # matching the legacy retrieve-once-per-episode design for a fair comparison.
+  skill_budget_per_episode: 1
+
+  # Output / logging
+  output_dir: "./results"
+  save_trajectories: true
+  save_memories: true
+  enable_logging: true
+  log_level: "INFO"
+
+rl_config:  # RL/value-driven knobs used by MemoryService and runners.
+  epsilon: 0.01
+  tau: 0.35
+  alpha: 0.3
+  gamma: 0.0

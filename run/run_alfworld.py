@@ -197,6 +197,7 @@ def main():
             skill_budget_per_episode=cfg.experiment.skill_budget_per_episode,
             tensorboard_log_dir=str(tb_dir),
             skill_contract_path=str(ALFWORLD_SKILL_DOC_PATH),
+            auto_inject_memory=cfg.experiment.auto_inject_memory,
         )
         logger.info("TensorBoard logs will be saved to %s", tb_dir)
 

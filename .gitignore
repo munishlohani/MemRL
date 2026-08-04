@@ -48,3 +48,8 @@ configs/*.local.yml
 
 ## Derived cache files (regenerated from source data, not source themselves)
 data/llb/*.normalized.json
+
+## Downloaded benchmark data (183M, re-fetch with:
+## `appworld download data --root data/appworld`). Also AppWorld's runtime
+## root -- it writes experiment_outputs/ and logs/ under here at run time.
+data/appworld/

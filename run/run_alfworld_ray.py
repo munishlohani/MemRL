@@ -221,6 +221,7 @@ def _build_runner(cfg: MempConfig, *, config_path: Path, run_root: Path, run_id:
         skill_budget_per_episode=cfg.experiment.skill_budget_per_episode,
         tensorboard_log_dir=str(tb_dir),
         skill_contract_path=str(ALFWORLD_SKILL_DOC_PATH),
+        auto_inject_memory=cfg.experiment.auto_inject_memory,
     )
 
 

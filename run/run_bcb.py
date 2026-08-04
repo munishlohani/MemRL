@@ -213,6 +213,9 @@ def main():
             skill_budget_per_episode=cfg.experiment.skill_budget_per_episode,
             tensorboard_log_dir=str(tb_dir),
             skill_contract_path=BCB_SKILL_CONTRACT_PATH,
+            # BCB is single-step, so the agent has no basis for choosing
+            # whether to retrieve -- see ExperimentConfig.auto_inject_memory.
+            auto_inject_memory=cfg.experiment.auto_inject_memory,
         )
         logger.info("TensorBoard logs will be saved to %s", tb_dir)
 
@@ -256,6 +259,7 @@ def main():
                     skill_budget_per_episode=cfg.experiment.skill_budget_per_episode,
                     tensorboard_log_dir=str(eval_tb_dir),
                     skill_contract_path=BCB_SKILL_CONTRACT_PATH,
+                    auto_inject_memory=cfg.experiment.auto_inject_memory,
                 )
                 eval_runner.memory_config.build_memory = False
                 num_val_sections = math.ceil(num_val_tasks / int(cfg.experiment.batch_size))

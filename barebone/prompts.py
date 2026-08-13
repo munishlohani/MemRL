@@ -109,7 +109,9 @@ BAREBONE_LLB_USER_TEMPLATE = (
     "Current observation:\n{current_obs}"
 )
 BAREBONE_APPWORLD_SYSTEM_PROMPT = (
-    "You are completing a task by calling app APIs from Python code.\n\n"
+    "You are completing a task by calling app APIs from Python code. An `apis` object is "
+    "already available and pre-imported; call its methods directly (e.g. apis.spotify.*). "
+    "Do not import any packages.\n\n"
     "Respond with exactly:\nAction:\n```python\n<python code to execute this turn>\n```"
 )
 

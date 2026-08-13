@@ -22,6 +22,8 @@ from memrl.bigcodebench_eval.bcb_adapter import extract_code_from_response
 from prompts import (
     BAREBONE_ALFWORLD_SYSTEM_PROMPT,
     BAREBONE_ALFWORLD_USER_TEMPLATE,
+    BAREBONE_APPWORLD_SYSTEM_PROMPT,
+    BAREBONE_APPWORLD_USER_TEMPLATE,
     BAREBONE_BCB_SYSTEM_PROMPT,
     BAREBONE_LLB_SYSTEM_PROMPT_BASE,
     BAREBONE_LLB_USER_TEMPLATE,
@@ -166,4 +168,53 @@ class BarebonLLBAgent:
         return action
 
 
-__all__ = ["BarebonAgent", "BarebonBCBAgent", "BarebonLLBAgent"]
+class BarebonAppWorldAgent:
+    """AppWorld agent: no memory, multi-turn, fenced-Python-code actions.
+
+    Same history-accumulation convention as BarebonAgent/BarebonLLBAgent:
+    the result of the PREVIOUS action (this turn's observation) completes
+    that step's history entry, recorded before building this turn's
+    prompt. Unlike BarebonBCBAgent's single call, AppWorld is a running
+    multi-turn episode (code execution is stateful across turns), so
+    history has to persist across act() calls the same way it does for
+    ALFWorld/LLB.
+
+    Code is pulled out with extract_code_from_response, the same fenced
+    ```python block regex BCB uses -- AppWorld's own action format
+    ("Action:\\n```python ... ```") is that same shape with a directive
+    line the regex simply ignores.
+    """
+
+    def __init__(self, llm_provider: Any, *, system_prompt: str = BAREBONE_APPWORLD_SYSTEM_PROMPT) -> None:
+        self.llm = llm_provider
+        self.system_prompt = system_prompt
+        self.task_description = ""
+        self._history_text = ""
+        self._last_action: Optional[str] = None
+
+    def reset(self, task_description: str = "") -> None:
+        self.task_description = task_description
+        self._history_text = ""
+        self._last_action = None
+
+    def act(self, observation: str) -> str:
+        if self._last_action is not None:
+            self._history_text += f"Action:\n```python\n{self._last_action}\n```\nOutput: {observation}\n"
+
+        user_content = BAREBONE_APPWORLD_USER_TEMPLATE.format(
+            objective=self.task_description,
+            history=self._history_text.strip() or "(none yet)",
+            current_obs=observation.strip() or "(no output yet)",
+        )
+        messages = [
+            {"role": "system", "content": self.system_prompt},
+            {"role": "user", "content": user_content},
+        ]
+
+        response = self.llm.generate(messages=messages)
+        code = extract_code_from_response(response)
+        self._last_action = code
+        return code
+
+
+__all__ = ["BarebonAgent", "BarebonBCBAgent", "BarebonLLBAgent", "BarebonAppWorldAgent"]

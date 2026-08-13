@@ -1,6 +1,6 @@
 """Standalone system prompts for the barebone (no-memory) runners.
 
-Covers all three benchmarks -- ALFWorld, BigCodeBench, and LifelongBench.
+Covers all four benchmarks -- ALFWorld, BigCodeBench, LifelongBench, and AppWorld.
 
 Plain LLM baseline: no ReAct, no memory, no skill invocation, no retrieval
 mechanism. Exactly two messages per turn (system + user) -- the user
@@ -108,6 +108,16 @@ BAREBONE_LLB_USER_TEMPLATE = (
     "Interaction history so far:\n{history}\n\n"
     "Current observation:\n{current_obs}"
 )
+BAREBONE_APPWORLD_SYSTEM_PROMPT = (
+    "You are completing a task by calling app APIs from Python code.\n\n"
+    "Respond with exactly:\nAction:\n```python\n<python code to execute this turn>\n```"
+)
+
+BAREBONE_APPWORLD_USER_TEMPLATE = (
+    "Task:\n{objective}\n\n"
+    "Interaction history so far:\n{history}\n\n"
+    "Output of your last code block:\n{current_obs}"
+)
 
 
 __all__ = [
@@ -119,4 +129,6 @@ __all__ = [
     "BAREBONE_LLB_DB_OUTPUT_FORMAT",
     "barebone_llb_output_format",
     "BAREBONE_LLB_USER_TEMPLATE",
+    "BAREBONE_APPWORLD_SYSTEM_PROMPT",
+    "BAREBONE_APPWORLD_USER_TEMPLATE",
 ]

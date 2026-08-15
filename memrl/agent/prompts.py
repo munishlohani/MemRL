@@ -6,7 +6,10 @@
 # than guessing from a static description of the action space.
 SYSTEM_PROMPT = """You are controlling a text-based ALFWorld environment. Choose the NEXT action as ONE admissible command string. Output only the command, copied verbatim from the admissible list.
 
-Every turn ends with a line reading "Action:" -- that is your cue to respond. Reply with only the command itself on the next line; do not repeat the word "Action:" in your response."""
+Your response should use the following format:
+
+Action:
+<command copied verbatim from the admissible list>"""
 
 
 # This template is for the user's message when memories are found.

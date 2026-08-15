@@ -239,13 +239,28 @@ class MempAgent(BaseAgent):
         a trailing "Action:" cue, so the expected/normal case is the model
         just continuing with the bare command (no "Action:" restated) --
         only strip an "Action:" prefix if the model echoed it back anyway.
+
+        Prefers the FIRST non-empty segment after an "Action:" marker, not
+        the last: some models answer correctly and then echo (or pattern-
+        continue into) a second, trailing "Action:" cue -- e.g.
+        "go to shelf 1\nAction:" -- and splitting on the LAST occurrence
+        throws away the real answer in favor of what comes after that
+        trailing cue, which is empty. Observed in production as
+        `act()` returning '' instead of a command.
         """
-        if llm_response:
-            if "Action:" in llm_response:
-                return llm_response.split("Action:")[-1].strip()
-            return llm_response.strip()
-        else:
+        if not llm_response:
             return 'look around'
+        if "Action:" not in llm_response:
+            return llm_response.strip()
+
+        segments = [s.strip() for s in llm_response.split("Action:")[1:]]
+        for segment in segments:
+            if segment:
+                return segment
+        # Every segment after "Action:" was empty -- fall back to whatever
+        # text preceded the first marker.
+        lead = llm_response.split("Action:")[0].strip()
+        return lead or 'look around'
     def act(
         self,
         observation: str,
